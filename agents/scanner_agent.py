@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from crewai import Agent
-from skills.nmap_tool import NmapTool, QuickNmapTool, FullNmapTool
+from skills.nmap_scan.nmap_tool import NmapTool, QuickNmapTool, FullNmapTool
 from prompts.scanner_prompts import SCANNER_AGENT_PROMPT
 
 

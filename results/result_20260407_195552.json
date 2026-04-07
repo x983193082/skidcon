@@ -1,0 +1,8 @@
+{
+  "session_id": "20260407_195552",
+  "target": "http://localhost:8080",
+  "model": "z-ai/glm-5",
+  "timestamp": "2026-04-07T19:56:37.221013",
+  "error": "Invalid response from LLM call - None or empty.",
+  "status": "failed"
+}

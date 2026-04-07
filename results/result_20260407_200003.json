@@ -1,0 +1,8 @@
+{
+  "session_id": "20260407_200003",
+  "target": "http://localhost:8080",
+  "model": "z-ai/glm-5",
+  "timestamp": "2026-04-07T20:08:34.748262",
+  "error": "litellm.APIError: APIError: OpenrouterException - peer closed connection without sending complete message body (incomplete chunked read)",
+  "status": "failed"
+}
