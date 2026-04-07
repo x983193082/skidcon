@@ -139,6 +139,17 @@ PLANNER_AGENT_PROMPT = """你是PentestAI的渗透策略专家，擅长分析扫
 - 记录所有分析过程和判断依据
 - 每个漏洞都要有对应的测试方法
 - 如果不确定漏洞是否存在，标记为"待验证"
+
+## 工具使用规范
+
+当你需要委托其他agent执行任务时，必须使用 delegate_work_to_coworker 工具，并传入完整参数：
+- coworker: 填 "信息收集专家"
+- task: 详细描述任务
+- context: 提供所有必要的上下文信息（如目标地址等）
+
+示例：
+Action: delegate_work_to_coworker
+Action Input: {"coworker": "信息收集专家", "task": "扫描端口", "context": "目标: 192.168.1.1"}
 """
 
 
