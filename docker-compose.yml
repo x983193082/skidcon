@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  # 本地开发模式
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pentestai-dev
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DEFAULT_MODEL=z-ai/glm-5
+    volumes:
+      - ./logs:/app/logs
+      - ./results:/app/results
+      - ./workspace:/app/workspace
+    network_mode: host
+    restart: unless-stopped
+
+  # Docker部署模式（生产）
+  prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pentestai-prod
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DEFAULT_MODEL=z-ai/glm-5
+    volumes:
+      - pentestai-logs:/app/logs
+      - pentestai-results:/app/results
+      - pentestai-workspace:/app/workspace
+    restart: unless-stopped
+    command: >
+      python main.py
+      --target ${TARGET:-127.0.0.1}
+      --model ${DEFAULT_MODEL:-z-ai/glm-5}
+
+volumes:
+  pentestai-logs:
+  pentestai-results:
+  pentestai-workspace:
