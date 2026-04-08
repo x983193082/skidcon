@@ -1,0 +1,140 @@
+# 攻击模式配置文件
+# 定义常见的攻击模式和方法论
+
+attack_patterns:
+  # Web应用攻击模式
+  web_app:
+    name: "Web应用渗透测试"
+    description: "针对Web应用的渗透测试方法论"
+    phases:
+      - name: "信息收集"
+        steps:
+          - "子域名枚举"
+          - "目录扫描"
+          - "技术栈识别"
+          - "端口扫描"
+      - name: "漏洞发现"
+        steps:
+          - "SQL注入检测"
+          - "XSS检测"
+          - "CSRF检测"
+          - "文件上传漏洞"
+          - "认证绕过"
+      - name: "漏洞利用"
+        steps:
+          - "漏洞验证"
+          - "获取shell"
+          - "权限维持"
+      - name: "后渗透"
+        steps:
+          - "权限提升"
+          - "横向移动"
+          - "数据收集"
+    tools:
+      - nmap
+      - sqlmap
+      - subfinder
+      - httpx
+
+  # 网络渗透模式
+  network:
+    name: "网络渗透测试"
+    description: "针对内网环境的渗透测试方法论"
+    phases:
+      - name: "信息收集"
+        steps:
+          - "主机发现"
+          - "端口扫描"
+          - "服务识别"
+          - "漏洞扫描"
+      - name: "漏洞利用"
+        steps:
+          - "漏洞验证"
+          - "获取访问"
+          - "建立立足点"
+      - name: "后渗透"
+        steps:
+          - "信息收集"
+          - "权限提升"
+          - "横向移动"
+          - "持久化"
+    tools:
+      - nmap
+      - metasploit
+      - masscan
+
+  # API安全测试模式
+  api_security:
+    name: "API安全测试"
+    description: "针对API接口的安全测试方法论"
+    phases:
+      - name: "API发现"
+        steps:
+          - "端点枚举"
+          - "参数发现"
+          - "认证机制分析"
+      - name: "漏洞测试"
+        steps:
+          - "认证绕过"
+          - "授权绕过"
+          - "注入测试"
+          - "速率限制测试"
+      - name: "业务逻辑"
+        steps:
+          - "越权测试"
+          - "数据泄露测试"
+    tools:
+      - nmap
+      - httpx
+
+# CVE利用配置
+cve_exploits:
+  - cve_id: "CVE-2021-44228"
+    name: "Log4Shell"
+    severity: "critical"
+    exploit_available: true
+    tools:
+      - metasploit
+      - custom_poc
+
+  - cve_id: "CVE-2022-22965"
+    name: "Spring4Shell"
+    severity: "critical"
+    exploit_available: true
+    tools:
+      - metasploit
+      - custom_poc
+
+  - cve_id: "CVE-2021-26855"
+    name: "ProxyLogon"
+    severity: "critical"
+    exploit_available: true
+    tools:
+      - metasploit
+
+# MITRE ATT&CK映射
+mitre_attack:
+  recon:
+    - "T1595"
+    - "T1592"
+  initial_access:
+    - "T1190"
+    - "T1133"
+  execution:
+    - "T1059"
+    - "T1203"
+  persistence:
+    - "T1053"
+    - "T1547"
+  privilege_escalation:
+    - "T1068"
+    - "T1548"
+  lateral_movement:
+    - "T1021"
+    - "T1210"
+  collection:
+    - "T1005"
+    - "T1074"
+  exfiltration:
+    - "T1041"
+    - "T1048"

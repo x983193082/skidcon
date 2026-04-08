@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  # API服务
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: pentest-crew-api
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - VECTOR_DB_URL=http://chroma:8000
+      - LOG_LEVEL=INFO
+    depends_on:
+      - redis
+      - chroma
+    volumes:
+      - ../config:/app/config:ro
+      - ../reports:/app/reports
+    networks:
+      - pentest-network
+    restart: unless-stopped
+
+  # Worker服务
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: pentest-crew-worker
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - VECTOR_DB_URL=http://chroma:8000
+      - LOG_LEVEL=INFO
+    depends_on:
+      - redis
+      - chroma
+    volumes:
+      - ../config:/app/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - pentest-network
+    restart: unless-stopped
+
+  # Redis - 任务队列
+  redis:
+    image: redis:7-alpine
+    container_name: pentest-crew-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - pentest-network
+    restart: unless-stopped
+
+  # Chroma - 向量数据库
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: pentest-crew-chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - ALLOW_RESET=TRUE
+    networks:
+      - pentest-network
+    restart: unless-stopped
+
+  # Qdrant - 向量数据库（可选）
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: pentest-crew-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - pentest-network
+    restart: unless-stopped
+    profiles:
+      - qdrant
+
+  # Neo4j - 图数据库（可选）
+  neo4j:
+    image: neo4j:5-community
+    container_name: pentest-crew-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/pentest123
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j-data:/data
+    networks:
+      - pentest-network
+    restart: unless-stopped
+    profiles:
+      - graph
+
+networks:
+  pentest-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  chroma-data:
+  qdrant-data:
+  neo4j-data:

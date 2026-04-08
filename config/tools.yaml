@@ -1,0 +1,129 @@
+# 工具配置文件
+# 定义安全工具的参数和行为
+
+tools:
+  nmap:
+    name: "Nmap"
+    category: "scanner"
+    description: "网络扫描工具"
+    enabled: true
+    risk_level: "low"
+    command: "/usr/bin/nmap"
+    profiles:
+      quick:
+        args: "-T4 -F"
+        timeout: 60
+      default:
+        args: "-T4 -p- -sV -sC"
+        timeout: 300
+      full:
+        args: "-T4 -p- -sV -sC -A -O"
+        timeout: 600
+      vuln:
+        args: "-T4 -p- --script vuln"
+        timeout: 600
+    output_parser: "nmap_xml"
+    requires_root: false
+
+  sqlmap:
+    name: "SQLMap"
+    category: "exploit"
+    description: "SQL注入检测和利用工具"
+    enabled: true
+    risk_level: "high"
+    command: "/usr/bin/sqlmap"
+    profiles:
+      default:
+        args: "--batch --level=3 --risk=2"
+        timeout: 300
+      safe:
+        args: "--batch --level=1 --risk=1"
+        timeout: 120
+    output_parser: "sqlmap_json"
+    requires_root: false
+    safe_mode: true
+
+  metasploit:
+    name: "Metasploit"
+    category: "exploit"
+    description: "渗透测试框架"
+    enabled: true
+    risk_level: "critical"
+    command: "msfconsole"
+    rpc:
+      host: "localhost"
+      port: 55553
+      password: "pentest123"
+    modules:
+      - exploit
+      - auxiliary
+      - post
+    output_parser: "metasploit_json"
+    requires_root: true
+    safe_mode: true
+
+  masscan:
+    name: "Masscan"
+    category: "scanner"
+    description: "高速端口扫描工具"
+    enabled: true
+    risk_level: "medium"
+    command: "/usr/bin/masscan"
+    profiles:
+      default:
+        args: "-p 1-65535 --rate=1000"
+        timeout: 300
+    output_parser: "masscan_json"
+    requires_root: true
+
+  subfinder:
+    name: "Subfinder"
+    category: "recon"
+    description: "子域名枚举工具"
+    enabled: true
+    risk_level: "low"
+    command: "/usr/bin/subfinder"
+    profiles:
+      default:
+        args: "-silent -all"
+        timeout: 120
+    output_parser: "subfinder_txt"
+    requires_root: false
+
+  httpx:
+    name: "Httpx"
+    category: "recon"
+    description: "HTTP探测工具"
+    enabled: true
+    risk_level: "low"
+    command: "/usr/bin/httpx"
+    profiles:
+      default:
+        args: "-silent -status-code -title -tech-detect"
+        timeout: 120
+    output_parser: "httpx_json"
+    requires_root: false
+
+# 工具执行配置
+execution:
+  sandbox_enabled: true
+  sandbox_image: "pentest-toolkit:latest"
+  max_concurrent: 5
+  default_timeout: 300
+  retry_on_failure: true
+  max_retries: 3
+
+# 输出解析器配置
+parsers:
+  nmap_xml:
+    type: "xml"
+    schema: "nmap"
+  sqlmap_json:
+    type: "json"
+    schema: "sqlmap"
+  metasploit_json:
+    type: "json"
+    schema: "metasploit"
+  masscan_json:
+    type: "json"
+    schema: "masscan"

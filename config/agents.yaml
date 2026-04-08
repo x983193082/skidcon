@@ -1,0 +1,99 @@
+# Agent配置文件
+# 定义各个Agent的行为和能力
+
+agents:
+  recon_agent:
+    name: "ReconAgent"
+    role: "信息收集专家"
+    description: "负责目标侦察、端口扫描、服务识别等信息收集工作"
+    enabled: true
+    priority: 1
+    tools:
+      - nmap
+      - masscan
+      - subfinder
+      - httpx
+    config:
+      max_retries: 3
+      timeout: 300
+      parallel_tasks: 5
+    llm:
+      model: "gpt-4"
+      temperature: 0.3
+      max_tokens: 2000
+
+  exploit_agent:
+    name: "ExploitAgent"
+    role: "漏洞利用专家"
+    description: "负责漏洞验证和利用，获取初始访问权限"
+    enabled: true
+    priority: 2
+    tools:
+      - sqlmap
+      - metasploit
+      - custom_poc
+    config:
+      max_retries: 2
+      timeout: 600
+      safe_mode: true
+    llm:
+      model: "gpt-4"
+      temperature: 0.2
+      max_tokens: 3000
+
+  privilege_agent:
+    name: "PrivilegeAgent"
+    role: "权限提升专家"
+    description: "负责权限提升和持久化"
+    enabled: true
+    priority: 3
+    tools:
+      - linpeas
+      - winpeas
+      - mimikatz
+    config:
+      max_retries: 2
+      timeout: 600
+    llm:
+      model: "gpt-4"
+      temperature: 0.2
+      max_tokens: 2000
+
+  report_agent:
+    name: "ReportAgent"
+    role: "报告生成专家"
+    description: "负责汇总发现并生成渗透测试报告"
+    enabled: true
+    priority: 4
+    tools:
+      - report_generator
+    config:
+      output_formats:
+        - html
+        - pdf
+        - json
+    llm:
+      model: "gpt-4"
+      temperature: 0.5
+      max_tokens: 4000
+
+# Agent协作配置
+collaboration:
+  mode: "sequential"  # sequential | parallel | hierarchical
+  max_iterations: 10
+  memory_enabled: true
+  allow_delegation: true
+
+# Agent约束
+constraints:
+  max_execution_time: 3600
+  max_tools_per_agent: 5
+  require_human_approval: true
+  allowed_actions:
+    - scan
+    - exploit
+    - report
+  forbidden_actions:
+    - delete
+    - modify_system
+    - lateral_movement
