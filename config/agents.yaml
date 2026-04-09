@@ -17,6 +17,10 @@ agents:
       max_retries: 3
       timeout: 300
       parallel_tasks: 5
+      scan_profiles: # 新增：扫描配置
+        - quick               # 快速扫描
+        - full                # 全端口扫描
+        - vuln                # 漏洞扫描
     llm:
       model: "gpt-4"
       temperature: 0.3

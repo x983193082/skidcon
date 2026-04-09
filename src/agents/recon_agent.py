@@ -15,18 +15,19 @@ class ReconAgent(BaseAgent):
     信息收集Agent
 
     职责：
-    - 端口扫描
+    - 端口扫描（支持多种扫描类型）
     - 服务版本检测
     - 子域名枚举
     - Web技术栈识别
     """
     # 类常量：常见的Web端口
     WEB_PORTS = {80, 443, 8080, 8443}
+
     def __init__(
-        self,
-        name: str = "ReconAgent",
-        description: str = "负责目标信息收集和侦察",
-        config: Dict[str, Any] = None
+            self,
+            name: str = "ReconAgent",
+            description: str = "负责目标信息收集和侦察",
+            config: Dict[str, Any] = None
     ):
         super().__init__(
             name=name,
@@ -36,19 +37,22 @@ class ReconAgent(BaseAgent):
         )
         # 初始化扫描工具
         self.nmap = NmapWrapper()
-        self.masscan = None  # 未来添加: MasscanWrapper()
+        self.masscan = None
         self.add_tool(self.nmap)
-    async def execute(self, target: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """
-        执行信息收集 - 主流程
 
-        执行顺序：
-        1. 端口扫描（必须先执行，后续依赖端口列表）
-        2. 并发执行：服务检测 + 子域名枚举 + 技术识别
-        """
+        # 从config读取扫描配置，默认为 ["quick"]
+        # 支持: quick, full, vuln
+        scan_profiles = config.get("scan_profiles", ["quick"]) if config else ["quick"]
+        # 过滤掉无效的扫描类型
+        valid_scans = {"quick", "full", "vuln"}
+        self.supported_scans = [s for s in scan_profiles if s in valid_scans]
+        if not self.supported_scans:
+            self.supported_scans = ["quick"]
+
+    async def execute(self, target: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """执行信息收集 - 支持多种扫描类型"""
         self.update_state(AgentState.RUNNING)
         context = context or {}
-        # 初始化结果字典
         result = {
             "target": target,
             "scan_time": datetime.now().isoformat(),
@@ -57,29 +61,32 @@ class ReconAgent(BaseAgent):
             "services": [],
             "subdomains": [],
             "technologies": [],
-            "vulnerabilities": []
+            "vulnerabilities": [],
+            "scan_profiles_used": self.supported_scans  # 记录使用的扫描配置
         }
         try:
-            # 步骤1：端口扫描
-            logger.info(f"Step 1: Port scan on {target}")
-            result = await self._run_port_scan(target, result)
-            # 步骤2：并发执行三个任务
-            # 注意：这三个任务之间没有依赖关系，可以并发执行提升性能
+            # 步骤1：根据配置的扫描类型执行扫描
+            logger.info(f"Step 1: Port scan with profiles: {self.supported_scans}")
+
+            for scan_type in self.supported_scans:
+                logger.info(f"Running {scan_type} scan...")
+                result = await self._run_scan(target, result, scan_type)
+
+                if result.get("ports") and scan_type != self.supported_scans[-1]:
+                    logger.info(f"Found {len(result['ports'])} ports, continuing...")
+            # 步骤2：并发执行服务检测、子域名枚举、技术识别
             logger.info("Step 2: 并发执行服务检测、子域名枚举、技术识别")
-            service_task = self._detect_service_versions(target, result)
+            service_task = self._detect_services(target, result)
             subdomain_task = self._enumerate_subdomains(target)
             tech_task = self._detect_technologies(target, result["ports"])
-            # asyncio.gather 并发等待所有任务完成
             updated_result, subdomains, technologies = await asyncio.gather(
                 service_task,
                 subdomain_task,
                 tech_task
             )
-            # 合并结果
             result = updated_result
             result["subdomains"] = subdomains
             result["technologies"] = technologies
-            # 保存上下文，供其他Agent使用
             self.set_context(result)
             self.update_state(AgentState.COMPLETED)
             return result
@@ -91,79 +98,154 @@ class ReconAgent(BaseAgent):
                 "error": str(e),
                 "success": False
             }
-    async def _run_port_scan(self, target: str, result: Dict) -> Dict:
+    async def _run_scan(self, target: str, result: Dict, scan_type: str = "quick") -> Dict:
         """
-        遍历所有扫描工具执行端口扫描
+        通用扫描方法 - 遍历所有工具执行指定类型的扫描
 
-        设计思路：
-        - 遍历 self.tools 列表中的所有工具
-        - 检查工具是否有 quick_scan 方法
-        - 收集所有工具的扫描结果
+        Args:
+            target: 目标地址
+            result: 结果字典
+            scan_type: 扫描类型 (quick/full/vuln/stealth)
+
+        Example:
+            await self._run_scan(target, result, "quick")    # 快速扫描
+            await self._run_scan(target, result, "full")     # 全端口扫描
+            await self._run_scan(target, result, "vuln")     # 漏洞扫描
         """
         all_hosts = []
         all_ports = []
+
+        # 根据 scan_type 构建方法名
+        method_name = f"{scan_type}_scan"
         for tool in self.tools:
-            # 检查工具是否有 quick_scan 方法（动态调用）
-            if not hasattr(tool, 'quick_scan'):
-                continue
-            try:
-                scan_result = await tool.quick_scan(target)
-                # 防御性检查：确保返回数据有效
-                if not (scan_result.success and scan_result.data):
-                    logger.debug(f"Tool {tool.name} returned invalid data")
-                    continue
-                # 遍历扫描结果
-                for host in scan_result.data.get("hosts", []):
-                    all_hosts.append({
-                        "address": host.get("address"),
-                        "status": "up" if host.get("ports") else "down",
-                        "scanner": tool.name  # 记录是哪个工具扫描到的
-                    })
-                    for port in host.get("ports", []):
-                        if port.get("state") == "open":
-                            all_ports.append({
-                                "port": port.get("port"),
-                                "protocol": port.get("protocol"),
-                                "service": port.get("service"),
-                                "state": "open",
-                                "scanner": tool.name
-                            })
-            except Exception as e:
-                logger.exception(f"Tool {tool.name} port scan failed")
+            # 优先尝试调用对应的扫描方法
+            if hasattr(tool, method_name):
+                try:
+                    scan_result = await getattr(tool, method_name)(target)
+
+                    # 防御性检查：确保返回数据有效
+                    if not (scan_result.success and scan_result.data):
+                        logger.debug(f"Tool {tool.name} {scan_type} scan returned invalid data")
+                        continue
+
+                    # 处理扫描结果
+                    for host in scan_result.data.get("hosts", []):
+                        all_hosts.append({
+                            "address": host.get("address"),
+                            "status": "up" if host.get("ports") else "down",
+                            "scanner": tool.name,
+                            "scan_type": scan_type
+                        })
+
+                        for port in host.get("ports", []):
+                            if port.get("state") == "open":
+                                all_ports.append({
+                                    "port": port.get("port"),
+                                    "protocol": port.get("protocol"),
+                                    "service": port.get("service"),
+                                    "state": "open",
+                                    "scanner": tool.name,
+                                    "scan_type": scan_type
+                                })
+                except Exception as e:
+                    logger.exception(f"Tool {tool.name} {scan_type} scan failed")
+
+            # 如果工具没有对应的扫描方法，尝试通用 execute 方法
+            elif hasattr(tool, 'execute'):
+                try:
+                    # 尝试使用 profile 参数调用通用 execute
+                    scan_result = await tool.execute(target, {"profile": scan_type})
+
+                    if not (scan_result.success and scan_result.data):
+                        logger.debug(f"Tool {tool.name} execute with profile {scan_type} failed")
+                        continue
+
+                    # 处理结果（同上）
+                    for host in scan_result.data.get("hosts", []):
+                        all_hosts.append({
+                            "address": host.get("address"),
+                            "status": "up" if host.get("ports") else "down",
+                            "scanner": tool.name,
+                            "scan_type": scan_type
+                        })
+
+                        for port in host.get("ports", []):
+                            if port.get("state") == "open":
+                                all_ports.append({
+                                    "port": port.get("port"),
+                                    "protocol": port.get("protocol"),
+                                    "service": port.get("service"),
+                                    "state": "open",
+                                    "scanner": tool.name,
+                                    "scan_type": scan_type
+                                })
+                except Exception as e:
+                    logger.exception(f"Tool {tool.name} execute failed")
         result["hosts"] = all_hosts
         result["ports"] = all_ports
         return result
-    async def _detect_service_versions(self, target: str, result: Dict) -> Dict:
+    async def _detect_services(self, target: str, result: Dict) -> Dict:
         """
-        遍历所有工具检测服务版本
+        通用服务检测 - 遍历所有工具检测服务版本
 
-        检测逻辑：
-        - 只检测 WEB_PORTS 中的端口（80, 443, 8080, 8443）
-        - 以及特权端口（< 1024）
+        尝试调用工具的以下方法（按优先级）：
+        1. service_scan - 专用服务扫描
+        2. version_scan - 版本检测
+        3. execute - 通用执行（带service参数）
         """
         services = []
+
+        # 尝试的方法名列表（按优先级）
+        method_names = ["service_scan", "version_scan"]
         for tool in self.tools:
-            if not hasattr(tool, 'service_scan'):
-                continue
-            try:
-                service_result = await tool.service_scan(target)
-                if not (service_result.success and service_result.data):
-                    logger.debug(f"Tool {tool.name} service scan failed")
-                    continue
-                for host in service_result.data.get("hosts", []):
-                    for svc in host.get("ports", []):
-                        if svc.get("state") == "open":
-                            port = svc.get("port")
-                            # 只检测Web端口和特权端口
-                            if port in self.WEB_PORTS or (isinstance(port, int) and port < 1024):
-                                services.append({
-                                    "port": port,
-                                    "service": svc.get("service"),
-                                    "version": "detected",
-                                    "scanner": tool.name
-                                })
-            except Exception as e:
-                logger.exception(f"Tool {tool.name} service scan failed")
+            method_found = False
+
+            # 尝试工具支持的检测方法
+            for method_name in method_names:
+                if hasattr(tool, method_name):
+                    method_found = True
+                    try:
+                        service_result = await getattr(tool, method_name)(target)
+                        if not (service_result.success and service_result.data):
+                            logger.debug(f"Tool {tool.name} {method_name} returned invalid data")
+                            continue
+                        # 处理服务结果
+                        for host in service_result.data.get("hosts", []):
+                            for svc in host.get("ports", []):
+                                if svc.get("state") == "open":
+                                    port = svc.get("port")
+                                    # 只检测Web端口和特权端口
+                                    if port in self.WEB_PORTS or (isinstance(port, int) and port < 1024):
+                                        services.append({
+                                            "port": port,
+                                            "service": svc.get("service"),
+                                            "version": "detected",
+                                            "scanner": tool.name,
+                                            "method": method_name
+                                        })
+                    except Exception as e:
+                        logger.exception(f"Tool {tool.name} {method_name} failed")
+                    break  # 找到一个有效方法就退出
+
+            # 如果工具没有专用方法，尝试通用execute
+            if not method_found and hasattr(tool, 'execute'):
+                try:
+                    result_obj = await tool.execute(target, {"profile": "service"})
+                    if result_obj.success and result_obj.data:
+                        for host in result_obj.data.get("hosts", []):
+                            for svc in host.get("ports", []):
+                                if svc.get("state") == "open":
+                                    port = svc.get("port")
+                                    if port in self.WEB_PORTS or (isinstance(port, int) and port < 1024):
+                                        services.append({
+                                            "port": port,
+                                            "service": svc.get("service"),
+                                            "version": "detected",
+                                            "scanner": tool.name,
+                                            "method": "execute"
+                                        })
+                except Exception as e:
+                    logger.exception(f"Tool {tool.name} execute service detection failed")
         result["services"] = services
         return result
     async def _enumerate_subdomains(self, target: str) -> List[Dict[str, str]]:
@@ -172,11 +254,7 @@ class ReconAgent(BaseAgent):
 
         实现思路：
         1. 先检测是否存在泛解析（Wildcard DNS）
-           - 随机生成一个不可能存在的子域名
-           - 如果能解析出IP，说明存在泛解析
         2. 并发解析所有常见子域名前缀
-           - 使用 getaddrinfo 替代 gethostbyname（推荐）
-           - 过滤掉泛解析的IP
         """
         common_prefixes = [
             "www", "mail", "ftp", "localhost", "webmail", "smtp",
@@ -187,10 +265,8 @@ class ReconAgent(BaseAgent):
             "mysql", "old", "lists", "support", "mobile", "mx",
             "static", "docs", "beta", "shop", "sql", "secure"
         ]
-
         loop = asyncio.get_event_loop()
         # ==== 步骤1: 检测泛解析 ====
-        # 随机生成一个子域名，检测是否有泛解析
         random_sub = f"no-such-subdomain-{os.urandom(4).hex()}.{target}"
         wildcard_ip = None
         try:
@@ -198,14 +274,13 @@ class ReconAgent(BaseAgent):
             if wildcard_ip:
                 logger.info(f"检测到泛解析: {target} -> {wildcard_ip}")
         except socket.gaierror:
-            wildcard_ip = None  # 无泛解析
+            wildcard_ip = None
         # ==== 步骤2: 定义解析函数 ====
         async def resolve(prefix: str) -> Optional[Dict[str, str]]:
             subdomain = f"{prefix}.{target}"
             try:
                 def _resolve():
                     try:
-                        # getaddrinfo 返回 [(family, type, proto, canonname, sockaddr)]
                         result = socket.getaddrinfo(subdomain, None)
                         return result[0][4][0] if result else None
                     except socket.gaierror:
@@ -223,11 +298,9 @@ class ReconAgent(BaseAgent):
         # ==== 步骤3: 并发解析 ====
         tasks = [resolve(prefix) for prefix in common_prefixes]
         results = await asyncio.gather(*tasks)
-
         # 过滤掉 None 值
         subdomains = [res for res in results if res is not None]
         return subdomains
-
     async def _detect_technologies(self, target: str, ports: List[Dict]) -> List[str]:
         """
         异步识别 Web 技术栈
