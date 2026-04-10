@@ -66,3 +66,7 @@ markdown>=3.5.0
 
 # 安全工具Python绑定
 python-nmap>=0.7.1
+
+pyxploitdb>=0.1.0
+
+python-dateutil>=2.8.0

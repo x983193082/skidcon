@@ -40,6 +40,10 @@ agents:
       max_retries: 2
       timeout: 600
       safe_mode: true
+      enable_knowledge_base: true
+      reverse_shell:
+          lhost: "127.0.0.1"    # 你的监听IP
+          lport: 4444           # 你的监听端口
     llm:
       model: "gpt-4"
       temperature: 0.2
