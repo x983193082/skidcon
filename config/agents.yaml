@@ -67,6 +67,8 @@ agents:
     config:
       max_retries: 2
       timeout: 600
+      enable_persistence: true
+      persistence_methods: 3
     llm:
       model: "gpt-4"
       temperature: 0.2
