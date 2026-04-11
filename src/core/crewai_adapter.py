@@ -24,12 +24,12 @@ class CrewAIAdapter:
     - 创建和管理 Crew
     - 支持 streaming 输出
     - 支持任务状态持久化
+    - 支持运行时变量替换
     """
 
     def __init__(self, llm_client: Optional[LLMClient] = None):
         self.llm_client = llm_client or get_llm_client()
         self.llm = self.llm_client.get_langchain_llm()
-        self.knowledge_tools = get_knowledge_tools()
 
         try:
             from config.prompts.manager import get_prompt_manager
@@ -52,48 +52,57 @@ class CrewAIAdapter:
         Returns:
             CrewAI Agent
         """
-        agent_type = base_agent.role.value
+        # 确保 agent_type 为小写，与 PromptManager 的键匹配
+        agent_type = base_agent.role.value.lower()
 
         if self.prompt_manager:
             role = self.prompt_manager.get_role(agent_type)
-            goal_template = self.prompt_manager.get_goal(agent_type, target="{target}")
+            goal = self.prompt_manager.get_goal(agent_type)  # 不提前替换变量
             backstory = self.prompt_manager.get_backstory(agent_type)
 
             if not role:
                 role = self._get_agent_role(base_agent.role)
-            if not goal_template:
-                goal_template = self._get_agent_goal(base_agent.role)
+            if not goal:
+                goal = self._get_agent_goal(base_agent.role)
             if not backstory:
                 backstory = self._get_agent_backstory(
                     base_agent.role, base_agent.description
                 )
         else:
             role = self._get_agent_role(base_agent.role)
-            goal_template = self._get_agent_goal(base_agent.role)
+            goal = self._get_agent_goal(base_agent.role)
             backstory = self._get_agent_backstory(
                 base_agent.role, base_agent.description
             )
 
+        # 收集工具，并去重
         tools = list(getattr(base_agent, "tools", [])) or []
-
         if extra_tools:
             tools.extend(extra_tools)
-
         tools.extend(AVAILABLE_KNOWLEDGE_TOOLS)
+
+        # 简单去重（基于工具名称或对象）
+        unique_tools = []
+        seen = set()
+        for tool in tools:
+            tool_id = getattr(tool, "name", id(tool))
+            if tool_id not in seen:
+                seen.add(tool_id)
+                unique_tools.append(tool)
 
         crewai_agent = Agent(
             role=role,
-            goal=goal_template,
+            goal=goal,
             backstory=backstory,
             llm=self.llm,
-            tools=tools,
+            tools=unique_tools,
             verbose=kwargs.get("verbose", True),
             max_iter=kwargs.get("max_iterations", 20),
             allow_delegation=kwargs.get("allow_delegation", False),
             memory=kwargs.get("memory", True),
         )
 
-        logger.info(f"Created CrewAI Agent: {role} with {len(tools)} tools")
+        logger.info(f"Created CrewAI Agent: {role} with {len(unique_tools)} tools")
         return crewai_agent
 
     def create_task(
@@ -166,7 +175,7 @@ class CrewAIAdapter:
 
         Args:
             crew: CrewAI Crew 实例
-            inputs: 输入参数
+            inputs: 输入参数（会替换 Agent 中的变量占位符）
             stream_handler: 流式输出回调 async def(event_type: str, data: Dict)
             task_store: 任务状态存储（需实现 update_status 方法）
             task_id: 任务 ID（用于持久化）
@@ -175,6 +184,9 @@ class CrewAIAdapter:
             Crew 执行结果
         """
         logger.info(f"Starting crew execution with inputs: {inputs}")
+
+        # 替换 Agent 中的变量占位符（role、goal、backstory）
+        self._replace_agent_variables(crew, inputs)
 
         if task_store and task_id:
             await task_store.update_status(task_id, "running", "starting")
@@ -206,8 +218,53 @@ class CrewAIAdapter:
 
             raise
 
+    def _replace_agent_variables(self, crew: Crew, inputs: Dict[str, Any]) -> None:
+        """
+        替换 Agent 中的变量占位符
+
+        支持替换 role、goal、backstory 中的 {key} 占位符
+
+        Args:
+            crew: CrewAI Crew 实例
+            inputs: 输入参数字典，会遍历所有 key-value 进行替换
+        """
+        if not inputs:
+            return
+
+        for agent in crew.agents:
+            # 替换 role
+            if hasattr(agent, "role") and agent.role:
+                role = agent.role
+                for key, value in inputs.items():
+                    placeholder = f"{{{key}}}"
+                    if placeholder in role:
+                        role = role.replace(placeholder, str(value))
+                agent.role = role
+
+            # 替换 goal
+            if hasattr(agent, "goal") and agent.goal:
+                goal = agent.goal
+                for key, value in inputs.items():
+                    placeholder = f"{{{key}}}"
+                    if placeholder in goal:
+                        goal = goal.replace(placeholder, str(value))
+                agent.goal = goal
+
+            # 替换 backstory
+            if hasattr(agent, "backstory") and agent.backstory:
+                backstory = agent.backstory
+                for key, value in inputs.items():
+                    placeholder = f"{{{key}}}"
+                    if placeholder in backstory:
+                        backstory = backstory.replace(placeholder, str(value))
+                agent.backstory = backstory
+
+            logger.debug(
+                f"Replaced variables for agent: {getattr(agent, 'role', 'unknown')[:30]}..."
+            )
+
     def _get_agent_role(self, role: AgentRole) -> str:
-        """获取 Agent 角色名称"""
+        """获取 Agent 角色名称（回退用）"""
         role_map = {
             AgentRole.RECON: "Reconnaissance Specialist",
             AgentRole.EXPLOIT: "Exploitation Expert",
@@ -217,7 +274,7 @@ class CrewAIAdapter:
         return role_map.get(role, "Security Expert")
 
     def _get_agent_goal(self, role: AgentRole) -> str:
-        """获取 Agent 目标"""
+        """获取 Agent 目标（回退用）"""
         goal_map = {
             AgentRole.RECON: "发现目标的所有开放端口、服务版本、Web 技术栈和潜在入口点",
             AgentRole.EXPLOIT: "利用发现的漏洞获取目标访问权限，获取初始 shell",
@@ -227,7 +284,7 @@ class CrewAIAdapter:
         return goal_map.get(role, "完成安全评估任务")
 
     def _get_agent_backstory(self, role: AgentRole, description: str) -> str:
-        """获取 Agent 背景故事"""
+        """获取 Agent 背景故事（回退用）"""
         backstory_map = {
             AgentRole.RECON: """你是一名专业的渗透测试工程师，精通各种信息收集和扫描技术。
             你熟悉 Nmap、Masscan 等扫描工具，能够快速识别目标的网络拓扑和开放服务。
