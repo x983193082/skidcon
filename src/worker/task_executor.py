@@ -8,6 +8,11 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 from loguru import logger
 
+from ..agents.recon_agent import ReconAgent
+from ..agents.exploit_agent import ExploitAgent
+from ..agents.privilege_agent import PrivilegeAgent
+from ..agents.report_agent import ReportAgent
+
 
 class TaskExecutor:
     """任务执行器"""
@@ -76,42 +81,142 @@ class TaskExecutor:
 
     async def _execute_recon(self, target: str, params: Dict) -> Dict:
         """执行信息收集任务"""
-        # TODO: 实现 ReconAgent 调用
-        await asyncio.sleep(1)  # 模拟执行
+        logger.info(f"Initializing ReconAgent for target: {target}")
+        
+        # 从参数中提取 Agent 配置
+        agent_config = params.get("agent_config", {})
+        context = params.get("context", {})
+        
+        # 创建 ReconAgent 实例
+        agent = ReconAgent(
+            name=agent_config.get("name", "ReconAgent"),
+            description=agent_config.get("description", "负责目标信息收集和侦察"),
+            config=agent_config.get("config", {})
+        )
+        
+        # 执行侦察任务
+        logger.info(f"Starting reconnaissance on {target}")
+        result = await agent.execute(target, context)
+        
+        # 验证结果
+        if agent.validate_result(result):
+            logger.info(f"Reconnaissance completed successfully for {target}")
+        else:
+            logger.warning(f"Reconnaissance result validation failed for {target}")
+        
+        # 生成报告
+        report = agent.report()
+        
         return {
-            "hosts": [],
-            "ports": [],
-            "services": [],
-            "vulnerabilities": []
+            "recon_result": result,
+            "agent_report": report,
+            "agent_state": agent.state.value,
+            "success": agent.validate_result(result)
         }
 
     async def _execute_exploit(self, target: str, params: Dict) -> Dict:
         """执行漏洞利用任务"""
-        # TODO: 实现 ExploitAgent 调用
-        await asyncio.sleep(1)
+        logger.info(f"Initializing ExploitAgent for target: {target}")
+        
+        # 从参数中提取 Agent 配置和上下文（包含 Recon 结果）
+        agent_config = params.get("agent_config", {})
+        context = params.get("context", {})
+        
+        # 创建 ExploitAgent 实例
+        agent = ExploitAgent(
+            name=agent_config.get("name", "ExploitAgent"),
+            description=agent_config.get("description", "负责漏洞验证和利用，获取初始访问"),
+            config=agent_config.get("config", {})
+        )
+        
+        # 执行漏洞利用任务
+        logger.info(f"Starting exploitation on {target}")
+        result = await agent.execute(target, context)
+        
+        # 验证结果
+        if agent.validate_result(result):
+            logger.info(f"Exploitation completed successfully for {target}")
+        else:
+            logger.warning(f"Exploitation result validation failed for {target}")
+        
+        # 生成报告
+        report = agent.report()
+        
         return {
-            "exploits": [],
-            "successful": [],
-            "shells": []
+            "exploit_result": result,
+            "agent_report": report,
+            "agent_state": agent.state.value,
+            "success": agent.validate_result(result)
         }
 
     async def _execute_privilege(self, target: str, params: Dict) -> Dict:
         """执行权限提升任务"""
-        # TODO: 实现 PrivilegeAgent 调用
-        await asyncio.sleep(1)
+        logger.info(f"Initializing PrivilegeAgent for target: {target}")
+        
+        # 从参数中提取 Agent 配置和上下文（包含 Exploit 结果）
+        agent_config = params.get("agent_config", {})
+        context = params.get("context", {})
+        
+        # 创建 PrivilegeAgent 实例
+        agent = PrivilegeAgent(
+            name=agent_config.get("name", "PrivilegeAgent"),
+            description=agent_config.get("description", "负责权限提升和持久化"),
+            config=agent_config.get("config", {})
+        )
+        
+        # 执行权限提升任务
+        logger.info(f"Starting privilege escalation on {target}")
+        result = await agent.execute(target, context)
+        
+        # 验证结果
+        if agent.validate_result(result):
+            logger.info(f"Privilege escalation completed successfully for {target}")
+        else:
+            logger.warning(f"Privilege escalation result validation failed for {target}")
+        
+        # 生成报告
+        report = agent.report()
+        
         return {
-            "escalation_methods": [],
-            "persistence": []
+            "privilege_result": result,
+            "agent_report": report,
+            "agent_state": agent.state.value,
+            "success": agent.validate_result(result)
         }
 
     async def _execute_report(self, target: str, params: Dict) -> Dict:
         """执行报告生成任务"""
-        # TODO: 实现 ReportAgent 调用
-        await asyncio.sleep(1)
+        logger.info(f"Initializing ReportAgent for target: {target}")
+        
+        # 从参数中提取 Agent 配置和上下文（包含所有前置任务结果）
+        agent_config = params.get("agent_config", {})
+        context = params.get("context", {})
+        
+        # 创建 ReportAgent 实例
+        agent = ReportAgent(
+            name=agent_config.get("name", "ReportAgent"),
+            description=agent_config.get("description", "负责生成渗透测试报告"),
+            config=agent_config.get("config", {})
+        )
+        
+        # 执行报告生成任务
+        logger.info(f"Starting report generation for {target}")
+        result = await agent.execute(target, context)
+        
+        # 验证结果
+        if agent.validate_result(result):
+            logger.info(f"Report generation completed successfully for {target}")
+        else:
+            logger.warning(f"Report generation result validation failed for {target}")
+        
+        # 生成报告
+        report = agent.report()
+        
         return {
-            "report_id": target,
-            "findings": [],
-            "summary": {}
+            "report_result": result,
+            "agent_report": report,
+            "agent_state": agent.state.value,
+            "success": agent.validate_result(result)
         }
 
     async def _update_task_status(self, task_id: str, result: Dict):
