@@ -2,6 +2,7 @@
 Settings - Pydantic Settings 配置类
 统一管理环境变量配置
 """
+
 from typing import List, Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,10 +12,7 @@ class Settings(BaseSettings):
     """全局配置类"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore"
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
     # API配置
@@ -38,15 +36,16 @@ class Settings(BaseSettings):
     neo4j_password: Optional[str] = None
 
     # LLM配置
-    llm_provider: str = "openai"
+    llm_provider: str = "openrouter"
     openai_api_key: Optional[str] = None
-    openai_model: str = "gpt-4"
+    openai_model: str = "gpt-4o"
     openai_temperature: float = 0.7
     openai_base_url: Optional[str] = None
 
     # OpenRouter配置
     openrouter_api_key: Optional[str] = None
-    openrouter_model: Optional[str] = None
+    openrouter_model: str = "z-ai/glm-5.1"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_site_url: Optional[str] = None
     openrouter_app_name: Optional[str] = None
 
