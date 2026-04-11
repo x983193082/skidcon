@@ -55,15 +55,15 @@ class LLMClient:
         self._setup_api_key()
         self._fallback_model = "gpt-4o"
         self._use_fallback = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # 使用可重入锁
 
-        self.max_retries = settings.llm_max_retries
-        self.retry_delay = settings.llm_retry_delay
-        self.max_retry_delay = settings.llm_max_retry_delay
-        self.exponential_base = settings.llm_exponential_base
-        self.timeout = settings.llm_timeout
-        self.log_retries = settings.llm_log_retries
-        self.log_level = settings.llm_log_level
+        # 安全获取配置，提供默认值避免 AttributeError
+        self.max_retries = getattr(settings, "llm_max_retries", 3)
+        self.retry_delay = getattr(settings, "llm_retry_delay", 1.0)
+        self.max_retry_delay = getattr(settings, "llm_max_retry_delay", 60.0)
+        self.exponential_base = getattr(settings, "llm_exponential_base", 2)
+        self.timeout = getattr(settings, "llm_timeout", 60)
+        self.log_retries = getattr(settings, "llm_log_retries", True)
 
         logger.info(
             f"LLMClient initialized: provider={self.provider}, model={self.model}, "
@@ -74,9 +74,9 @@ class LLMClient:
         """获取默认模型"""
         settings = get_settings()
         if self.provider == "openrouter":
-            return settings.openrouter_model or "z-ai/glm-5.1"
+            return getattr(settings, "openrouter_model", "z-ai/glm-5.1")
         elif self.provider == "openai":
-            return settings.openai_model or "gpt-4o"
+            return getattr(settings, "openai_model", "gpt-4o")
         return "gpt-4o"
 
     def _setup_api_key(self) -> None:
@@ -111,47 +111,56 @@ class LLMClient:
         return self.model not in unsupported
 
     def switch_to_fallback(self) -> None:
-        """切换到备用模型"""
-        if not self._use_fallback:
-            logger.warning(f"Switching to fallback model: {self._fallback_model}")
-            self._use_fallback = True
-            self.model = self._fallback_model
+        """切换到备用模型（线程安全）"""
+        with self._lock:
+            if not self._use_fallback:
+                logger.warning(f"Switching to fallback model: {self._fallback_model}")
+                self._use_fallback = True
+                self.model = self._fallback_model
 
     def reset_fallback(self) -> None:
-        """重置回主模型"""
-        if self._use_fallback:
-            self._use_fallback = False
-            logger.info(f"Reset to primary model: {self.model}")
+        """重置回主模型（线程安全）"""
+        with self._lock:
+            if self._use_fallback:
+                self._use_fallback = False
+                self.model = self._get_default_model()
+                logger.info(f"Fallback reset: restored to {self.model}")
 
     def _is_non_retryable_error(self, error: Exception) -> bool:
-        """判断错误是否不应重试"""
+        """判断错误是否不应重试（基于类型和消息）"""
+        # 先检查异常类型
+        non_retryable_types = (
+            litellm.exceptions.AuthenticationError,
+            litellm.exceptions.BadRequestError,
+            litellm.exceptions.PermissionError,
+        )
+        if isinstance(error, non_retryable_types):
+            return True
+
+        # 再检查错误消息
         error_str = str(error).lower()
-        non_retryable = ["auth", "401", "403", "permission", "invalid api key"]
-        return any(x in error_str for x in non_retryable)
+        non_retryable_keywords = ["auth", "401", "403", "permission", "invalid api key"]
+        return any(keyword in error_str for keyword in non_retryable_keywords)
 
     def _log_retry(self, level: str, message: str) -> None:
-        """根据配置记录日志"""
+        """根据配置记录日志，安全地调用 logger 方法"""
         if self.log_retries:
-            if level == "info":
-                logger.info(message)
-            elif level == "warning":
-                logger.warning(message)
-            elif level == "error":
-                logger.error(message)
-            else:
-                logger.debug(message)
+            log_func = getattr(logger, level, logger.debug)
+            log_func(message)
 
-    def _get_api_key_for_call(self) -> str:
-        """返回用于 API 调用的密钥"""
-        return self.api_key or ""
+    def _get_api_key_for_call(self) -> Optional[str]:
+        """返回用于 API 调用的密钥（可能为 None）"""
+        return self.api_key
 
     def _get_base_url_for_call(self) -> Optional[str]:
         """返回用于 API 调用的 base_url"""
         settings = get_settings()
         if self.provider == "openrouter":
-            return settings.openrouter_base_url or "https://openrouter.ai/api/v1"
+            return getattr(
+                settings, "openrouter_base_url", "https://openrouter.ai/api/v1"
+            )
         elif self.provider == "openai":
-            return settings.openai_base_url or None
+            return getattr(settings, "openai_base_url", None)
         return None
 
     def _build_params(
@@ -169,9 +178,12 @@ class LLMClient:
             "messages": messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
-            "api_key": self._get_api_key_for_call(),
             **kwargs,
         }
+
+        api_key = self._get_api_key_for_call()
+        if api_key:
+            params["api_key"] = api_key
 
         base_url = self._get_base_url_for_call()
         if base_url:
@@ -206,7 +218,6 @@ class LLMClient:
     ) -> Any:
         """执行实际的 completion 调用"""
         params = self._build_params(messages, tools, stream, **kwargs)
-
         if stream:
             return completion(**params, stream=True)
         return completion(**params)
@@ -279,7 +290,6 @@ class LLMClient:
     ) -> Any:
         """执行实际的异步 completion 调用"""
         params = self._build_params(messages, tools, stream, **kwargs)
-
         if stream:
             return await acompletion(**params, stream=True)
         return await acompletion(**params)
@@ -333,22 +343,24 @@ class LLMClient:
         """获取 LangChain 兼容的 LLM"""
         settings = get_settings()
 
+        # 构建参数字典，避免显式传递 None
+        kwargs = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
         if self.provider == "openrouter":
-            base_url = settings.openrouter_base_url or "https://openrouter.ai/api/v1"
-            return ChatOpenAI(
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                base_url=base_url,
-                api_key=self.api_key,
+            base_url = getattr(
+                settings, "openrouter_base_url", "https://openrouter.ai/api/v1"
             )
-        else:
-            return ChatOpenAI(
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                api_key=self.api_key,
-            )
+            kwargs["base_url"] = base_url
+
+        # 仅当 api_key 非空时传递，让 LangChain 自动回退到环境变量
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+
+        return ChatOpenAI(**kwargs)
 
     def get_tool_definitions(self) -> List[Dict]:
         """获取工具定义（用于 function calling）"""
