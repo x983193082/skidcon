@@ -4,10 +4,10 @@ Prompt Loader - Prompt 模板加载器
 """
 
 import yaml
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional
 from functools import lru_cache
-
 from loguru import logger
 
 
@@ -21,7 +21,6 @@ class PromptLoader:
     def load_agent_prompts(self, agent_type: str) -> Dict[str, Any]:
         """加载指定 Agent 的 prompt 模板"""
         file_path = self.prompts_dir / "agents" / f"{agent_type}.yaml"
-
         if not file_path.exists():
             logger.warning(f"Prompt file not found: {file_path}")
             return {}
@@ -56,7 +55,6 @@ class PromptLoader:
         prompts = self.load_agent_prompts(agent_type)
         agent_key = f"{agent_type}_agent"
         template = prompts.get(agent_key, {}).get("goal", "")
-
         if kwargs and template:
             try:
                 return template.format(**kwargs)
@@ -78,7 +76,7 @@ class PromptLoader:
         return prompts.get(agent_key, {}).get("tasks", [])
 
     def get_task(self, agent_type: str, task_name: str) -> Optional[Dict]:
-        """获取指定任务"""
+        """获取指定任务（按名称匹配）"""
         tasks = self.get_tasks(agent_type)
         for task in tasks:
             if task.get("name") == task_name:
@@ -93,18 +91,26 @@ class PromptLoader:
         return [f.stem for f in agents_dir.glob("*.yaml")]
 
 
+# 全局实例（线程安全）
 _prompt_loader: Optional[PromptLoader] = None
+_loader_lock = threading.Lock()
 
 
 def get_prompt_loader() -> PromptLoader:
     """获取全局 PromptLoader 实例"""
     global _prompt_loader
     if _prompt_loader is None:
-        _prompt_loader = PromptLoader()
+        with _loader_lock:
+            if _prompt_loader is None:
+                _prompt_loader = PromptLoader()
     return _prompt_loader
 
 
 def reset_prompt_loader() -> None:
     """重置 PromptLoader（用于测试）"""
     global _prompt_loader
-    _prompt_loader = None
+    with _loader_lock:
+        _prompt_loader = None
+        # 清理缓存
+        if hasattr(PromptLoader.load_agent_prompts, "cache_clear"):
+            PromptLoader.load_agent_prompts.cache_clear()
