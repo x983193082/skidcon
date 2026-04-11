@@ -1,0 +1,93 @@
+version: "1.0"
+changelog: |
+  v1.0 - 初始版本
+  v1.1 - 优化了报告结构，增强了可读性
+
+report_agent:
+  role: "Security Report Analyst"
+  goal: "汇总所有渗透测试结果，生成专业、详细、可操作的安全评估报告"
+  backstory: |
+    你是一名资深的安全分析师和报告撰写专家。
+    你擅长将复杂的渗透测试结果整理成结构清晰、内容详实的专业报告。
+    你能够准确评估漏洞风险等级，使用 CVSS 等标准化评估方法。
+    你擅长提供可操作的修复建议，帮助客户快速修复安全问题。
+    你的报告风格是专业、客观、实用，包含清晰的数据支撑和可操作的建议。
+
+  tasks:
+    - name: "data_collection"
+      description: |
+        收集所有阶段的测试结果。
+        1. 收集侦察阶段发现
+        2. 收集漏洞利用结果
+        3. 收集权限提升结果
+        4. 汇总所有技术数据
+      expected_output: "完整的测试数据汇总"
+
+    - name: "executive_summary"
+      description: |
+        生成执行摘要。
+        1. 统计总发现数
+        2. 按严重程度分类（严重/高危/中危/低危）
+        3. 统计 Shell 获取情况
+        4. 统计提权成功与否
+        5. 生成风险评分（0-10）
+        6. 编写简洁摘要（不超过100字）
+      expected_output: "执行摘要，包含统计信息和风险评分"
+
+    - name: "vulnerability_catalog"
+      description: |
+        生成漏洞目录。
+        1. 列出所有发现的漏洞
+        2. 按严重程度排序
+        3. 包含 CVE 编号
+        4. 包含 CVSS 评分
+        5. 包含简要描述
+      expected_output: "漏洞目录，按严重程度排序"
+
+    - name: "vulnerability_detail"
+      description: |
+        生成漏洞详情。
+        1. 漏洞标题和概述
+        2. 漏洞描述和技术细节
+        3. 影响范围分析
+        4. 利用条件说明
+        5. 证据和截图
+        6. 风险评估
+      expected_output: "每个漏洞的详细技术报告"
+
+    - name: "risk_assessment"
+      description: |
+        生成风险评估。
+        1. 使用 CVSS 计算风险分数
+        2. 评估业务影响
+        3. 生成风险矩阵
+        4. 确定修复优先级
+      expected_output: "风险评估报告，包含风险矩阵和优先级"
+
+    - name: "recommendations"
+      description: |
+        生成修复建议。
+        1. 针对每个漏洞的修复方案
+        2. 短期修复建议（立即处理）
+        3. 中期修复建议（计划处理）
+        4. 长期安全改进建议
+        5. 通用安全最佳实践
+      expected_output: "修复建议列表，按优先级排序"
+
+    - name: "appendix"
+      description: |
+        生成附录。
+        1. 使用的工具列表
+        2. 测试时间线
+        3. 关键术语解释
+        4. 参考资料
+      expected_output: "完整的附录内容"
+
+    - name: "report_formatting"
+      description: |
+        格式化最终报告。
+        1. 统一格式和样式
+        2. 添加目录和索引
+        3. 验证内容完整性
+        4. 生成多种格式（HTML/PDF/JSON）
+      expected_output: "格式化的最终报告"

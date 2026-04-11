@@ -31,6 +31,14 @@ class CrewAIAdapter:
         self.llm = self.llm_client.get_langchain_llm()
         self.knowledge_tools = get_knowledge_tools()
 
+        try:
+            from config.prompts.manager import get_prompt_manager
+
+            self.prompt_manager = get_prompt_manager()
+        except ImportError:
+            self.prompt_manager = None
+            logger.warning("PromptManager not available, using default prompts")
+
     def create_agent(
         self, base_agent: BaseAgent, extra_tools: Optional[List[Any]] = None, **kwargs
     ) -> Agent:
@@ -44,9 +52,27 @@ class CrewAIAdapter:
         Returns:
             CrewAI Agent
         """
-        role = self._get_agent_role(base_agent.role)
-        goal = self._get_agent_goal(base_agent.role)
-        backstory = self._get_agent_backstory(base_agent.role, base_agent.description)
+        agent_type = base_agent.role.value
+
+        if self.prompt_manager:
+            role = self.prompt_manager.get_role(agent_type)
+            goal_template = self.prompt_manager.get_goal(agent_type, target="{target}")
+            backstory = self.prompt_manager.get_backstory(agent_type)
+
+            if not role:
+                role = self._get_agent_role(base_agent.role)
+            if not goal_template:
+                goal_template = self._get_agent_goal(base_agent.role)
+            if not backstory:
+                backstory = self._get_agent_backstory(
+                    base_agent.role, base_agent.description
+                )
+        else:
+            role = self._get_agent_role(base_agent.role)
+            goal_template = self._get_agent_goal(base_agent.role)
+            backstory = self._get_agent_backstory(
+                base_agent.role, base_agent.description
+            )
 
         tools = list(getattr(base_agent, "tools", [])) or []
 
@@ -57,7 +83,7 @@ class CrewAIAdapter:
 
         crewai_agent = Agent(
             role=role,
-            goal=goal,
+            goal=goal_template,
             backstory=backstory,
             llm=self.llm,
             tools=tools,

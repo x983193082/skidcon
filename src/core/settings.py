@@ -49,6 +49,26 @@ class Settings(BaseSettings):
     openrouter_site_url: Optional[str] = None
     openrouter_app_name: Optional[str] = None
 
+    # LLM 重试配置
+    llm_max_retries: int = 3
+    llm_retry_delay: float = 1.0
+    llm_max_retry_delay: float = 30.0
+    llm_exponential_base: float = 2.0
+    llm_timeout: int = 60
+
+    # LLM 日志配置
+    llm_log_retries: bool = True
+    llm_log_level: str = "INFO"
+
+    # LLM 响应解析配置
+    llm_response_format: str = "json"
+    llm_parse_errors_fallback: bool = True
+
+    # Prompt 管理配置
+    prompts_dir: str = "config/prompts"
+    prompts_enable_runtime_update: bool = True
+    prompts_version: str = "latest"
+
     # 安全工具配置
     nmap_path: str = "/usr/bin/nmap"
     sqlmap_path: str = "/usr/bin/sqlmap"

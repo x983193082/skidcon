@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 
-from .routes import scan, task, report
+from .routes import scan, task, report, prompts
 from .models import schemas
 
 
@@ -42,6 +42,7 @@ app.add_middleware(
 app.include_router(scan.router, prefix="/api/v1/scan", tags=["Scan"])
 app.include_router(task.router, prefix="/api/v1/task", tags=["Task"])
 app.include_router(report.router, prefix="/api/v1/report", tags=["Report"])
+app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["Prompts"])
 
 
 @app.get("/")
