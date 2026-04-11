@@ -87,6 +87,8 @@ agents:
         - html
         - pdf
         - json
+      include_raw_data: true
+      redactSensitive: true
     llm:
       model: "gpt-4"
       temperature: 0.5
