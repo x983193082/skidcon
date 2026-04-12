@@ -1,0 +1,15 @@
+# {{ title }}
+
+**扫描目标**: {{ target }}
+**发现数量**: {{ findings_count }}
+**扫描状态**: {{ status }}
+---
+{% for group in grouped_findings %}
+## {{ group.label }} ({{ group.count }})
+{% for finding in group.findings %}
+### {{ finding.get('title', 'N/A') }}
+- **目标**: {{ finding.get('target', 'N/A') }}
+- **描述**: {{ finding.get('description', 'N/A') }}
+---
+{% endfor %}
+{% endfor %}
