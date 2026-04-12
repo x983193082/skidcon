@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     redis_password: Optional[str] = None
 
+    # 任务队列配置
+    queue_task_ttl: int = 86400  # 24 小时
+    queue_task_timeout: int = 300  # 5 分钟
+    queue_max_retries: int = 3
+    queue_retry_delays: List[int] = Field(default_factory=lambda: [10, 20, 30])
+    queue_dead_letter_ttl: int = 604800  # 7 天
+
     # 向量数据库配置
     vector_db_type: str = "chroma"
     vector_db_url: str = "http://localhost:8000"
