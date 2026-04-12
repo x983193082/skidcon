@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     # 安全配置
     max_concurrent_scans: int = 5
     scan_timeout: int = 3600
+    scan_ttl: int = 86400 * 7  # 7 天
     allowed_targets: str = ""
 
     # 配置目录

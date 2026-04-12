@@ -72,3 +72,6 @@ pyxploitdb>=0.1.0
 python-dateutil>=2.8.0
 
 sentence-transformers>=2.2.0
+
+# PDF生成
+weasyprint>=60.0

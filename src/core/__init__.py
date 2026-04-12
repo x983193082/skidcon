@@ -13,6 +13,14 @@ from .knowledge_tools import (
 )
 from .response_parser import ResponseParser, LLMResponse, ResponseFormat
 from .queue import TaskQueue, get_task_queue, TaskStatus
+from .scan_manager import ScanManager, get_scan_manager, ScanStatus
+from .report_generator import (
+    ReportGenerator,
+    get_report_generator,
+    ReportFormat,
+    ReportConfig,
+    ReportStatus,
+)
 
 __all__ = [
     "BaseAgent",
@@ -36,4 +44,12 @@ __all__ = [
     "TaskQueue",
     "get_task_queue",
     "TaskStatus",
+    "ScanManager",
+    "get_scan_manager",
+    "ScanStatus",
+    "ReportGenerator",
+    "get_report_generator",
+    "ReportFormat",
+    "ReportConfig",
+    "ReportStatus",
 ]
