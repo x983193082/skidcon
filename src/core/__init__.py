@@ -12,6 +12,7 @@ from .knowledge_tools import (
     AVAILABLE_KNOWLEDGE_TOOLS,
 )
 from .response_parser import ResponseParser, LLMResponse, ResponseFormat
+from .queue import TaskQueue, get_task_queue, TaskStatus
 
 __all__ = [
     "BaseAgent",
@@ -32,4 +33,7 @@ __all__ = [
     "ResponseParser",
     "LLMResponse",
     "ResponseFormat",
+    "TaskQueue",
+    "get_task_queue",
+    "TaskStatus",
 ]
