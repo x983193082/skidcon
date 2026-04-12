@@ -2,6 +2,7 @@
 Report Agent - 报告生成Agent
 负责生成渗透测试报告
 """
+
 from typing import Dict, Any, List
 from datetime import datetime, timezone
 from loguru import logger
@@ -26,7 +27,7 @@ class ReportAgent(BaseAgent):
         "MEDIUM": 5.0,
         "LOW": 2.0,
         "INFO": 0.5,
-        "UNKNOWN": 0.0
+        "UNKNOWN": 0.0,
     }
 
     VULNERABILITY_RECOMMENDATIONS = {
@@ -37,36 +38,41 @@ class ReportAgent(BaseAgent):
         "unauth_access": "认证授权机制,IP白名单,API密钥",
         "deserialization": "不反序列化不可信数据,白名单,安全配置",
         "file_upload": "文件类型检测,存储分离,权限控制",
-        "privilege_escalation": "最小权限,定期审计,监控告警"
+        "privilege_escalation": "最小权限,定期审计,监控告警",
     }
 
     def __init__(
         self,
         name: str = "ReportAgent",
         description: str = "负责生成渗透测试报告",
-        config: Dict[str, Any] = None
+        config: Dict[str, Any] = None,
     ):
         super().__init__(
-            name=name,
-            role=AgentRole.REPORT,
-            description=description,
-            config=config
+            name=name, role=AgentRole.REPORT, description=description, config=config
         )
-        self._output_formats = config.get("output_formats", ["json", "html"]) if config else ["json", "html"]
+        self._output_formats = (
+            config.get("output_formats", ["json", "html"])
+            if config
+            else ["json", "html"]
+        )
 
-    async def execute(self, target: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def execute(
+        self, target: str, context: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
         """生成报告"""
         self.update_state(AgentState.RUNNING)
         context = context or {}
 
         result = {
             "target": target,
-            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "generated_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
             "executive_summary": {},
             "findings": [],
             "vulnerabilities": [],
             "recommendations": [],
-            "appendix": {}
+            "appendix": {},
         }
 
         try:
@@ -102,14 +108,16 @@ class ReportAgent(BaseAgent):
                 "successful": exploit_data.get("successful", []),
                 "failed": exploit_data.get("failed", []),
                 "shells": exploit_data.get("shells", []),
-                "cve_results": exploit_data.get("cve_results", [])
+                "cve_results": exploit_data.get("cve_results", []),
             },
             "privilege": {
                 "escalation_methods": privilege_data.get("escalation_methods", []),
                 "persistence": privilege_data.get("persistence", []),
-                "successful_escalation": privilege_data.get("successful_escalation", False),
-                "final_privileges": privilege_data.get("final_privileges", [])
-            }
+                "successful_escalation": privilege_data.get(
+                    "successful_escalation", False
+                ),
+                "final_privileges": privilege_data.get("final_privileges", []),
+            },
         }
 
     def _generate_executive_summary(self, context: Dict) -> Dict:
@@ -146,7 +154,7 @@ class ReportAgent(BaseAgent):
             "shells_obtained": shells_obtained,
             "escalation_success": escalation_success,
             "persistence_established": persistence_established,
-            "summary_text": summary_text
+            "summary_text": summary_text,
         }
 
     def _calculate_risk_score(self, findings: List[Dict]) -> float:
@@ -167,11 +175,7 @@ class ReportAgent(BaseAgent):
         return round(min(total_weight, 10.0), 1)
 
     def _generate_summary_text(
-        self,
-        total_findings: int,
-        risk_score: float,
-        shells: int,
-        escalated: bool
+        self, total_findings: int, risk_score: float, shells: int, escalated: bool
     ) -> str:
         """生成执行摘要文本"""
         lines = [
@@ -207,18 +211,20 @@ class ReportAgent(BaseAgent):
                 "severity": cve.get("severity", "UNKNOWN"),
                 "cvss": cve.get("cvss_score", 0.0),
                 "source": cve.get("source", "unknown"),
-                "service": cve.get("service", "")
+                "service": cve.get("service", ""),
             }
             findings.append(finding)
 
         if privilege_data.get("successful_escalation"):
-            findings.append({
-                "id": "PRIV-001",
-                "title": "Privilege Escalation Successful",  # 修正拼写及多余空格
-                "severity": "CRITICAL",
-                "cvss": 10.0,
-                "source": "privilege_agent"
-            })
+            findings.append(
+                {
+                    "id": "PRIV-001",
+                    "title": "Privilege Escalation Successful",  # 修正拼写及多余空格
+                    "severity": "CRITICAL",
+                    "cvss": 10.0,
+                    "source": "privilege_agent",
+                }
+            )
 
         return findings[:50]
 
@@ -235,7 +241,7 @@ class ReportAgent(BaseAgent):
                 "cvss_score": cve.get("cvss_score", 0.0),
                 "description": cve.get("description", ""),
                 "affected_service": cve.get("service", ""),
-                "status": "identified"
+                "status": "identified",
             }
             vulnerabilities.append(vuln)
 
@@ -259,37 +265,43 @@ class ReportAgent(BaseAgent):
                 if vuln_type in cve_id.lower():
                     if vuln_type not in seen_types:
                         seen_types.add(vuln_type)
-                        recommendations.append({
-                            "category": vuln_type,
-                            "recommendation": recommendation,
-                            "priority": cve.get("severity", "UNKNOWN"),
-                            "references": [cve_id]
-                        })
+                        recommendations.append(
+                            {
+                                "category": vuln_type,
+                                "recommendation": recommendation,
+                                "priority": cve.get("severity", "UNKNOWN"),
+                                "references": [cve_id],
+                            }
+                        )
 
         if privilege_data.get("successful_escalation"):
-            recommendations.append({
-                "category": "privilege_escalation",
-                "recommendation": "审查用户权限,实施最小权限原则,加强监控",
-                "priority": "HIGH",
-                "references": ["privilege_escalation"]
-            })
+            recommendations.append(
+                {
+                    "category": "privilege_escalation",
+                    "recommendation": "审查用户权限,实施最小权限原则,加强监控",
+                    "priority": "HIGH",
+                    "references": ["privilege_escalation"],
+                }
+            )
 
         if not recommendations:
-            recommendations.append({
-                "category": "general",
-                "recommendation": "持续监控安全更新,定期渗透测试",
-                "priority": "MEDIUM",
-                "references": []
-            })
+            recommendations.append(
+                {
+                    "category": "general",
+                    "recommendation": "持续监控安全更新,定期渗透测试",
+                    "priority": "MEDIUM",
+                    "references": [],
+                }
+            )
 
         return recommendations
 
     def validate_result(self, result: Dict[str, Any]) -> bool:
         if not result:
             return False
-        if "error" in result:
+        if result.get("error") and not result.get("success", True):
             return False
-        return "generated_at" in result
+        return "target" in result or "generated_at" in result
 
     def report(self) -> Dict[str, Any]:
         ctx = self._context or {}
@@ -299,5 +311,5 @@ class ReportAgent(BaseAgent):
             "state": self.state.value,
             "generated_at": ctx.get("generated_at"),
             "target": ctx.get("target"),
-            "summary": ctx.get("executive_summary", {})
+            "summary": ctx.get("executive_summary", {}),
         }

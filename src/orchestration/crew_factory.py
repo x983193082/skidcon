@@ -13,6 +13,7 @@ from crewai import Agent, Task
 from ..core.llm_client import LLMClient, get_llm_client
 from ..core.crewai_adapter import CrewAIAdapter, get_crewai_adapter
 from ..core.agent_interface import BaseAgent, AgentRole, AgentState
+from ..core.settings import get_settings
 from ..agents.recon_agent import ReconAgent
 from ..agents.exploit_agent import ExploitAgent
 from ..agents.privilege_agent import PrivilegeAgent
@@ -338,21 +339,54 @@ class CrewFactory:
 
     def _create_exploit_agent(self, target: str) -> Agent:
         """创建漏洞利用 Agent"""
+        settings = get_settings()
         base_agent = ExploitAgent(
-            name="ExploitAgent", description="负责漏洞验证和利用，获取初始访问"
+            name="ExploitAgent",
+            description="负责漏洞验证和利用，获取初始访问",
+            config={
+                "reverse_shell": {"lhost": "10.0.0.1", "lport": 4444},
+                "attack_graph": {
+                    "name": "pentest_chain",
+                    "neo4j_uri": settings.neo4j_uri,
+                    "neo4j_user": settings.neo4j_user,
+                    "neo4j_password": settings.neo4j_password,
+                    "use_neo4j": bool(settings.neo4j_uri),
+                },
+            },
         )
         return self.adapter.create_agent(base_agent=base_agent)
 
     def _create_privilege_agent(self, target: str) -> Agent:
         """创建权限提升 Agent"""
+        settings = get_settings()
         base_agent = PrivilegeAgent(
-            name="PrivilegeAgent", description="负责权限提升和持久化"
+            name="PrivilegeAgent",
+            description="负责权限提升和持久化",
+            config={
+                "attack_graph": {
+                    "name": "pentest_chain",
+                    "neo4j_uri": settings.neo4j_uri,
+                    "neo4j_user": settings.neo4j_user,
+                    "neo4j_password": settings.neo4j_password,
+                    "use_neo4j": bool(settings.neo4j_uri),
+                },
+            },
         )
         return self.adapter.create_agent(base_agent=base_agent)
 
     def _create_report_agent(self, target: str) -> Agent:
         """创建报告生成 Agent"""
-        base_agent = ReportAgent(name="ReportAgent", description="负责生成渗透测试报告")
+        base_agent = ReportAgent(
+            name="ReportAgent",
+            description="负责生成渗透测试报告",
+            config={
+                "attack_graph": {
+                    "include_in_report": True,
+                    "max_path_depth": 15,
+                },
+                "output_formats": ["json", "html"],
+            },
+        )
         return self.adapter.create_agent(base_agent=base_agent)
 
     def create_recon_crew(self, target: str) -> Any:
