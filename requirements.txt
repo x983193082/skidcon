@@ -75,3 +75,7 @@ sentence-transformers>=2.2.0
 
 # PDF生成
 weasyprint>=60.0
+
+#数据库
+sqlalchemy>=2.0.0
+aiosqlite>=0.19.0
