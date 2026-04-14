@@ -65,6 +65,10 @@ class ReportGenerator:
         settings = get_settings()
         self.redis_url = redis_url or settings.redis_url
         self.client: Optional[redis.Redis] = None
+        # ====== 新增：SQLite 数据库 ======
+        from ..database import Database
+        self.db = Database.get_instance()
+
         self.report_ttl = 86400 * 30
         self.report_prefix = "report"
         self.output_dir = settings.report_output_dir
@@ -541,6 +545,36 @@ class ReportGenerator:
                 self.client.setex(key, self.report_ttl, json.dumps(report_data))
         except Exception as e:
             logger.error(f"Failed to mark failed: {e}")
+
+    def _save_report_to_db(self, report_data: dict):
+        """同步报告数据到 SQLite"""
+        from ..database.repositories import ReportRepository
+
+        try:
+            with self.db.get_session() as session:
+                repo = ReportRepository(session)
+                report_id = report_data.get("report_id")
+                existing = repo.get_by_report_id(report_id)
+
+                # 获取业务 scan_id（原始字符串）
+                scan_id = report_data.get("scan_id")
+
+                if existing:
+                    repo.update_status(
+                        report_id,
+                        status=report_data.get("status"),
+                        file_path=report_data.get("file_path"),
+                        file_size=report_data.get("file_size"),
+                    )
+                else:
+                    repo.create_report(
+                        report_id=report_id,
+                        scan_id=scan_id,  # 传入业务标识，repo 内部转换
+                        title=report_data.get("title", ""),
+                        format=report_data.get("format", "pdf"),
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to save report to SQLite (report_id={report_id}): {e}")
 
 
 def get_report_generator() -> ReportGenerator:

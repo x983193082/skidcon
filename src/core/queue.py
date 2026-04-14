@@ -36,6 +36,10 @@ class TaskQueue:
         self.redis_url = redis_url or settings.redis_url
         self.client: Optional[redis.Redis] = None
 
+        # ====== 新增：SQLite 数据库 ======
+        from ..database import Database
+        self.db = Database.get_instance()
+
         # 从配置读取队列参数
         self.task_ttl = settings.queue_task_ttl
         self.task_timeout = settings.queue_task_timeout
@@ -336,6 +340,36 @@ class TaskQueue:
                 "failed": 0,
                 "dead_letter": 0,
             }
+
+    def _save_task_to_db(self, task_data: dict):
+            """同步任务数据到 SQLite"""
+            from ..database.repositories import TaskRepository
+
+            try:
+                with self.db.get_session() as session:
+                    repo = TaskRepository(session)
+                    task_id = task_data.get("task_id")
+                    existing = repo.get_by_task_id(task_id)
+
+                    # 获取业务 scan_id（原始字符串）
+                    scan_id = task_data.get("data", {}).get("scan_id")
+
+                    if existing:
+                        repo.update_status(
+                            task_id,
+                            status=task_data.get("status"),
+                            error=task_data.get("last_error"),
+                            result_data=task_data.get("result"),
+                        )
+                    else:
+                        repo.create_task(
+                            task_id=task_id,
+                            task_type=task_data.get("data", {}).get("task_type", "unknown"),
+                            scan_id=scan_id,  # 传入业务标识，repo 内部转换
+                            priority=task_data.get("priority", 0),
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to save task to SQLite (task_id={task_id}): {e}")
 
 
 def get_task_queue(redis_url: Optional[str] = None) -> TaskQueue:

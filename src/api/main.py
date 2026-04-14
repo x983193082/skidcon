@@ -14,12 +14,19 @@ import uvicorn
 
 from .routes import scan, task, report, prompts
 from .models import schemas
+from .routes import history
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     print("Starting Pentest Crew API...")
+    # ====== 新增：初始化数据库 ======
+    from ..database import Database
+    db = Database.get_instance()
+    db.create_tables()
+    print("Database tables created")
+
     yield
     print("Shutting down Pentest Crew API...")
 
@@ -43,7 +50,7 @@ app.include_router(scan.router, prefix="/api/v1/scan", tags=["Scan"])
 app.include_router(task.router, prefix="/api/v1/task", tags=["Task"])
 app.include_router(report.router, prefix="/api/v1/report", tags=["Report"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["Prompts"])
-
+app.include_router(history.router, prefix="/api/v1/history", tags=["History"])
 
 @app.get("/")
 async def root():

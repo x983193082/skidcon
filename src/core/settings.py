@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     # 配置目录
     config_dir: str = "config"
 
+    #数据库配置
+    database_url: str = "sqlite:///./skidcon.db"
+    database_echo: bool = False
+
 
 # 全局配置实例
 settings = Settings()

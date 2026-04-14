@@ -40,6 +40,10 @@ class ScanManager:
         self.scan_ttl = getattr(settings, "scan_ttl", 86400 * 7)
         self.scan_prefix = "scan"
         self.stats_key = f"{self.scan_prefix}:stats"
+        # ====== 新增：SQLite 数据库 ======
+        from ..database import Database
+        self.db = Database.get_instance()
+        # 注意：create_tables() 已在应用启动时统一调用，此处不再重复
 
     @classmethod
     def get_instance(cls) -> "ScanManager":
@@ -343,6 +347,69 @@ class ScanManager:
         except Exception as e:
             logger.error(f"Failed to rebuild stats: {e}")
         return stats
+
+    def _save_scan_to_db(self, scan_data: dict):
+        """同步扫描数据到 SQLite（最终一致性）"""
+        from ..database.repositories import ScanRepository
+
+        try:
+            with self.db.get_session() as session:
+                repo = ScanRepository(session)
+                scan_id = scan_data.get("scan_id")
+                existing = repo.get_by_scan_id(scan_id)
+
+                if existing:
+                    repo.update_status(
+                        scan_id,
+                        status=scan_data.get("status"),
+                        progress=scan_data.get("progress"),
+                        current_phase=scan_data.get("current_phase"),
+                        findings_count=scan_data.get("findings_count"),
+                    )
+                else:
+                    repo.create_scan(
+                        scan_id=scan_id,
+                        target=scan_data.get("target"),
+                        scan_type=scan_data.get("scan_type"),
+                        scope=scan_data.get("scope"),
+                        task_id=scan_data.get("task_id"),
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to save scan to SQLite (scan_id={scan_id}): {e}")
+            # 可选：写入死信队列供后续补偿
+
+    def _save_findings_to_db(self, scan_id: str, findings: list):
+        """同步发现数据到 SQLite（批量插入，最终一致性）"""
+        from ..database.repositories import FindingRepository
+
+        if not findings:
+            return
+
+        try:
+            with self.db.get_session() as session:
+                repo = FindingRepository(session)
+
+                # 准备批量插入数据（传入业务 scan_id，repo 内部转换）
+                findings_data = []
+                for f in findings:
+                    findings_data.append({
+                        "scan_id": scan_id,  # 业务标识，非内部 ID
+                        "title": f.get("title"),
+                        "severity": f.get("severity"),
+                        "target": f.get("target"),
+                        "finding_id": f.get("finding_id"),
+                        "description": f.get("description", ""),
+                        "port": f.get("port"),
+                        "service": f.get("service"),
+                        "evidence": f.get("evidence", {}),
+                        "recommendation": f.get("recommendation", ""),
+                        "references": f.get("references", []),
+                    })
+
+                repo.bulk_create(findings_data)
+
+        except Exception as e:
+            logger.warning(f"Failed to save findings to SQLite (scan_id={scan_id}, count={len(findings)}): {e}")
 
 
 def get_scan_manager() -> ScanManager:
