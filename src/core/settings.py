@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     config_dir: str = "config"
 
     #数据库配置
-    database_url: str = "sqlite:///./skidcon.db"
+    database_url: str = "sqlite:////app/data/skidcon.db"
     database_echo: bool = False
 
 

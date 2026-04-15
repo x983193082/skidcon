@@ -39,7 +39,7 @@ class Worker:
     def setup_components(self):
         """初始化组件"""
         self.task_executor = TaskExecutor(self.redis_client)
-        self.queue_handler = QueueHandler(self.redis_client, self.task_executor)
+        self.queue_handler = QueueHandler(task_executor=self.task_executor)
         logger.info("Worker components initialized")
 
     async def start(self):

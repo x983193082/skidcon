@@ -339,12 +339,16 @@ class CrewFactory:
 
     def _create_exploit_agent(self, target: str) -> Agent:
         """创建漏洞利用 Agent"""
+        import os
         settings = get_settings()
         base_agent = ExploitAgent(
             name="ExploitAgent",
             description="负责漏洞验证和利用，获取初始访问",
             config={
-                "reverse_shell": {"lhost": "10.0.0.1", "lport": 4444},
+                "reverse_shell": {
+                    "lhost": os.getenv("REVERSE_SHELL_LHOST", "0.0.0.0"),
+                    "lport": int(os.getenv("REVERSE_SHELL_LPORT", "4444")),
+                },
                 "attack_graph": {
                     "name": "pentest_chain",
                     "neo4j_uri": settings.neo4j_uri,

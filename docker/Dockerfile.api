@@ -9,11 +9,13 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV TZ=Asia/Shanghai
 
-# 安装系统依赖
+# 安装系统依赖和安全工具
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    g++ \
     curl \
     nmap \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # 设置工作目录

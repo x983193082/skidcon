@@ -55,20 +55,20 @@ check_dependencies() {
 # 启动服务
 start_services() {
     log_info "Starting services..."
-    docker-compose -f docker/docker-compose.yml up -d
+    docker compose -f docker/docker-compose.yml up -d
     log_info "Services started"
 }
 
 # 停止服务
 stop_services() {
     log_info "Stopping services..."
-    docker-compose -f docker/docker-compose.yml down
+    docker compose -f docker/docker-compose.yml down
     log_info "Services stopped"
 }
 
 # 查看日志
 view_logs() {
-    docker-compose -f docker/docker-compose.yml logs -f "$1"
+    docker compose -f docker/docker-compose.yml logs -f "$1"
 }
 
 # 运行测试

@@ -17,6 +17,25 @@ from ..core.knowledge_interface import KnowledgeEntry
 from ..core.settings import get_settings
 
 
+def _run_async(coro):
+    """
+    安全运行异步协程，兼容已有事件循环的环境
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # 在已有事件循环中，使用线程池运行
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        return asyncio.run(coro)
+
+
 class KnowledgeTools:
     """知识库工具集合"""
 
@@ -90,7 +109,7 @@ def search_cve(product: str, limit: int = 10) -> str:
     """
     try:
         cve_fetcher = get_knowledge_tools().cve_fetcher
-        cves = asyncio.run(cve_fetcher.search_by_product(product))
+        cves = _run_async(cve_fetcher.search_by_product(product))
 
         results = []
         for cve in cves[:limit]:
@@ -131,9 +150,9 @@ def search_knowledge_base(query: str, top_k: int = 5) -> str:
     try:
         tools = get_knowledge_tools()
         vector_store = tools.vector_store
-        asyncio.run(tools.ensure_initialized())
+        _run_async(tools.ensure_initialized())
 
-        results = asyncio.run(vector_store.search(query, top_k))
+        results = _run_async(vector_store.search(query, top_k))
 
         output = []
         for entry in results:
@@ -185,7 +204,7 @@ def add_knowledge_entry(
             confidence=1.0,
         )
 
-        asyncio.run(vector_store.add(entry))
+        _run_async(vector_store.add(entry))
 
         return json.dumps({"success": True, "message": "Entry added successfully"})
 

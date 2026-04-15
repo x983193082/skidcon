@@ -6,6 +6,7 @@ Privilege Agent - 权限提升Agent
 import asyncio
 import re
 import uuid
+import subprocess
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Union
 from loguru import logger
@@ -18,6 +19,35 @@ from ..knowledge.attack_graph import (
     NodeType,
     EdgeType,
 )
+
+
+class DefaultShellExecutor:
+    """默认 Shell 执行器 - 用于本地命令执行"""
+    
+    def __init__(self, timeout: int = 30):
+        self.timeout = timeout
+    
+    async def execute(self, command: str) -> Dict[str, Any]:
+        """执行命令"""
+        try:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=self.timeout
+            )
+            return {
+                "success": process.returncode == 0,
+                "stdout": stdout.decode('utf-8', errors='ignore').strip(),
+                "stderr": stderr.decode('utf-8', errors='ignore').strip(),
+                "returncode": process.returncode,
+            }
+        except asyncio.TimeoutError:
+            return {"success": False, "error": f"Command timeout ({self.timeout}s)"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 class PrivilegeAgent(BaseAgent):

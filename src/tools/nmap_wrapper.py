@@ -6,6 +6,7 @@ from ..core.tool_interface import BaseTool, ToolCategory, ToolRisk, ToolResult
 import asyncio
 import subprocess
 import xml.etree.ElementTree as ET
+from loguru import logger
 
 
 class NmapWrapper(BaseTool):
@@ -198,6 +199,95 @@ class NmapWrapper(BaseTool):
     
     def parse_xml(self, xml_output: str) -> Dict[str, Any]:
         """解析Nmap XML输出"""
+        result = {
+            "hosts": [],
+            "summary": {
+                "total_hosts": 0,
+                "up_hosts": 0,
+                "down_hosts": 0
+            }
+        }
+        
+        try:
+            root = ET.fromstring(xml_output)
+        except ET.ParseError as e:
+            logger.error(f"Failed to parse Nmap XML: {e}")
+            return result
+        
+        for host_elem in root.findall("host"):
+            host_info = {
+                "address": "",
+                "status": "unknown",
+                "ports": [],
+                "os": None,
+                "hostnames": []
+            }
+            
+            # 解析主机状态
+            status_elem = host_elem.find("status")
+            if status_elem is not None:
+                host_info["status"] = status_elem.get("state", "unknown")
+            
+            # 解析地址
+            for addr_elem in host_elem.findall("address"):
+                addr_type = addr_elem.get("addrtype", "ipv4")
+                if addr_type == "ipv4":
+                    host_info["address"] = addr_elem.get("addr", "")
+            
+            # 解析主机名
+            for hostname_elem in host_elem.findall("hostnames/hostname"):
+                host_info["hostnames"].append({
+                    "name": hostname_elem.get("name", ""),
+                    "type": hostname_elem.get("type", "")
+                })
+            
+            # 解析端口
+            for port_elem in host_elem.findall("ports/port"):
+                port_id = port_elem.get("portid")
+                protocol = port_elem.get("protocol", "tcp")
+                
+                state_elem = port_elem.find("state")
+                state = state_elem.get("state", "unknown") if state_elem is not None else "unknown"
+                
+                service_elem = port_elem.find("service")
+                service_info = {
+                    "name": "unknown",
+                    "product": "",
+                    "version": "",
+                    "extrainfo": ""
+                }
+                if service_elem is not None:
+                    service_info["name"] = service_elem.get("name", "unknown")
+                    service_info["product"] = service_elem.get("product", "")
+                    service_info["version"] = service_elem.get("version", "")
+                    service_info["extrainfo"] = service_elem.get("extrainfo", "")
+                
+                host_info["ports"].append({
+                    "port": int(port_id) if port_id else 0,
+                    "protocol": protocol,
+                    "state": state,
+                    "service": service_info["name"],
+                    "product": service_info["product"],
+                    "version": service_info["version"],
+                    "extrainfo": service_info["extrainfo"]
+                })
+            
+            # 解析操作系统
+            os_elem = host_elem.find("os/osmatch")
+            if os_elem is not None:
+                host_info["os"] = {
+                    "name": os_elem.get("name", ""),
+                    "accuracy": float(os_elem.get("accuracy", 0))
+                }
+            
+            if host_info["address"]:
+                result["hosts"].append(host_info)
+        
+        result["summary"]["total_hosts"] = len(result["hosts"])
+        result["summary"]["up_hosts"] = len([h for h in result["hosts"] if h.get("status") == "up"])
+        result["summary"]["down_hosts"] = result["summary"]["total_hosts"] - result["summary"]["up_hosts"]
+        
+        return result
         # TODO: 实现完整的XML解析
         pass
     
