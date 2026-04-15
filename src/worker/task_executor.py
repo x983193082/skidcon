@@ -51,7 +51,9 @@ class TaskExecutor:
 
         try:
             # 根据任务类型执行不同的逻辑
-            if task_type == "recon":
+            if task_type == "scan":
+                result["result"] = await self._execute_full_scan(target, task_data)
+            elif task_type == "recon":
                 result["result"] = await self._execute_recon(target, task_data)
             elif task_type == "exploit":
                 result["result"] = await self._execute_exploit(target, task_data)
@@ -78,6 +80,133 @@ class TaskExecutor:
         await self._update_task_status(task_id, result)
 
         return result
+
+    async def _execute_full_scan(self, target: str, params: Dict) -> Dict:
+        """执行完整扫描流程：recon → exploit → privilege → report"""
+        logger.info(f"Starting full scan workflow for target: {target}")
+        
+        scan_id = params.get("scan_id", "unknown")
+        scan_type = params.get("scan_type", "full")
+        scope = params.get("scope", [])
+        options = params.get("options", {})
+        
+        # 更新扫描状态为 running
+        await self._update_scan_status(scan_id, "running", current_phase="recon", progress=10)
+        
+        # 阶段 1: 信息收集
+        logger.info(f"[Phase 1/4] Starting reconnaissance on {target}")
+        await self._update_scan_status(scan_id, "running", current_phase="recon", progress=15)
+        
+        recon_result = await self._execute_recon(target, {
+            "agent_config": {"name": "ReconAgent", "description": "负责目标信息收集和侦察"},
+            "context": {"target": target, "scope": scope, "scan_id": scan_id}
+        })
+        
+        await self._update_scan_status(scan_id, "running", current_phase="recon", progress=30)
+        logger.info(f"[Phase 1/4] Reconnaissance completed: {recon_result.get('agent_state', 'unknown')}")
+        
+        # 阶段 2: 漏洞利用
+        logger.info(f"[Phase 2/4] Starting exploitation on {target}")
+        await self._update_scan_status(scan_id, "running", current_phase="exploit", progress=35)
+        
+        # 将 recon 结果传递给 exploit
+        exploit_context = {
+            "target": target,
+            "scope": scope,
+            "scan_id": scan_id,
+            "recon_result": recon_result.get("recon_result", {}),
+            "findings": recon_result.get("agent_report", {}).get("findings", [])
+        }
+        
+        exploit_result = await self._execute_exploit(target, {
+            "agent_config": {"name": "ExploitAgent", "description": "负责漏洞验证和利用"},
+            "context": exploit_context
+        })
+        
+        await self._update_scan_status(scan_id, "running", current_phase="exploit", progress=60)
+        logger.info(f"[Phase 2/4] Exploitation completed: {exploit_result.get('agent_state', 'unknown')}")
+        
+        # 阶段 3: 权限提升
+        logger.info(f"[Phase 3/4] Starting privilege escalation on {target}")
+        await self._update_scan_status(scan_id, "running", current_phase="privilege", progress=65)
+        
+        privilege_context = {
+            "target": target,
+            "scope": scope,
+            "scan_id": scan_id,
+            "recon_result": recon_result.get("recon_result", {}),
+            "exploit_result": exploit_result.get("exploit_result", {}),
+            "findings": exploit_result.get("agent_report", {}).get("findings", [])
+        }
+        
+        privilege_result = await self._execute_privilege(target, {
+            "agent_config": {"name": "PrivilegeAgent", "description": "负责权限提升和持久化"},
+            "context": privilege_context
+        })
+        
+        await self._update_scan_status(scan_id, "running", current_phase="privilege", progress=80)
+        logger.info(f"[Phase 3/4] Privilege escalation completed: {privilege_result.get('agent_state', 'unknown')}")
+        
+        # 阶段 4: 生成报告
+        logger.info(f"[Phase 4/4] Starting report generation for {target}")
+        await self._update_scan_status(scan_id, "running", current_phase="reporting", progress=85)
+        
+        report_context = {
+            "target": target,
+            "scope": scope,
+            "scan_id": scan_id,
+            "scan_type": scan_type,
+            "recon_result": recon_result,
+            "exploit_result": exploit_result,
+            "privilege_result": privilege_result,
+            "all_findings": []
+        }
+        
+        report_result = await self._execute_report(target, {
+            "agent_config": {"name": "ReportAgent", "description": "负责生成渗透测试报告"},
+            "context": report_context
+        })
+        
+        await self._update_scan_status(scan_id, "completed", current_phase="completed", progress=100)
+        logger.info(f"[Phase 4/4] Report generation completed")
+        
+        return {
+            "scan_id": scan_id,
+            "scan_type": scan_type,
+            "phases": {
+                "recon": recon_result,
+                "exploit": exploit_result,
+                "privilege": privilege_result,
+                "report": report_result
+            },
+            "success": all([
+                recon_result.get("success", False),
+                exploit_result.get("success", False),
+                privilege_result.get("success", False),
+                report_result.get("success", False)
+            ])
+        }
+
+    async def _update_scan_status(self, scan_id: str, status: str, current_phase: str = "", progress: int = 0):
+        """更新扫描状态到 Redis"""
+        if self.redis_client:
+            try:
+                from ..core.scan_manager import ScanManager
+                scan_manager = ScanManager.get_instance()
+                scan_data = scan_manager.get_status(scan_id)
+                if scan_data:
+                    scan_data["status"] = status
+                    scan_data["current_phase"] = current_phase
+                    scan_data["progress"] = progress
+                    if status == "completed":
+                        from datetime import datetime
+                        scan_data["completed_at"] = datetime.now().isoformat()
+                    
+                    key = scan_manager._get_scan_key(scan_id)
+                    import json
+                    self.redis_client.setex(key, scan_manager.scan_ttl, json.dumps(scan_data))
+            except Exception as e:
+                logger.warning(f"Failed to update scan status: {e}")
 
     async def _execute_recon(self, target: str, params: Dict) -> Dict:
         """执行信息收集任务"""
