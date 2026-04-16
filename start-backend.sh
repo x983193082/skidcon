@@ -32,7 +32,7 @@ echo ""
 echo "[3/4] 激活虚拟环境并安装依赖..."
 source venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r ../requirements.txt
 if [ $? -ne 0 ]; then
     echo "错误: 依赖安装失败"
     echo "尝试: sudo apt install python3-dev build-essential"
