@@ -116,7 +116,7 @@
 </template>
 
 <script>
-import { createTask, getTaskStatus, getTaskList, getReport, downloadReport } from './api.js'
+import { createTask, getTaskStatus, getTaskList, getReport, downloadReport, healthCheck } from './api.js'
 import WebSocketClient from './ws.js'
 
 export default {
@@ -167,13 +167,16 @@ export default {
     this.checkHealth()
     this.loadTaskList()
     // 定期检查任务列表
-    setInterval(() => {
+    this.pollTaskList = setInterval(() => {
       this.loadTaskList()
     }, 5000)
   },
   beforeUnmount() {
     if (this.wsClient) {
       this.wsClient.disconnect()
+    }
+    if (this.pollTaskList) {
+      clearInterval(this.pollTaskList)
     }
     if (this.pollInterval) {
       clearInterval(this.pollInterval)
@@ -182,10 +185,10 @@ export default {
   methods: {
     async checkHealth() {
       try {
-        const { healthCheck } = await import('./api.js')
         const health = await healthCheck()
         this.healthStatus = health.status
       } catch (error) {
+        console.error('健康检查失败:', error)
         this.healthStatus = 'error'
       }
     },

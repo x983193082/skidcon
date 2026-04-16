@@ -13,7 +13,7 @@ def create_llm():
     return ChatOpenAI(
         openai_api_key=OPENROUTER_API_KEY,
         openai_api_base=OPENROUTER_BASE_URL,
-        model_name=MODEL_NAME,
+        model=MODEL_NAME,
         temperature=0.7,
         max_tokens=4096
     )

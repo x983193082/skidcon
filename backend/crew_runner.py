@@ -19,9 +19,15 @@ class CrewRunner:
     def __init__(self, target: str, callback: Optional[Callable] = None):
         self.target = target
         self.callback = callback
-        self.agents = get_all_agents()
+        self.agents = {}  # 延迟初始化
         self.results = {}
         self.stage_results = {}
+    
+    async def _get_agents(self):
+        """延迟获取 Agent（避免启动时初始化）"""
+        if not self.agents:
+            self.agents = get_all_agents()
+        return self.agents
     
     async def _send_callback(self, message: str):
         """发送回调消息"""
@@ -83,6 +89,7 @@ class CrewRunner:
     async def _stage_recon(self) -> Dict:
         """阶段 1: 信息收集"""
         results = {}
+        agents = await self._get_agents()
         
         # 使用工具进行信息收集
         tools_to_run = [
@@ -104,7 +111,7 @@ class CrewRunner:
                 }
         
         # 使用 Planner Agent 分析收集到的信息
-        planner = self.agents["planner"]
+        planner = agents["planner"]
         recon_task = Task(
             description=f"""分析以下针对目标 {self.target} 的信息收集结果，制定后续测试策略：
 
@@ -114,7 +121,7 @@ class CrewRunner:
 请分析：
 1. 开放的端口和服务
 2. 使用的技术和框架
-3. 潜在的攻擊面
+3. 潜在的攻击面
 4. 推荐的后续测试步骤""",
             agent=planner,
             expected_output="详细的攻击策略和后续测试计划"
@@ -127,7 +134,9 @@ class CrewRunner:
             verbose=True
         )
         
-        result = crew.kickoff()
+        # 在线程池中运行以避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, crew.kickoff)
         results["planner_analysis"] = str(result)
         
         await self._send_callback(f"  信息收集完成，发现 {len(results)} 项结果")
@@ -162,6 +171,7 @@ class CrewRunner:
     async def _stage_vulnerability_detection(self) -> Dict:
         """阶段 3: 漏洞检测"""
         results = {}
+        agents = await self._get_agents()
         
         tools_to_run = [
             ("sqlmap", {"url": f"http://{self.target}"}),
@@ -180,7 +190,7 @@ class CrewRunner:
                 }
         
         # 使用 Analyzer Agent 分析漏洞
-        analyzer = self.agents["analyzer"]
+        analyzer = agents["analyzer"]
         analysis_task = Task(
             description=f"""分析以下针对目标 {self.target} 的漏洞扫描结果，识别真实漏洞并降低误报：
 
@@ -203,7 +213,8 @@ class CrewRunner:
             verbose=True
         )
         
-        result = crew.kickoff()
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, crew.kickoff)
         results["analyzer_report"] = str(result)
         
         await self._send_callback(f"  漏洞检测完成")
@@ -230,7 +241,8 @@ class CrewRunner:
     
     async def _stage_report_generation(self) -> Dict:
         """阶段 5: 报告生成"""
-        reporter = self.agents["reporter"]
+        agents = await self._get_agents()
+        reporter = agents["reporter"]
         
         report_task = Task(
             description=f"""为以下渗透测试结果生成专业的 Markdown 格式报告：
@@ -260,7 +272,8 @@ class CrewRunner:
             verbose=True
         )
         
-        result = crew.kickoff()
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, crew.kickoff)
         report_content = str(result)
         
         return {

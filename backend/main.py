@@ -4,6 +4,7 @@ SkidCon FastAPI 主应用
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -16,11 +17,25 @@ from task_manager import task_manager, TaskStatus
 from crew_runner import run_pentest
 from report import report_generator
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时加载历史任务
+    task_manager.load_tasks_from_disk()
+    print("✅ SkidCon 启动成功!")
+    print(f"📊 已加载 {len(task_manager.tasks)} 个历史任务")
+    yield
+    # 关闭时清理资源
+    print("👋 SkidCon 已关闭")
+
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="SkidCon - AI 渗透测试系统",
     description="基于 CrewAI 的自动化渗透测试平台",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # 配置 CORS
@@ -49,13 +64,7 @@ class TaskResponse(BaseModel):
 
 
 # ==================== 启动事件 ====================
-
-@app.on_event("startup")
-async def startup_event():
-    """应用启动时加载历史任务"""
-    task_manager.load_tasks_from_disk()
-    print("✅ SkidCon 启动成功!")
-    print(f"📊 已加载 {len(task_manager.tasks)} 个历史任务")
+# (已迁移到 lifespan 函数)
 
 
 # ==================== REST API ====================
