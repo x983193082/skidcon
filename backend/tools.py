@@ -124,6 +124,14 @@ class NmapTool(KaliTool):
     def __init__(self):
         super().__init__("nmap", "nmap -sV -sC -O -oN - {target}")
     
+    def build_command(self, **kwargs) -> str:
+        """构建命令，支持端口参数"""
+        target = kwargs.get("target", "")
+        port = kwargs.get("port")
+        if port:
+            return f"nmap -sV -sC -O -oN - -p {port} {target}"
+        return f"nmap -sV -sC -O -oN - {target}"
+    
     def parse_output(self, stdout, stderr):
         ports = []
         for line in stdout.split('\n'):

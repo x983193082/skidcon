@@ -93,6 +93,7 @@ class CrewRunner:
         
         # 规范化目标格式
         target = self.target
+        port = None
         # 提取主机名/IP（去掉协议和路径）
         if target.startswith("http://"):
             target = target[7:]
@@ -100,11 +101,17 @@ class CrewRunner:
             target = target[8:]
         target = target.rstrip("/")
         
+        # 分离主机和端口
+        if ":" in target:
+            parts = target.split(":")
+            target = parts[0]
+            port = parts[1]
+        
         # 使用工具进行信息收集
         tools_to_run = [
-            ("nmap", {"target": target}),
+            ("nmap", {"target": target, "port": port}),
             ("subfinder", {"domain": target}),
-            ("whatweb", {"url": f"http://{target}"}),
+            ("whatweb", {"url": f"http://{self.target}"}),
             ("whois", {"domain": target}),
             ("dig", {"domain": target}),
         ]
