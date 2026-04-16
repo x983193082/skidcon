@@ -14,7 +14,7 @@ load_dotenv(dotenv_path=_env_path)
 # OpenRouter API 配置
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "z-ai/glm-5.1")
+MODEL_NAME = os.getenv("MODEL_NAME", "openrouter/z-ai/glm-5.1")
 
 # 任务配置
 MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "3"))

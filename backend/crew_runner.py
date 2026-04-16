@@ -91,13 +91,22 @@ class CrewRunner:
         results = {}
         agents = await self._get_agents()
         
+        # 规范化目标格式
+        target = self.target
+        # 提取主机名/IP（去掉协议和路径）
+        if target.startswith("http://"):
+            target = target[7:]
+        elif target.startswith("https://"):
+            target = target[8:]
+        target = target.rstrip("/")
+        
         # 使用工具进行信息收集
         tools_to_run = [
-            ("nmap", {"target": self.target}),
-            ("subfinder", {"domain": self.target}),
-            ("whatweb", {"url": f"http://{self.target}"}),
-            ("whois", {"domain": self.target}),
-            ("dig", {"domain": self.target}),
+            ("nmap", {"target": target}),
+            ("subfinder", {"domain": target}),
+            ("whatweb", {"url": f"http://{target}"}),
+            ("whois", {"domain": target}),
+            ("dig", {"domain": target}),
         ]
         
         for tool_name, kwargs in tools_to_run:
@@ -146,13 +155,21 @@ class CrewRunner:
         """阶段 2: 服务分析"""
         results = {}
         
+        # 规范化目标格式
+        target = self.target
+        if target.startswith("http://"):
+            target = target[7:]
+        elif target.startswith("https://"):
+            target = target[8:]
+        target = target.rstrip("/")
+        
         # 根据发现的端口运行服务枚举
         recon_data = self.stage_results.get("recon", {})
         
         tools_to_run = [
-            ("nikto", {"url": f"http://{self.target}"}),
-            ("enum4linux", {"target": self.target}),
-            ("smbclient", {"target": self.target}),
+            ("nikto", {"url": f"http://{target}"}),
+            ("enum4linux", {"target": target}),
+            ("smbclient", {"target": target}),
         ]
         
         for tool_name, kwargs in tools_to_run:
@@ -173,10 +190,18 @@ class CrewRunner:
         results = {}
         agents = await self._get_agents()
         
+        # 规范化目标格式
+        target = self.target
+        if target.startswith("http://"):
+            target = target[7:]
+        elif target.startswith("https://"):
+            target = target[8:]
+        target = target.rstrip("/")
+        
         tools_to_run = [
-            ("sqlmap", {"url": f"http://{self.target}"}),
-            ("nuclei", {"url": f"http://{self.target}"}),
-            ("searchsploit", {"query": self.target}),
+            ("sqlmap", {"url": f"http://{target}"}),
+            ("nuclei", {"url": f"http://{target}"}),
+            ("searchsploit", {"query": target}),
         ]
         
         for tool_name, kwargs in tools_to_run:

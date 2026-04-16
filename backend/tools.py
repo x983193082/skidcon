@@ -122,7 +122,7 @@ class KaliTool:
 class NmapTool(KaliTool):
     """Nmap 端口扫描器"""
     def __init__(self):
-        super().__init__("nmap", "nmap -sV -sC -O -oN /dev/stdout {target}")
+        super().__init__("nmap", "nmap -sV -sC -O -oN - {target}")
     
     def parse_output(self, stdout, stderr):
         ports = []
