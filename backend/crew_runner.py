@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional
 from datetime import datetime
 from crewai import Crew, Process, Task
 from agents import get_all_agents
-from tools import execute_tool, get_all_tools
+from tools import execute_tool
 from config import TASK_TIMEOUT
 
 
@@ -135,7 +135,7 @@ class CrewRunner:
         )
         
         # 在线程池中运行以避免阻塞事件循环
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, crew.kickoff)
         results["planner_analysis"] = str(result)
         
@@ -213,7 +213,7 @@ class CrewRunner:
             verbose=True
         )
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, crew.kickoff)
         results["analyzer_report"] = str(result)
         
@@ -272,7 +272,7 @@ class CrewRunner:
             verbose=True
         )
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, crew.kickoff)
         report_content = str(result)
         

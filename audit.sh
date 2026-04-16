@@ -91,7 +91,21 @@ check "directories.txt 存在" "test -f wordlists/directories.txt"
 check "subdomains.txt 存在" "test -f wordlists/subdomains.txt"
 
 echo ""
-echo "========== Python 依赖 =========="
+echo "========== Python 语法检查 =========="
+if [ -d "backend/venv" ]; then
+    source backend/venv/bin/activate > /dev/null 2>&1
+    check "config.py 语法正确" "python3 -m py_compile backend/config.py"
+    check "tools.py 语法正确" "python3 -m py_compile backend/tools.py"
+    check "agents.py 语法正确" "python3 -m py_compile backend/agents.py"
+    check "crew_runner.py 语法正确" "python3 -m py_compile backend/crew_runner.py"
+    check "report.py 语法正确" "python3 -m py_compile backend/report.py"
+    check "task_manager.py 语法正确" "python3 -m py_compile backend/task_manager.py"
+    check "main.py 语法正确" "python3 -m py_compile backend/main.py"
+    deactivate > /dev/null 2>&1
+else
+    echo -e "${YELLOW}⚠️  虚拟环境未创建，跳过语法检查${NC}"
+    ((WARN++))
+fi
 if [ -d "backend/venv" ]; then
     echo -e "${GREEN}✅ 虚拟环境已创建${NC}"
     ((PASS++))

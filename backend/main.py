@@ -7,10 +7,9 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
-import os
 
 from config import REPORTS_DIR
 from task_manager import task_manager, TaskStatus

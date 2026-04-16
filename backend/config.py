@@ -7,8 +7,9 @@ import os
 from dotenv import load_dotenv
 from pathlib import Path
 
-# 加载环境变量
-load_dotenv()
+# 加载环境变量（指定 .env 文件路径）
+_env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=_env_path)
 
 # OpenRouter API 配置
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")

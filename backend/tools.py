@@ -7,7 +7,7 @@ import asyncio
 import re
 from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass
-from config import KALI_TOOLS, TASK_TIMEOUT
+from config import TASK_TIMEOUT
 
 
 @dataclass

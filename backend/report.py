@@ -5,7 +5,6 @@ SkidCon 报告生成模块
 
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Optional
 from config import REPORTS_DIR
 
@@ -217,7 +216,7 @@ class ReportGenerator:
 """
         
         # 添加附录
-        report += """## 3. 附录
+        report += f"""## 3. 附录
 
 ### 3.1 测试工具列表
 

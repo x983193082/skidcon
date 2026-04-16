@@ -8,7 +8,6 @@ import json
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
-from pathlib import Path
 from config import MAX_CONCURRENT_TASKS, TASKS_DIR
 
 
@@ -118,7 +117,12 @@ class TaskManager:
             
             # 创建回调函数，同时更新任务日志和推送 WebSocket
             async def combined_callback(message: str):
-                task.add_log(message)
+                # 添加日志（同步写入，但很快）
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                task.logs.append(f"[{timestamp}] {message}")
+                # 定期保存到磁盘（每 10 条日志保存一次，减少 I/O）
+                if len(task.logs) % 10 == 0:
+                    task.save()
                 
                 # 推送 WebSocket 消息
                 if task.id in self.websocket_clients:

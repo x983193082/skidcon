@@ -24,9 +24,11 @@ class WebSocketClient {
     this.taskId = taskId
     this.reconnectAttempts = 0
     
+    // 使用当前页面的协议和主机（Vite 代理会转发到后端）
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/ws/task/${taskId}`
     
+    console.log(`WebSocket 连接到: ${wsUrl}`)
     this.ws = new WebSocket(wsUrl)
     
     this.ws.onopen = () => {
