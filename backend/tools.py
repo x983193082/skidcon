@@ -43,6 +43,21 @@ class KaliTool:
         """异步执行工具（带重试机制）"""
         import time
         
+        # 首次执行前检查工具是否可用，避免无效重试
+        if not check_tool_available(self.tool_name):
+            if callback:
+                await callback(f"[{self.tool_name}] 工具未安装，跳过执行")
+            return ToolResult(
+                tool_name=self.tool_name,
+                command="",
+                stdout="",
+                stderr=f"工具 {self.tool_name} 未安装",
+                returncode=-1,
+                success=False,
+                execution_time=0.0,
+                retry_count=0
+            )
+        
         for attempt in range(self.max_retries + 1):
             start_time = time.time()
             command = self.build_command(**kwargs)
@@ -66,8 +81,11 @@ class KaliTool:
                         line = await stream.readline()
                         if not line:
                             break
-                        decoded = line.decode('utf-8', errors='ignore')
-                        data_list.append(decoded)
+                        decoded = line.decode('utf-8', errors='ignore').rstrip()
+                        # 过滤空行和纯进度信息
+                        if not decoded.strip():
+                            continue
+                        data_list.append(decoded + '\n')
                         if callback:
                             await callback(f"[{self.tool_name}] {prefix}: {decoded.strip()}")
                 
@@ -181,8 +199,15 @@ class NmapTool(KaliTool):
     def parse_output(self, stdout, stderr):
         """解析 Nmap XML 输出"""
         import xml.etree.ElementTree as ET
+        
+        # 从混杂输出中提取 XML 内容
+        xml_content = self._extract_xml(stdout)
+        if not xml_content:
+            # 回退到文本解析
+            return self._parse_text_output(stdout)
+        
         try:
-            root = ET.fromstring(stdout)
+            root = ET.fromstring(xml_content)
             ports = []
             for host in root.findall('.//host'):
                 ip = host.find('address').get('addr') if host.find('address') is not None else "unknown"
@@ -203,11 +228,32 @@ class NmapTool(KaliTool):
             return {
                 "ports": ports, 
                 "hosts": len(root.findall('.//host')),
-                "raw_output": stdout[:2000]
+                "raw_output": xml_content[:2000]
             }
         except ET.ParseError:
             # 回退到文本解析
             return self._parse_text_output(stdout)
+    
+    def _extract_xml(self, stdout: str) -> Optional[str]:
+        """从 nmap 输出中提取 XML 内容（过滤进度信息等干扰）"""
+        # 查找 <?xml 或 <nmaprun 开始位置
+        xml_start = stdout.find('<?xml')
+        if xml_start == -1:
+            xml_start = stdout.find('<nmaprun')
+        
+        if xml_start == -1:
+            return None
+        
+        # 从 XML 开始位置截取
+        xml_content = stdout[xml_start:]
+        
+        # 尝试找到匹配的根元素闭合
+        # 简单策略：找到最后一个 </nmaprun> 并截取到那里
+        xml_end = xml_content.rfind('</nmaprun>')
+        if xml_end != -1:
+            xml_content = xml_content[:xml_end + len('</nmaprun>')]
+        
+        return xml_content if xml_content.strip() else None
     
     def _parse_text_output(self, stdout):
         """从文本输出中解析端口信息"""
@@ -774,8 +820,127 @@ TOOL_REGISTRY = {
 }
 
 
+class ExecuteKaliToolWrapper(KaliTool):
+    """通用 Kali 工具执行器包装 - 通过 execute_kali_tool 调用任何工具"""
+    def __init__(self):
+        super().__init__("execute_kali_tool", "{tool} {args}")
+    
+    def build_command(self, **kwargs) -> str:
+        """构建命令"""
+        tool = kwargs.get("tool", "")
+        args = kwargs.get("args", "")
+        if not tool:
+            return "echo '错误: 未指定工具名称'"
+        return f"{tool} {args}"
+    
+    async def execute(self, callback: Optional[Callable] = None, **kwargs) -> ToolResult:
+        """执行通用工具调用"""
+        import time
+        
+        tool = kwargs.get("tool", "")
+        args = kwargs.get("args", "")
+        
+        if not tool:
+            return ToolResult(
+                tool_name="execute_kali_tool",
+                command="",
+                stdout="",
+                stderr="错误: 未指定工具名称",
+                returncode=-1,
+                success=False
+            )
+        
+        # 安全检查
+        if not check_tool_available(tool):
+            if callback:
+                await callback(f"[execute_kali_tool] 工具 '{tool}' 未安装，跳过执行")
+            return ToolResult(
+                tool_name="execute_kali_tool",
+                command=f"{tool} {args}",
+                stdout="",
+                stderr=f"工具 '{tool}' 未安装或不在 PATH 中",
+                returncode=-1,
+                success=False
+            )
+        
+        command = f"{tool} {args}"
+        start_time = time.time()
+        
+        if callback:
+            await callback(f"[execute_kali_tool] 执行: {command}")
+        
+        try:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout_data = []
+            stderr_data = []
+            
+            async def read_stream(stream, data_list, prefix):
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    decoded = line.decode('utf-8', errors='ignore').rstrip()
+                    if not decoded.strip():
+                        continue
+                    data_list.append(decoded + '\n')
+                    if callback:
+                        await callback(f"[{tool}] {prefix}: {decoded.strip()}")
+            
+            await asyncio.wait_for(
+                asyncio.gather(
+                    read_stream(process.stdout, stdout_data, "OUT"),
+                    read_stream(process.stderr, stderr_data, "ERR")
+                ),
+                timeout=TASK_TIMEOUT
+            )
+            
+            returncode = await process.wait()
+            execution_time = time.time() - start_time
+            
+            stdout = ''.join(stdout_data)
+            stderr = ''.join(stderr_data)
+            
+            return ToolResult(
+                tool_name=f"execute_kali_tool({tool})",
+                command=command,
+                stdout=stdout,
+                stderr=stderr,
+                returncode=returncode,
+                success=returncode == 0,
+                execution_time=execution_time
+            )
+            
+        except asyncio.TimeoutError:
+            return ToolResult(
+                tool_name=f"execute_kali_tool({tool})",
+                command=command,
+                stdout="",
+                stderr="执行超时",
+                returncode=-1,
+                success=False,
+                execution_time=time.time() - start_time
+            )
+        except Exception as e:
+            return ToolResult(
+                tool_name=f"execute_kali_tool({tool})",
+                command=command,
+                stdout="",
+                stderr=str(e),
+                returncode=-1,
+                success=False,
+                execution_time=time.time() - start_time
+            )
+
+
 def get_tool(tool_name: str) -> Optional[KaliTool]:
     """获取工具实例"""
+    if tool_name == "execute_kali_tool":
+        return ExecuteKaliToolWrapper()
     if tool_name in TOOL_REGISTRY:
         return TOOL_REGISTRY[tool_name]()
     return None

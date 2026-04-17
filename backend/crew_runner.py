@@ -1,6 +1,6 @@
 """
 SkidCon CrewAI 执行核心
-实现多阶段链式攻击流程，支持流式输出回调
+实现 Agent 驱动的多阶段渗透测试流程，支持流式输出回调
 """
 
 import asyncio
@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional
 from datetime import datetime
 from crewai import Crew, Process, Task
 from agents import get_all_agents
-from tools import execute_tool, get_available_tools
+from tools import execute_tool, get_available_tools, get_all_tools
 from attack_chain import AttackChainEngine
 from config import TASK_TIMEOUT
 
@@ -18,7 +18,7 @@ CREW_TASK_TIMEOUT = 300  # 5 分钟
 
 
 class CrewRunner:
-    """CrewAI 执行器"""
+    """CrewAI 执行器 - Agent 驱动的工具选择和执行"""
     
     def __init__(self, target: str, callback: Optional[Callable] = None):
         self.target = target
@@ -28,12 +28,75 @@ class CrewRunner:
         self.stage_results = {}
         self.attack_chain = AttackChainEngine()
         self.discovered_services = []
+        self.available_tools = []  # 缓存可用工具列表
     
     async def _get_agents(self):
         """延迟获取 Agent（避免启动时初始化）"""
         if not self.agents:
             self.agents = get_all_agents()
         return self.agents
+    
+    async def _get_available_tools(self) -> List[str]:
+        """获取可用工具列表（缓存）"""
+        if not self.available_tools:
+            self.available_tools = get_available_tools()
+        return self.available_tools
+    
+    async def _execute_selected_tools(self, tool_list: List[Dict], stage_name: str = "") -> Dict:
+        """执行 Agent 选择的工具列表
+        
+        Args:
+            tool_list: Agent 返回的工具列表，格式为 [{"tool": "nmap", "args": "-sV target", "reason": "端口扫描"}, ...]
+            stage_name: 阶段名称（用于日志）
+        
+        Returns:
+            工具执行结果字典
+        """
+        results = {}
+        
+        if not tool_list:
+            await self._send_callback(f"  ⚠️ {stage_name}: Agent 未选择任何工具，使用默认工具集")
+            return results
+        
+        async def run_tool(tool_info):
+            tool_name = tool_info.get("tool", "")
+            args = tool_info.get("args", "")
+            reason = tool_info.get("reason", "")
+            
+            if not tool_name:
+                return None, "工具名称为空"
+            
+            if reason:
+                await self._send_callback(f"  [{stage_name}] 执行 {tool_name}: {reason}")
+            else:
+                await self._send_callback(f"  [{stage_name}] 执行 {tool_name}: {args}")
+            
+            # 使用 execute_kali_tool 的方式执行
+            result = await execute_tool("execute_kali_tool", callback=self._send_callback, 
+                                        tool=tool_name, args=args)
+            return tool_name, result
+        
+        tasks = [run_tool(t) for t in tool_list]
+        completed = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for item in completed:
+            if isinstance(item, Exception):
+                await self._send_callback(f"  ⚠️ 工具执行异常: {item}")
+                continue
+            name, result = item
+            if name is None:
+                continue
+            if result:
+                results[name] = {
+                    "success": result.success,
+                    "parsed_data": result.parsed_data,
+                    "raw_output": result.stdout[:3000] if result.stdout else "",
+                    "stderr": result.stderr[:1000] if result.stderr else "",
+                    "execution_time": result.execution_time,
+                    "command": result.command,
+                }
+        
+        return results
     
     async def _send_callback(self, message: str):
         """发送回调消息"""
@@ -101,92 +164,163 @@ class CrewRunner:
             }
     
     async def _stage_recon(self) -> Dict:
-        """阶段 1: 信息收集（并行执行）"""
+        """阶段 1: 信息收集（Agent 驱动工具选择 + 并行执行）"""
         results = {}
         agents = await self._get_agents()
+        available_tools = await self._get_available_tools()
         
         # 规范化目标格式
         target = self.target
         port = None
-        # 提取主机名/IP（去掉协议和路径）
         if target.startswith("http://"):
             target = target[7:]
         elif target.startswith("https://"):
             target = target[8:]
         target = target.rstrip("/")
         
-        # 分离主机和端口
         if ":" in target:
             parts = target.split(":")
             target = parts[0]
             port = parts[1]
         
-        # 使用动态攻击链选择工具
-        tools_to_run = self.attack_chain.select_tools_for_recon(target, port)
-        
-        # 并行执行工具
-        async def run_tool(name, kwargs):
-            result = await execute_tool(name, callback=self._send_callback, **kwargs)
-            return name, result
-        
-        tasks = [run_tool(name, kwargs) for name, kwargs in tools_to_run]
-        completed = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for item in completed:
-            if isinstance(item, Exception):
-                await self._send_callback(f"  ⚠️ 工具执行异常: {item}")
-                continue
-            name, result = item
-            if result:
-                results[name] = {
-                    "success": result.success,
-                    "parsed_data": result.parsed_data,
-                    "raw_output": result.stdout[:2000],
-                    "execution_time": result.execution_time
-                }
-        
-        # 使用 Planner Agent 分析收集到的信息
+        # 步骤 1: 让 Planner Agent 根据目标选择信息收集工具
         planner = agents["planner"]
-        recon_task = Task(
-            description=f"""分析以下针对目标 {self.target} 的信息收集结果，制定后续测试策略：
+        tool_selection_task = Task(
+            description=f"""你是渗透测试规划专家。针对目标 {self.target}（主机: {target}, 端口: {port or '默认'}），
+请从以下可用工具中选择最适合信息收集阶段的工具，并说明选择理由。
+
+可用工具列表: {', '.join(available_tools)}
+
+请以 JSON 数组格式返回工具选择，每个工具包含:
+- tool: 工具名称
+- args: 工具参数（使用目标 {target} 和端口 {port or ''}）
+- reason: 选择理由
+
+示例:
+[
+    {{"tool": "nmap", "args": "-sV -sC -O -p {port or '1-1000'} {target}", "reason": "端口扫描和服务识别"}},
+    {{"tool": "whois", "args": "{target}", "reason": "域名注册信息查询"}},
+    {{"tool": "dig", "args": "{target} ANY", "reason": "DNS 记录查询"}}
+]
+
+注意：只选择实际存在的工具，参数中直接使用目标地址。返回纯 JSON，不要包含其他文字。""",
+            agent=planner,
+            expected_output="JSON 格式的工具选择列表"
+        )
+        
+        crew = Crew(
+            agents=[planner],
+            tasks=[tool_selection_task],
+            process=Process.sequential,
+            verbose=True
+        )
+        
+        loop = asyncio.get_running_loop()
+        try:
+            agent_response = await asyncio.wait_for(
+                loop.run_in_executor(None, crew.kickoff),
+                timeout=CREW_TASK_TIMEOUT
+            )
+            agent_text = str(agent_response).strip()
+            
+            # 解析 Agent 返回的 JSON
+            tool_list = self._parse_agent_tool_selection(agent_text)
+            await self._send_callback(f"  Planner 选择了 {len(tool_list)} 个工具")
+            
+        except asyncio.TimeoutError:
+            await self._send_callback(f"  ⚠️ Planner Agent 超时，使用默认工具集")
+            tool_list = []
+        except Exception as e:
+            await self._send_callback(f"  ⚠️ Planner Agent 错误: {e}，使用默认工具集")
+            tool_list = []
+        
+        # 步骤 2: 如果 Agent 未选择工具，使用默认工具集
+        if not tool_list:
+            tool_list = [
+                {"tool": "nmap", "args": f"-sV -sC -O {'-p ' + port if port else ''} {target}", "reason": "端口扫描和服务识别"},
+                {"tool": "whois", "args": target, "reason": "域名信息查询"},
+                {"tool": "dig", "args": f"{target} ANY", "reason": "DNS 记录查询"},
+            ]
+        
+        # 步骤 3: 并行执行工具
+        tool_results = await self._execute_selected_tools(tool_list, "信息收集")
+        results.update(tool_results)
+        
+        # 步骤 4: Planner Agent 分析收集结果
+        if results:
+            analysis_task = Task(
+                description=f"""分析以下针对目标 {self.target} 的信息收集结果，制定后续测试策略：
 
 信息收集结果：
-{json.dumps(results, ensure_ascii=False, indent=2)}
+{json.dumps(results, ensure_ascii=False, indent=2)[:5000]}
 
 请分析：
 1. 开放的端口和服务
 2. 使用的技术和框架
 3. 潜在的攻击面
-4. 推荐的后续测试步骤""",
-            agent=planner,
-            expected_output="详细的攻击策略和后续测试计划"
-        )
-        
-        crew = Crew(
-            agents=[planner],
-            tasks=[recon_task],
-            process=Process.sequential,
-            verbose=True
-        )
-        
-        # 在线程池中运行以避免阻塞事件循环，添加超时控制
-        loop = asyncio.get_running_loop()
-        try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, crew.kickoff),
-                timeout=CREW_TASK_TIMEOUT
+4. 推荐的后续测试步骤和工具选择""",
+                agent=planner,
+                expected_output="详细的攻击策略和后续测试计划"
             )
-            results["planner_analysis"] = str(result)
-        except asyncio.TimeoutError:
-            await self._send_callback(f"  ⚠️ Planner Agent 执行超时 ({CREW_TASK_TIMEOUT}s)，跳过分析")
-            results["planner_analysis"] = "执行超时，未获得分析结果"
+            
+            crew = Crew(
+                agents=[planner],
+                tasks=[analysis_task],
+                process=Process.sequential,
+                verbose=True
+            )
+            
+            try:
+                analysis_result = await asyncio.wait_for(
+                    loop.run_in_executor(None, crew.kickoff),
+                    timeout=CREW_TASK_TIMEOUT
+                )
+                results["planner_analysis"] = str(analysis_result)
+            except asyncio.TimeoutError:
+                results["planner_analysis"] = "分析超时，请参考工具原始输出"
         
-        await self._send_callback(f"  信息收集完成，发现 {len(results)} 项结果")
+        await self._send_callback(f"  信息收集完成，执行了 {len(results)} 个工具")
         return results
     
+    def _parse_agent_tool_selection(self, agent_text: str) -> List[Dict]:
+        """解析 Agent 返回的工具选择 JSON"""
+        import re
+        
+        # 尝试直接解析
+        try:
+            data = json.loads(agent_text)
+            if isinstance(data, list):
+                return data
+        except json.JSONDecodeError:
+            pass
+        
+        # 尝试从文本中提取 JSON 数组
+        json_match = re.search(r'\[[\s\S]*\]', agent_text)
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+                if isinstance(data, list):
+                    return data
+            except json.JSONDecodeError:
+                pass
+        
+        # 尝试提取 ```json 代码块
+        code_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', agent_text)
+        if code_match:
+            try:
+                data = json.loads(code_match.group(1))
+                if isinstance(data, list):
+                    return data
+            except json.JSONDecodeError:
+                pass
+        
+        return []
+    
     async def _stage_service_analysis(self) -> Dict:
-        """阶段 2: 服务分析（根据发现的服务动态选择工具）"""
+        """阶段 2: 服务分析（Agent 驱动工具选择）"""
         results = {}
+        agents = await self._get_agents()
+        available_tools = await self._get_available_tools()
         
         # 规范化目标格式
         target = self.target
@@ -196,46 +330,88 @@ class CrewRunner:
             target = target[8:]
         target = target.rstrip("/")
         
-        # 根据发现的服务动态选择工具
-        from config import WORDLISTS_DIR
-        wordlist = str(WORDLISTS_DIR / "directories.txt")
-        tools_to_run = self.attack_chain.select_tools_for_services(target, self.discovered_services, wordlist)
+        if ":" in target:
+            parts = target.split(":")
+            target = parts[0]
         
-        # 如果没有发现特定服务，使用默认工具
-        if not tools_to_run:
-            tools_to_run = [
-                ("nikto", {"url": f"http://{target}"}),
-                ("enum4linux", {"target": target}),
+        # 构建服务摘要供 Agent 参考
+        service_summary = []
+        for s in self.discovered_services:
+            service_summary.append(f"端口 {s.port}: {s.service} ({s.version or '未知版本'})")
+        
+        service_info = "\n".join(service_summary) if service_summary else "未发现开放服务"
+        
+        # 让 Executor Agent 根据发现的服务选择分析工具
+        executor = agents["executor"]
+        tool_selection_task = Task(
+            description=f"""你是工具执行专家。针对目标 {self.target}，信息收集阶段发现以下服务：
+
+{service_info}
+
+请从以下可用工具中选择最适合服务分析阶段的工具，并说明选择理由。
+
+可用工具列表: {', '.join(available_tools)}
+
+请以 JSON 数组格式返回工具选择，每个工具包含:
+- tool: 工具名称
+- args: 工具参数
+- reason: 选择理由
+
+示例:
+[
+    {{"tool": "nikto", "args": "-h http://{target}", "reason": "Web 漏洞扫描"}},
+    {{"tool": "whatweb", "args": "http://{target}", "reason": "技术栈识别"}},
+    {{"tool": "gobuster", "args": "dir -u http://{target} -w /usr/share/wordlists/dirb/common.txt", "reason": "目录枚举"}}
+]
+
+注意：根据实际发现的服务类型选择工具。如果发现了 Web 服务，选择 Web 扫描工具；如果发现了 SMB 服务，选择 SMB 枚举工具。返回纯 JSON。""",
+            agent=executor,
+            expected_output="JSON 格式的工具选择列表"
+        )
+        
+        crew = Crew(
+            agents=[executor],
+            tasks=[tool_selection_task],
+            process=Process.sequential,
+            verbose=True
+        )
+        
+        loop = asyncio.get_running_loop()
+        try:
+            agent_response = await asyncio.wait_for(
+                loop.run_in_executor(None, crew.kickoff),
+                timeout=CREW_TASK_TIMEOUT
+            )
+            tool_list = self._parse_agent_tool_selection(str(agent_response))
+            await self._send_callback(f"  Executor 选择了 {len(tool_list)} 个工具")
+        except asyncio.TimeoutError:
+            await self._send_callback(f"  ⚠️ Executor Agent 超时，使用默认工具集")
+            tool_list = []
+        except Exception as e:
+            await self._send_callback(f"  ⚠️ Executor Agent 错误: {e}，使用默认工具集")
+            tool_list = []
+        
+        # 如果 Agent 未选择工具，使用默认工具集
+        if not tool_list:
+            from config import WORDLISTS_DIR
+            wordlist = str(WORDLISTS_DIR / "directories.txt")
+            tool_list = [
+                {"tool": "nikto", "args": f"-h http://{target}", "reason": "Web 漏洞扫描"},
+                {"tool": "enum4linux", "args": target, "reason": "SMB 枚举"},
             ]
         
-        # 并行执行工具
-        async def run_tool(name, kwargs):
-            result = await execute_tool(name, callback=self._send_callback, **kwargs)
-            return name, result
-        
-        tasks = [run_tool(name, kwargs) for name, kwargs in tools_to_run]
-        completed = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for item in completed:
-            if isinstance(item, Exception):
-                await self._send_callback(f"  ⚠️ 工具执行异常: {item}")
-                continue
-            name, result = item
-            if result:
-                results[name] = {
-                    "success": result.success,
-                    "parsed_data": result.parsed_data,
-                    "raw_output": result.stdout[:2000],
-                    "execution_time": result.execution_time
-                }
+        # 执行工具
+        tool_results = await self._execute_selected_tools(tool_list, "服务分析")
+        results.update(tool_results)
         
         await self._send_callback(f"  服务分析完成，执行了 {len(results)} 个工具")
         return results
     
     async def _stage_vulnerability_detection(self) -> Dict:
-        """阶段 3: 漏洞检测（动态选择工具）"""
+        """阶段 3: 漏洞检测（Agent 驱动工具选择）"""
         results = {}
         agents = await self._get_agents()
+        available_tools = await self._get_available_tools()
         
         # 规范化目标格式
         target = self.target
@@ -245,49 +421,159 @@ class CrewRunner:
             target = target[8:]
         target = target.rstrip("/")
         
-        # 根据发现的服务动态选择漏洞检测工具
-        tools_to_run = self.attack_chain.select_tools_for_vulnerability(target, self.discovered_services)
+        if ":" in target:
+            parts = target.split(":")
+            target = parts[0]
         
-        # 并行执行工具
-        async def run_tool(name, kwargs):
-            result = await execute_tool(name, callback=self._send_callback, **kwargs)
-            return name, result
+        # 构建前两个阶段的结果摘要
+        recon_summary = json.dumps(self.stage_results.get("recon", {}), ensure_ascii=False, indent=2)[:3000]
+        service_summary = json.dumps(self.stage_results.get("service_analysis", {}), ensure_ascii=False, indent=2)[:3000]
         
-        tasks = [run_tool(name, kwargs) for name, kwargs in tools_to_run]
-        completed = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for item in completed:
-            if isinstance(item, Exception):
-                await self._send_callback(f"  ⚠️ 工具执行异常: {item}")
-                continue
-            name, result = item
-            if result:
-                results[name] = {
-                    "success": result.success,
-                    "parsed_data": result.parsed_data,
-                    "raw_output": result.stdout[:2000],
-                    "execution_time": result.execution_time
-                }
-        
-        # 使用 Analyzer Agent 分析漏洞
+        # 让 Analyzer Agent 选择漏洞检测工具
         analyzer = agents["analyzer"]
-        analysis_task = Task(
-            description=f"""分析以下针对目标 {self.target} 的漏洞扫描结果，识别真实漏洞并降低误报：
+        tool_selection_task = Task(
+            description=f"""你是漏洞分析专家。针对目标 {self.target}，前两个阶段的扫描结果如下：
+
+信息收集结果摘要:
+{recon_summary}
+
+服务分析结果摘要:
+{service_summary}
+
+请从以下可用工具中选择最适合漏洞检测阶段的工具，并说明选择理由。
+
+可用工具列表: {', '.join(available_tools)}
+
+请以 JSON 数组格式返回工具选择，每个工具包含:
+- tool: 工具名称
+- args: 工具参数
+- reason: 选择理由
+
+示例:
+[
+    {{"tool": "nuclei", "args": "-u http://{target}", "reason": "已知漏洞扫描"}},
+    {{"tool": "sqlmap", "args": "-u http://{target}/page?id=1 --batch", "reason": "SQL 注入检测"}},
+    {{"tool": "nikto", "args": "-h http://{target}", "reason": "Web 漏洞扫描"}},
+    {{"tool": "searchsploit", "args": "Apache 2.4", "reason": "已知 CVE 搜索"}}
+]
+
+注意：根据前两个阶段发现的服务和技术栈，选择针对性的漏洞检测工具。返回纯 JSON。""",
+            agent=analyzer,
+            expected_output="JSON 格式的工具选择列表"
+        )
+        
+        crew = Crew(
+            agents=[analyzer],
+            tasks=[tool_selection_task],
+            process=Process.sequential,
+            verbose=True
+        )
+        
+        loop = asyncio.get_running_loop()
+        try:
+            agent_response = await asyncio.wait_for(
+                loop.run_in_executor(None, crew.kickoff),
+                timeout=CREW_TASK_TIMEOUT
+            )
+            tool_list = self._parse_agent_tool_selection(str(agent_response))
+            await self._send_callback(f"  Analyzer 选择了 {len(tool_list)} 个工具")
+        except asyncio.TimeoutError:
+            await self._send_callback(f"  ⚠️ Analyzer Agent 超时，使用默认工具集")
+            tool_list = []
+        except Exception as e:
+            await self._send_callback(f"  ⚠️ Analyzer Agent 错误: {e}，使用默认工具集")
+            tool_list = []
+        
+        # 如果 Agent 未选择工具，使用默认工具集
+        if not tool_list:
+            tool_list = [
+                {"tool": "nuclei", "args": f"-u http://{target}", "reason": "已知漏洞扫描"},
+                {"tool": "searchsploit", "args": target, "reason": "已知 CVE 搜索"},
+            ]
+        
+        # 执行工具
+        tool_results = await self._execute_selected_tools(tool_list, "漏洞检测")
+        results.update(tool_results)
+        
+        # Analyzer Agent 分析漏洞结果
+        if results:
+            analysis_task = Task(
+                description=f"""分析以下针对目标 {self.target} 的漏洞扫描结果，识别真实漏洞并降低误报：
 
 扫描结果：
-{json.dumps(results, ensure_ascii=False, indent=2)}
+{json.dumps(results, ensure_ascii=False, indent=2)[:5000]}
 
 请分析：
 1. 确认真实存在的漏洞
 2. 排除误报
 3. 评估每个漏洞的风险等级（Critical/High/Medium/Low）
 4. 提供漏洞利用的可能性分析""",
-            agent=analyzer,
-            expected_output="详细的漏洞分析报告，包含风险评级"
+                agent=analyzer,
+                expected_output="详细的漏洞分析报告，包含风险评级"
+            )
+            
+            crew = Crew(
+                agents=[analyzer],
+                tasks=[analysis_task],
+                process=Process.sequential,
+                verbose=True
+            )
+            
+            try:
+                analysis_result = await asyncio.wait_for(
+                    loop.run_in_executor(None, crew.kickoff),
+                    timeout=CREW_TASK_TIMEOUT
+                )
+                results["analyzer_report"] = str(analysis_result)
+            except asyncio.TimeoutError:
+                await self._send_callback(f"  ⚠️ Analyzer Agent 分析超时")
+                results["analyzer_report"] = "分析超时，请参考工具原始输出"
+        
+        await self._send_callback(f"  漏洞检测完成，执行了 {len(results)} 个工具")
+        return results
+    
+    async def _stage_exploitation(self) -> Dict:
+        """阶段 4: 漏洞利用（Agent 驱动）"""
+        results = {}
+        agents = await self._get_agents()
+        available_tools = await self._get_available_tools()
+        
+        vuln_data = self.stage_results.get("vulnerability_detection", {})
+        
+        await self._send_callback("  分析可利用的漏洞...")
+        
+        # 步骤 1: 让 Executor Agent 分析可利用的漏洞并选择工具
+        executor = agents["executor"]
+        vuln_summary = json.dumps(vuln_data, ensure_ascii=False, indent=2)[:5000]
+        
+        analysis_task = Task(
+            description=f"""你是工具执行专家。根据以下漏洞扫描结果，分析哪些漏洞可以被利用，并选择相应的验证工具。
+
+漏洞扫描结果：
+{vuln_summary}
+
+请分析：
+1. 哪些漏洞可以被实际利用或验证
+2. 应该使用什么工具来验证（从以下可用工具中选择）
+3. 每个漏洞的利用方案
+
+可用工具列表: {', '.join(available_tools)}
+
+请以 JSON 格式返回分析结果：
+{{
+    "exploitable_vulns": [
+        {{"name": "漏洞名称", "severity": "Critical/High/Medium/Low", "tool": "验证工具名", "args": "工具参数", "reason": "选择理由"}}
+    ],
+    "summary": "总体分析总结"
+}}
+
+注意：只进行安全的验证（如 searchsploit 搜索、curl 验证），不要执行可能造成破坏的操作。返回纯 JSON。""",
+            agent=executor,
+            expected_output="JSON 格式的漏洞利用分析结果"
         )
         
         crew = Crew(
-            agents=[analyzer],
+            agents=[executor],
             tasks=[analysis_task],
             process=Process.sequential,
             verbose=True
@@ -295,28 +581,25 @@ class CrewRunner:
         
         loop = asyncio.get_running_loop()
         try:
-            result = await asyncio.wait_for(
+            agent_response = await asyncio.wait_for(
                 loop.run_in_executor(None, crew.kickoff),
                 timeout=CREW_TASK_TIMEOUT
             )
-            results["analyzer_report"] = str(result)
+            agent_text = str(agent_response)
+            
+            # 解析 Agent 返回的分析结果
+            exploit_data = self._parse_exploit_analysis(agent_text)
+            exploitable_vulns = exploit_data.get("exploitable_vulns", [])
+            results["executor_analysis"] = exploit_data.get("summary", agent_text[:2000])
+            
         except asyncio.TimeoutError:
-            await self._send_callback(f"  ⚠️ Analyzer Agent 执行超时 ({CREW_TASK_TIMEOUT}s)，跳过分析")
-            results["analyzer_report"] = "执行超时，未获得分析结果"
-        
-        await self._send_callback(f"  漏洞检测完成")
-        return results
-    
-    async def _stage_exploitation(self) -> Dict:
-        """阶段 4: 漏洞利用（实现实际功能）"""
-        results = {}
-        
-        vuln_data = self.stage_results.get("vulnerability_detection", {})
-        
-        await self._send_callback("  分析可利用的漏洞...")
-        
-        # 1. 从漏洞检测结果中提取可利用的漏洞
-        exploitable_vulns = self._identify_exploitable_vulns(vuln_data)
+            await self._send_callback(f"  ⚠️ Executor Agent 分析超时，使用默认分析")
+            exploitable_vulns = self._identify_exploitable_vulns(vuln_data)
+            results["executor_analysis"] = "分析超时，使用默认漏洞识别结果"
+        except Exception as e:
+            await self._send_callback(f"  ⚠️ Executor Agent 错误: {e}")
+            exploitable_vulns = self._identify_exploitable_vulns(vuln_data)
+            results["executor_analysis"] = f"分析错误: {e}"
         
         if not exploitable_vulns:
             await self._send_callback("  未发现明显可利用的漏洞，跳过漏洞利用阶段")
@@ -326,38 +609,92 @@ class CrewRunner:
             }
             return results
         
-        # 2. 对每个漏洞搜索 exploit
+        # 步骤 2: 执行 Agent 选择的验证工具
+        await self._send_callback(f"  发现 {len(exploitable_vulns)} 个可利用的漏洞")
+        
         for vuln in exploitable_vulns:
-            await self._send_callback(f"  分析漏洞利用方案: {vuln.get('name', '未知漏洞')}")
+            vuln_name = vuln.get("name", "未知漏洞")
+            tool_name = vuln.get("tool", "")
+            args = vuln.get("args", "")
+            reason = vuln.get("reason", "")
             
-            # 搜索对应的 exploit
-            if vuln.get("cve_id"):
-                await self._send_callback(f"  搜索 {vuln['cve_id']} 的 exploit...")
-                exploit_result = await execute_tool(
-                    "searchsploit", 
-                    callback=self._send_callback,
-                    query=vuln["cve_id"]
-                )
+            await self._send_callback(f"  验证漏洞: {vuln_name} - {reason}")
+            
+            if tool_name:
+                tool_result = await execute_tool(tool_name, callback=self._send_callback, 
+                                                  **self._parse_tool_args(args))
+                if tool_result:
+                    results[f"verify_{vuln_name}"] = {
+                        "success": tool_result.success,
+                        "raw_output": tool_result.stdout[:2000],
+                        "command": tool_result.command,
+                    }
+            
+            # 搜索 exploit
+            cve_id = vuln.get("cve_id", "")
+            if cve_id:
+                await self._send_callback(f"  搜索 {cve_id} 的 exploit...")
+                exploit_result = await execute_tool("searchsploit", callback=self._send_callback, query=cve_id)
                 if exploit_result:
-                    results[f"exploit_search_{vuln['cve_id']}"] = {
+                    results[f"exploit_search_{cve_id}"] = {
                         "success": exploit_result.success,
                         "exploits": exploit_result.parsed_data.get("exploits", []),
                         "raw_output": exploit_result.stdout[:1000]
                     }
-            
-            # 生成利用方案
-            exploit_plan = await self._generate_exploit_plan(vuln)
-            results[f"exploit_plan_{vuln.get('name', 'unknown')}"] = exploit_plan
         
-        # 3. 总结利用可能性
+        # 步骤 3: 总结
         results["exploitation_summary"] = {
             "total_vulns_analyzed": len(exploitable_vulns),
             "exploits_found": len([k for k in results.keys() if k.startswith("exploit_search_")]),
-            "note": "以上为漏洞利用方案分析，未实际执行漏洞利用。实际环境中需要明确授权后才能执行。"
+            "note": "以上为漏洞利用方案分析，未实际执行破坏性操作。实际环境中需要明确授权后才能执行。"
         }
         
         await self._send_callback(f"  漏洞利用分析完成，分析了 {len(exploitable_vulns)} 个漏洞")
         return results
+    
+    def _parse_exploit_analysis(self, agent_text: str) -> Dict:
+        """解析 Agent 返回的漏洞利用分析 JSON"""
+        import re
+        
+        try:
+            data = json.loads(agent_text)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+        
+        json_match = re.search(r'\{[\s\S]*"exploitable_vulns"[\s\S]*\}', agent_text)
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                pass
+        
+        code_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', agent_text)
+        if code_match:
+            try:
+                data = json.loads(code_match.group(1))
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                pass
+        
+        return {"exploitable_vulns": [], "summary": agent_text[:2000]}
+    
+    def _parse_tool_args(self, args_str: str) -> Dict:
+        """解析工具参数字符串为 kwargs"""
+        # 简单解析：如果包含 = 则作为键值对
+        if "=" in args_str and not args_str.startswith("-"):
+            params = {}
+            for part in args_str.split():
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    params[k] = v
+            return params
+        # 否则作为位置参数
+        return {"args": args_str} if args_str else {}
     
     def _identify_exploitable_vulns(self, vuln_data: Dict) -> List[Dict]:
         """从漏洞数据中识别可利用的漏洞"""
@@ -435,27 +772,55 @@ class CrewRunner:
         return plan
     
     async def _stage_report_generation(self) -> Dict:
-        """阶段 5: 报告生成"""
+        """阶段 5: 报告生成（结合 Agent 分析和工具结果）"""
         agents = await self._get_agents()
         reporter = agents["reporter"]
+        
+        # 构建完整的测试数据摘要
+        all_stages_summary = {
+            "target": self.target,
+            "discovered_services": [
+                {"port": s.port, "service": s.service, "version": s.version, "product": s.product}
+                for s in self.discovered_services
+            ],
+            "stage_1_recon": {
+                "tools_executed": len([k for k in self.stage_results.get("recon", {}).keys() if k != "planner_analysis"]),
+                "planner_analysis": self.stage_results.get("recon", {}).get("planner_analysis", "")[:2000],
+            },
+            "stage_2_service_analysis": {
+                "tools_executed": len(self.stage_results.get("service_analysis", {})),
+            },
+            "stage_3_vulnerability_detection": {
+                "tools_executed": len([k for k in self.stage_results.get("vulnerability_detection", {}).keys() if k != "analyzer_report"]),
+                "analyzer_report": self.stage_results.get("vulnerability_detection", {}).get("analyzer_report", "")[:2000],
+            },
+            "stage_4_exploitation": {
+                "analysis": self.stage_results.get("exploitation", {}).get("executor_analysis", "")[:2000],
+                "summary": self.stage_results.get("exploitation", {}).get("exploitation_summary", {}),
+            },
+        }
         
         report_task = Task(
             description=f"""为以下渗透测试结果生成专业的 Markdown 格式报告：
 
 目标: {self.target}
-测试阶段结果:
-{json.dumps(self.stage_results, ensure_ascii=False, indent=2)}
+完整测试数据:
+{json.dumps(all_stages_summary, ensure_ascii=False, indent=2)[:8000]}
 
 请生成包含以下部分的报告：
 1. 执行摘要（测试目标、时间、发现漏洞总数、风险评级）
-2. 漏洞详情（每个漏洞的名称、风险等级、描述、影响、证据、修复建议）
-3. 附录（完整工具输出）
+2. 攻击面分析（开放服务、技术栈识别）
+3. 漏洞详情（每个漏洞的名称、风险等级、描述、影响、证据、修复建议）
+4. 攻击路径分析（可能的攻击链）
+5. 修复建议（按优先级排序）
+6. 附录（工具执行详情）
 
 报告格式要求：
 - 使用 Markdown 格式
 - 结构清晰，层次分明
 - 使用表格展示漏洞列表
-- 提供具体的修复建议和代码示例""",
+- 提供具体的修复建议和代码示例
+- 如果某个阶段没有发现漏洞，也要说明已执行的测试""",
             agent=reporter,
             expected_output="完整的 Markdown 格式渗透测试报告"
         )
@@ -475,8 +840,30 @@ class CrewRunner:
             )
             report_content = str(result)
         except asyncio.TimeoutError:
-            await self._send_callback(f"  ⚠️ Reporter Agent 执行超时 ({CREW_TASK_TIMEOUT}s)，使用默认报告")
-            report_content = f"# 渗透测试报告\n\n目标: {self.target}\n\n报告生成超时，请参考阶段结果获取详细信息。"
+            await self._send_callback(f"  ⚠️ Reporter Agent 执行超时，使用内置报告生成器")
+            # 回退到内置报告生成器
+            from report import report_generator
+            try:
+                full_results = {
+                    "target": self.target,
+                    "stages": self.stage_results,
+                    "discovered_services": [
+                        {"port": s.port, "service": s.service, "version": s.version}
+                        for s in self.discovered_services
+                    ],
+                }
+                # 生成一个临时 task_id
+                import uuid
+                temp_task_id = str(uuid.uuid4())
+                report_path = report_generator.generate_report(
+                    task_id=temp_task_id,
+                    target=self.target,
+                    results=full_results
+                )
+                with open(report_path, "r", encoding="utf-8") as f:
+                    report_content = f.read()
+            except Exception as e:
+                report_content = f"# 渗透测试报告\n\n目标: {self.target}\n\n报告生成失败: {e}"
         
         return {
             "content": report_content,
