@@ -4,9 +4,11 @@ SkidCon Kali 工具封装模块
 """
 
 import asyncio
+import json
 import re
+import shutil
 from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from config import TASK_TIMEOUT
 
 
@@ -20,6 +22,8 @@ class ToolResult:
     returncode: int
     success: bool
     parsed_data: Optional[Dict] = None
+    execution_time: float = 0.0
+    retry_count: int = 0
 
 
 class KaliTool:
@@ -29,88 +33,130 @@ class KaliTool:
         self.tool_name = tool_name
         self.command_template = command_template
         self.timeout = timeout
+        self.max_retries = 2
     
     def build_command(self, **kwargs) -> str:
         """构建命令"""
         return self.command_template.format(**kwargs)
     
     async def execute(self, callback: Optional[Callable] = None, **kwargs) -> ToolResult:
-        """异步执行工具"""
-        command = self.build_command(**kwargs)
+        """异步执行工具（带重试机制）"""
+        import time
         
-        if callback:
-            await callback(f"[{self.tool_name}] 执行命令: {command}")
+        for attempt in range(self.max_retries + 1):
+            start_time = time.time()
+            command = self.build_command(**kwargs)
+            
+            if callback:
+                retry_info = f" (重试 {attempt}/{self.max_retries})" if attempt > 0 else ""
+                await callback(f"[{self.tool_name}] 执行命令{retry_info}: {command}")
+            
+            try:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout_data = []
+                stderr_data = []
+                
+                async def read_stream(stream, data_list, prefix):
+                    while True:
+                        line = await stream.readline()
+                        if not line:
+                            break
+                        decoded = line.decode('utf-8', errors='ignore')
+                        data_list.append(decoded)
+                        if callback:
+                            await callback(f"[{self.tool_name}] {prefix}: {decoded.strip()}")
+                
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        read_stream(process.stdout, stdout_data, "OUT"),
+                        read_stream(process.stderr, stderr_data, "ERR")
+                    ),
+                    timeout=self.timeout
+                )
+                
+                returncode = await process.wait()
+                execution_time = time.time() - start_time
+                
+                stdout = ''.join(stdout_data)
+                stderr = ''.join(stderr_data)
+                
+                result = ToolResult(
+                    tool_name=self.tool_name,
+                    command=command,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=returncode,
+                    success=returncode == 0,
+                    execution_time=execution_time,
+                    retry_count=attempt
+                )
+                
+                # 解析输出
+                result.parsed_data = self.parse_output(stdout, stderr)
+                
+                # 如果成功或已达到最大重试次数，返回结果
+                if result.success or attempt >= self.max_retries:
+                    return result
+                
+                # 否则等待后重试
+                if callback:
+                    await callback(f"[{self.tool_name}] 执行失败，准备重试 ({attempt + 1}/{self.max_retries})")
+                await asyncio.sleep(2 ** attempt)  # 指数退避
+                
+            except asyncio.TimeoutError:
+                execution_time = time.time() - start_time
+                try:
+                    process.kill()
+                except:
+                    pass
+                if callback:
+                    await callback(f"[{self.tool_name}] 执行超时")
+                
+                if attempt >= self.max_retries:
+                    return ToolResult(
+                        tool_name=self.tool_name,
+                        command=command,
+                        stdout="",
+                        stderr="执行超时",
+                        returncode=-1,
+                        success=False,
+                        execution_time=execution_time,
+                        retry_count=attempt
+                    )
+                await asyncio.sleep(2 ** attempt)
+                
+            except Exception as e:
+                execution_time = time.time() - start_time
+                if callback:
+                    await callback(f"[{self.tool_name}] 执行错误: {str(e)}")
+                
+                if attempt >= self.max_retries:
+                    return ToolResult(
+                        tool_name=self.tool_name,
+                        command=command,
+                        stdout="",
+                        stderr=str(e),
+                        returncode=-1,
+                        success=False,
+                        execution_time=execution_time,
+                        retry_count=attempt
+                    )
+                await asyncio.sleep(2 ** attempt)
         
-        try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout_data = []
-            stderr_data = []
-            
-            async def read_stream(stream, data_list, prefix):
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    decoded = line.decode('utf-8', errors='ignore')
-                    data_list.append(decoded)
-                    if callback:
-                        await callback(f"[{self.tool_name}] {prefix}: {decoded.strip()}")
-            
-            await asyncio.wait_for(
-                asyncio.gather(
-                    read_stream(process.stdout, stdout_data, "OUT"),
-                    read_stream(process.stderr, stderr_data, "ERR")
-                ),
-                timeout=self.timeout
-            )
-            
-            returncode = await process.wait()
-            
-            stdout = ''.join(stdout_data)
-            stderr = ''.join(stderr_data)
-            
-            result = ToolResult(
-                tool_name=self.tool_name,
-                command=command,
-                stdout=stdout,
-                stderr=stderr,
-                returncode=returncode,
-                success=returncode == 0
-            )
-            
-            # 解析输出
-            result.parsed_data = self.parse_output(stdout, stderr)
-            
-            return result
-            
-        except asyncio.TimeoutError:
-            process.kill()
-            if callback:
-                await callback(f"[{self.tool_name}] 执行超时")
-            return ToolResult(
-                tool_name=self.tool_name,
-                command=command,
-                stdout="",
-                stderr="执行超时",
-                returncode=-1,
-                success=False
-            )
-        except Exception as e:
-            if callback:
-                await callback(f"[{self.tool_name}] 执行错误: {str(e)}")
-            return ToolResult(
-                tool_name=self.tool_name,
-                command=command,
-                stdout="",
-                stderr=str(e),
-                returncode=-1,
-                success=False
-            )
+        # 不应该到达这里
+        return ToolResult(
+            tool_name=self.tool_name,
+            command=command,
+            stdout="",
+            stderr="未知错误",
+            returncode=-1,
+            success=False
+        )
     
     def parse_output(self, stdout: str, stderr: str) -> Optional[Dict]:
         """解析工具输出，子类可重写"""
@@ -122,17 +168,49 @@ class KaliTool:
 class NmapTool(KaliTool):
     """Nmap 端口扫描器"""
     def __init__(self):
-        super().__init__("nmap", "nmap -sV -sC -O -oN - {target}")
+        super().__init__("nmap", "nmap -sV -sC -O -oX - {target}")
     
     def build_command(self, **kwargs) -> str:
         """构建命令，支持端口参数"""
         target = kwargs.get("target", "")
         port = kwargs.get("port")
         if port:
-            return f"nmap -sV -sC -O -oN - -p {port} {target}"
-        return f"nmap -sV -sC -O -oN - {target}"
+            return f"nmap -sV -sC -O -oX - -p {port} {target}"
+        return f"nmap -sV -sC -O -oX - {target}"
     
     def parse_output(self, stdout, stderr):
+        """解析 Nmap XML 输出"""
+        import xml.etree.ElementTree as ET
+        try:
+            root = ET.fromstring(stdout)
+            ports = []
+            for host in root.findall('.//host'):
+                ip = host.find('address').get('addr') if host.find('address') is not None else "unknown"
+                for port_elem in host.findall('.//port'):
+                    port_id = port_elem.get('portid')
+                    protocol = port_elem.get('protocol')
+                    state_elem = port_elem.find('state')
+                    state = state_elem.get('state') if state_elem is not None else "unknown"
+                    service = port_elem.find('service')
+                    ports.append({
+                        "ip": ip,
+                        "port": f"{port_id}/{protocol}",
+                        "state": state,
+                        "service": service.get('name') if service is not None else "unknown",
+                        "version": service.get('version', '') if service is not None else "",
+                        "product": service.get('product', '') if service is not None else "",
+                    })
+            return {
+                "ports": ports, 
+                "hosts": len(root.findall('.//host')),
+                "raw_output": stdout[:2000]
+            }
+        except ET.ParseError:
+            # 回退到文本解析
+            return self._parse_text_output(stdout)
+    
+    def _parse_text_output(self, stdout):
+        """从文本输出中解析端口信息"""
         ports = []
         for line in stdout.split('\n'):
             match = re.match(r'(\d+/\w+)\s+(\w+)\s+(\w+)\s+(.*)', line)
@@ -193,14 +271,26 @@ class SqlmapTool(KaliTool):
 class GobusterTool(KaliTool):
     """Gobuster 目录爆破"""
     def __init__(self):
-        super().__init__("gobuster", "gobuster dir -u {url} -w {wordlist} -t 20")
+        from config import WORDLISTS_DIR
+        default_wordlist = str(WORDLISTS_DIR / "directories.txt")
+        super().__init__("gobuster", f"gobuster dir -u {{url}} -w {default_wordlist} -t 20 --no-error")
+    
+    def build_command(self, **kwargs) -> str:
+        """构建命令，支持自定义字典"""
+        url = kwargs.get("url", "")
+        wordlist = kwargs.get("wordlist")
+        if wordlist:
+            return f"gobuster dir -u {url} -w {wordlist} -t 20 --no-error"
+        from config import WORDLISTS_DIR
+        default_wordlist = str(WORDLISTS_DIR / "directories.txt")
+        return f"gobuster dir -u {url} -w {default_wordlist} -t 20 --no-error"
     
     def parse_output(self, stdout, stderr):
         dirs = []
         for line in stdout.split('\n'):
-            if line.startswith("Found:"):
-                dirs.append(line.replace("Found:", "").strip())
-        return {"directories": dirs, "raw_output": stdout}
+            if line.startswith("Found:") or (line.startswith("/") and "Status:" in line):
+                dirs.append(line.strip())
+        return {"directories": dirs, "count": len(dirs), "raw_output": stdout[:2000]}
 
 
 class DirbTool(KaliTool):
@@ -276,18 +366,35 @@ class SearchsploitTool(KaliTool):
 class NucleiTool(KaliTool):
     """Nuclei 漏洞扫描"""
     def __init__(self):
-        super().__init__("nuclei", "nuclei -u {url} -t cves/ -json")
+        super().__init__("nuclei", "nuclei -u {url} -json -silent {templates}")
+    
+    def build_command(self, **kwargs) -> str:
+        """构建命令，支持模板参数"""
+        url = kwargs.get("url", "")
+        templates = kwargs.get("templates", "")
+        if templates:
+            return f"nuclei -u {url} -json -silent -t {templates}"
+        return f"nuclei -u {url} -json -silent"
     
     def parse_output(self, stdout, stderr):
+        """解析 Nuclei JSON 输出"""
         vulns = []
-        for line in stdout.split('\n'):
+        for line in stdout.strip().split('\n'):
             if line.strip():
                 try:
-                    import json
-                    vulns.append(json.loads(line))
-                except:
-                    pass
-        return {"vulnerabilities": vulns, "raw_output": stdout}
+                    vuln = json.loads(line)
+                    vulns.append({
+                        "template": vuln.get("template-id", ""),
+                        "name": vuln.get("info", {}).get("name", ""),
+                        "severity": vuln.get("info", {}).get("severity", ""),
+                        "url": vuln.get("matched-at", ""),
+                        "cve": vuln.get("info", {}).get("classification", {}).get("cve-id", []),
+                        "description": vuln.get("info", {}).get("description", ""),
+                        "reference": vuln.get("info", {}).get("reference", []),
+                    })
+                except json.JSONDecodeError:
+                    continue
+        return {"vulnerabilities": vulns, "count": len(vulns), "raw_output": stdout[:2000]}
 
 
 class MetasploitTool(KaliTool):
@@ -459,6 +566,20 @@ class HydraTool(KaliTool):
     """Hydra 密码爆破"""
     def __init__(self):
         super().__init__("hydra", "hydra -l {user} -P {wordlist} {target} {service}")
+    
+    def build_command(self, **kwargs) -> str:
+        """构建命令，提供默认用户名和字典路径"""
+        target = kwargs.get("target", "")
+        service = kwargs.get("service", "ssh")
+        user = kwargs.get("user", "admin")
+        port = kwargs.get("port")
+        
+        from config import WORDLISTS_DIR
+        wordlist = kwargs.get("wordlist", str(WORDLISTS_DIR / "passwords.txt"))
+        
+        if port:
+            return f"hydra -l {user} -P {wordlist} -s {port} {target} {service}"
+        return f"hydra -l {user} -P {wordlist} {target} {service}"
     
     def parse_output(self, stdout, stderr):
         credentials = []
@@ -671,3 +792,28 @@ async def execute_tool(tool_name: str, callback: Optional[Callable] = None, **kw
     if tool:
         return await tool.execute(callback=callback, **kwargs)
     return None
+
+
+# ==================== 工具可用性检查 ====================
+
+def check_tool_available(tool_name: str) -> bool:
+    """检查工具是否在系统中可用"""
+    return shutil.which(tool_name) is not None
+
+
+async def validate_tools() -> Dict[str, bool]:
+    """验证所有工具可用性"""
+    results = {}
+    for tool_name in get_all_tools():
+        results[tool_name] = check_tool_available(tool_name)
+    return results
+
+
+def get_available_tools() -> List[str]:
+    """获取当前系统中可用的工具列表"""
+    return [name for name in get_all_tools() if check_tool_available(name)]
+
+
+def get_unavailable_tools() -> List[str]:
+    """获取当前系统中不可用的工具列表"""
+    return [name for name in get_all_tools() if not check_tool_available(name)]

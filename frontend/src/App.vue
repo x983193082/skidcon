@@ -242,9 +242,9 @@ export default {
         this.isRunning = false
         this.logs.push('✅ 测试完成!')
         
-        // 加载报告
+        // 加载报告（使用 this.currentTask.id 确保获取正确的 taskId）
         try {
-          const report = await getReport(taskId)
+          const report = await getReport(this.currentTask.id)
           this.reportContent = report.content
           this.showReport = true
         } catch (error) {

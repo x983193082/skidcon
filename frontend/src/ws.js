@@ -9,6 +9,8 @@ class WebSocketClient {
     this.reconnectAttempts = 0
     this.maxReconnectAttempts = 5
     this.reconnectDelay = 1000
+    this.heartbeatInterval = null
+    this.heartbeatPeriod = 30000 // 30 秒心跳
     this.callbacks = {
       onLog: null,
       onStatus: null,
@@ -34,6 +36,7 @@ class WebSocketClient {
     this.ws.onopen = () => {
       console.log('WebSocket 连接成功')
       this.reconnectAttempts = 0
+      this.startHeartbeat()
       if (this.callbacks.onConnected) {
         this.callbacks.onConnected()
       }
@@ -50,6 +53,7 @@ class WebSocketClient {
     
     this.ws.onclose = () => {
       console.log('WebSocket 连接关闭')
+      this.stopHeartbeat()
       if (this.callbacks.onDisconnected) {
         this.callbacks.onDisconnected()
       }
@@ -95,12 +99,27 @@ class WebSocketClient {
   }
 
   attemptReconnect() {
+    this.stopHeartbeat()
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++
       console.log(`尝试重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`)
       setTimeout(() => {
         this.connect(this.taskId)
       }, this.reconnectDelay * this.reconnectAttempts)
+    }
+  }
+
+  startHeartbeat() {
+    this.stopHeartbeat()
+    this.heartbeatInterval = setInterval(() => {
+      this.ping()
+    }, this.heartbeatPeriod)
+  }
+
+  stopHeartbeat() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval)
+      this.heartbeatInterval = null
     }
   }
 

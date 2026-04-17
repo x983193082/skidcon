@@ -4,10 +4,12 @@ SkidCon FastAPI 主应用
 """
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
 
@@ -15,15 +17,46 @@ from config import REPORTS_DIR
 from task_manager import task_manager, TaskStatus
 from crew_runner import run_pentest
 from report import report_generator
+from tools import validate_tools, get_available_tools, get_unavailable_tools
+
+
+# ==================== 安全配置 ====================
+
+security = HTTPBearer(auto_error=False)
+API_TOKEN = os.getenv("API_TOKEN", "")
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """验证 API Token（如果配置了）"""
+    if not API_TOKEN:
+        return True  # 未配置 token 时跳过验证
+    if credentials is None or credentials.credentials != API_TOKEN:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token"
+        )
+    return True
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    # 启动时加载历史任务
+    # 启动时加载历史任务并检查工具
     task_manager.load_tasks_from_disk()
     print("✅ SkidCon 启动成功!")
     print(f"📊 已加载 {len(task_manager.tasks)} 个历史任务")
+    
+    # 检查工具可用性
+    print("\n🔧 检查工具可用性...")
+    tool_status = await validate_tools()
+    available = [k for k, v in tool_status.items() if v]
+    unavailable = [k for k, v in tool_status.items() if not v]
+    
+    print(f"✅ 可用工具: {len(available)}/{len(tool_status)}")
+    if unavailable:
+        print(f"⚠️ 以下工具不可用: {', '.join(unavailable)}")
+        print("💡 提示: 请确保已安装缺失的工具或在 Kali Linux 环境中运行")
+    print()
+    
     yield
     # 关闭时清理资源
     print("👋 SkidCon 已关闭")
@@ -68,7 +101,7 @@ class TaskResponse(BaseModel):
 
 # ==================== REST API ====================
 
-@app.post("/api/task", response_model=TaskResponse)
+@app.post("/api/task", response_model=TaskResponse, dependencies=[Depends(verify_token)])
 async def create_task(request: CreateTaskRequest):
     """创建新的渗透测试任务"""
     task = task_manager.create_task(target=request.target)
@@ -157,11 +190,31 @@ async def list_reports():
 @app.get("/api/health")
 async def health_check():
     """健康检查"""
+    available_tools = get_available_tools()
+    unavailable_tools = get_unavailable_tools()
+    
     return {
         "status": "ok",
         "version": "1.0.0",
         "max_concurrent_tasks": task_manager.max_concurrent,
-        "active_tasks": sum(1 for t in task_manager.tasks.values() if t.status == TaskStatus.RUNNING)
+        "active_tasks": sum(1 for t in task_manager.tasks.values() if t.status == TaskStatus.RUNNING),
+        "tools_available": len(available_tools),
+        "tools_unavailable": len(unavailable_tools),
+        "unavailable_tools": unavailable_tools[:10]  # 只返回前 10 个
+    }
+
+
+@app.get("/api/tools")
+async def list_tools():
+    """列出所有工具及其可用性状态"""
+    tool_status = await validate_tools()
+    return {
+        "tools": [
+            {"name": name, "available": available}
+            for name, available in tool_status.items()
+        ],
+        "total": len(tool_status),
+        "available_count": sum(1 for v in tool_status.values() if v)
     }
 
 
