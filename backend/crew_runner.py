@@ -683,8 +683,18 @@ class CrewRunner:
         
         return {"exploitable_vulns": [], "summary": agent_text[:2000]}
     
-    def _parse_tool_args(self, args_str: str) -> Dict:
+    def _parse_tool_args(self, args_str) -> Dict:
         """解析工具参数字符串为 kwargs"""
+        # 防御性编程：处理 None 和非字符串输入
+        if args_str is None:
+            return {}
+        if not isinstance(args_str, str):
+            return {"args": str(args_str)}
+        
+        args_str = args_str.strip()
+        if not args_str:
+            return {}
+        
         # 简单解析：如果包含 = 则作为键值对
         if "=" in args_str and not args_str.startswith("-"):
             params = {}
@@ -694,7 +704,7 @@ class CrewRunner:
                     params[k] = v
             return params
         # 否则作为位置参数
-        return {"args": args_str} if args_str else {}
+        return {"args": args_str}
     
     def _identify_exploitable_vulns(self, vuln_data: Dict) -> List[Dict]:
         """从漏洞数据中识别可利用的漏洞"""
