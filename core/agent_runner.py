@@ -336,21 +336,8 @@ class AgentRunner:
         
         if self.output_collector:
             try:
-                # 如果 output_collector 有异步方法，这里需要同步调用
-                if hasattr(self.output_collector, 'add_output'):
-                    # 尝试同步调用
-                    import asyncio
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            # 如果事件循环正在运行，创建任务
-                            asyncio.create_task(self.output_collector.add_output(output_type, data))
-                        else:
-                            loop.run_until_complete(self.output_collector.add_output(output_type, data))
-                    except RuntimeError:
-                        # 没有事件循环，直接调用（如果是同步方法）
-                        if hasattr(self.output_collector.add_output, '__call__'):
-                            self.output_collector.add_output(output_type, data)
+                # 直接同步调用（OutputCollector.add_output 现在是同步方法）
+                self.output_collector.add_output(output_type, data)
             except Exception as e:
                 print(f"{Fore.RED}[ERROR] 添加输出到收集器失败: {e}, 输出类型: {output_type}{Style.RESET_ALL}")
 

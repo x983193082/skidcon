@@ -30,10 +30,28 @@ query_tasks: Dict[str, Dict[str, Any]] = {}
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    """返回主页面"""
+    """返回主页面（Vue3构建产物）"""
     import os
-    html_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
-    return FileResponse(html_path)
+    # 优先使用Vue构建产物
+    html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.exists(html_path):
+        return FileResponse(html_path)
+    # 如果构建产物不存在，返回提示信息
+    return HTMLResponse(
+        content="""
+        <html><body style="font-family:sans-serif;padding:40px;text-align:center;">
+        <h2>🛡️ SkidCon - AI渗透测试助手</h2>
+        <p>前端未构建，请先运行以下命令：</p>
+        <pre style="background:#f5f5f5;padding:12px;border-radius:6px;display:inline-block;">
+cd frontend && npm install && npm run build</pre>
+        <p>或者使用开发模式：</p>
+        <pre style="background:#f5f5f5;padding:12px;border-radius:6px;display:inline-block;">
+cd frontend && npm run dev</pre>
+        <p style="color:#666;margin-top:20px;">后端API正常运行：<a href="/api/history">/api/history</a></p>
+        </body></html>
+        """,
+        status_code=200
+    )
 
 
 @app.get("/api/history")
@@ -132,8 +150,7 @@ async def run_agent_task(task_id: str, query: str):
         query_tasks[task_id]["current_step"] = "正在分析任务..."
         
         # CrewAI 是同步的，需要在线程池中运行以避免阻塞事件循环
-        import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, lambda: agent_runner.run_agent(query, task_id=task_id))
         
         # 等待一小段时间，确保所有输出都被添加
@@ -166,12 +183,12 @@ async def run_agent_task(task_id: str, query: str):
 
 
 class OutputCollector:
-    """收集agent执行过程中的输出"""
+    """收集agent执行过程中的输出（同步版本，可在线程中安全调用）"""
     def __init__(self, task_id: str):
         self.task_id = task_id
     
-    async def add_output(self, output_type: str, data: Any):
-        """添加输出到任务"""
+    def add_output(self, output_type: str, data: Any):
+        """添加输出到任务（同步方法，可在线程中直接调用）"""
         if self.task_id not in query_tasks:
             print(f"[OutputCollector ERROR] Task {self.task_id} 不存在于 query_tasks 中")
             return
