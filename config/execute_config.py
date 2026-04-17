@@ -1,26 +1,23 @@
-"""Execution configuration for agents."""
+"""Execution configuration for CrewAI agents."""
 
 import os
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
-from agents import ModelSettings, set_default_openai_client, set_default_openai_api, set_tracing_disabled
 
 load_dotenv(".env")
 
-API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("OPENAI_BASE_URL")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "z-ai/glm-5.1")
 
-client = AsyncOpenAI(
-    api_key=API_KEY,
-    base_url=BASE_URL,
-)
+# 验证必要的环境变量
+if not OPENROUTER_API_KEY:
+    raise ValueError("未设置 OPENROUTER_API_KEY 环境变量")
 
-set_default_openai_client(client=client, use_for_tracing=False)
-set_default_openai_api("chat_completions")
-set_tracing_disabled(True)
-
-MODEL_CONFIG = ModelSettings(
-    toolChoice="required"
-)
+# CrewAI 模型配置格式
+# CrewAI 使用 'provider/model' 格式
+LLM_CONFIG = {
+    "model": MODEL_NAME,
+    "base_url": OPENROUTER_BASE_URL,
+    "api_key": OPENROUTER_API_KEY,
+}
 

@@ -1,8 +1,11 @@
-"""Level 3 Agents: Tool Executors - CrewAI 版本
+"""Level 3 Agents: Tool Executors."""
 
+from core.third_agent_factory import build_tool_executor
+
+"""
 三级 Agent：工具执行层
 - 每个工具一个 Executor Agent
-- 统一由 third_agent_factory.py 中的 build_tool_executor 构建
+- 统一由 build_tool_executor 构建
 """
 
 # =========================
@@ -86,3 +89,9 @@ TOOL_NAMES = [
     "testdisk",
     "scalpel",
 ]
+
+tool_executors = {
+    tool_name: build_tool_executor(tool_name)
+    for tool_name in TOOL_NAMES
+}
+

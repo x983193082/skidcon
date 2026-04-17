@@ -1,6 +1,5 @@
 """Main entry point for Kali Code Executor."""
 
-import asyncio
 import os
 import threading
 from colorama import Fore, Style, init
@@ -45,28 +44,21 @@ def start_web_server():
         traceback.print_exc()
 
 
-async def main():
+def main():
     """Main function to run the agent system."""
     print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}Kali Code Executor - Three-Level Agent System{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Kali Code Executor - Three-Level Agent System (CrewAI){Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
     
     # Check environment variables
-    docker_name = os.getenv('DOCKER_NAME')
-    api_key = os.getenv('OPENAI_API_KEY')
-    base_url = os.getenv('OPENAI_BASE_URL')
-    
-    if not docker_name:
-        print(f"{Fore.RED}错误: 未设置 DOCKER_NAME 环境变量{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}请在 .env 文件中设置 DOCKER_NAME=你的容器名称{Style.RESET_ALL}")
-        return
+    api_key = os.getenv('OPENROUTER_API_KEY')
+    base_url = os.getenv('OPENROUTER_BASE_URL')
     
     if not api_key or not base_url:
-        print(f"{Fore.RED}错误: 未设置 OPENAI_API_KEY 或 OPENAI_BASE_URL{Style.RESET_ALL}")
+        print(f"{Fore.RED}错误: 未设置 OPENROUTER_API_KEY 或 OPENROUTER_BASE_URL{Style.RESET_ALL}")
         print(f"{Fore.YELLOW}请在 .env 文件中设置这些环境变量{Style.RESET_ALL}")
         return
     
-    print(f"{Fore.GREEN}✓ Docker容器: {docker_name}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}✓ API配置: {base_url}{Style.RESET_ALL}\n")
     
     # 启动Web服务器
@@ -75,7 +67,8 @@ async def main():
     web_thread.start()
     
     # 等待一下让服务器启动
-    await asyncio.sleep(2)
+    import time
+    time.sleep(2)
     
     # 获取端口用于显示
     port = int(os.getenv('PORT', '8000'))
@@ -105,8 +98,8 @@ async def main():
                 print(f"\n{Fore.CYAN}{agent_runner.get_history_summary()}{Style.RESET_ALL}\n")
                 continue
             
-            # Run the agent
-            result = await agent_runner.run_agent(query)
+            # Run the agent (同步调用)
+            result = agent_runner.run_agent(query)
             
             if result:
                 print(f"\n{Fore.GREEN}{'='*60}{Style.RESET_ALL}")
@@ -123,5 +116,5 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 

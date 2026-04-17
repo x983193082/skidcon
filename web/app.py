@@ -122,20 +122,25 @@ async def submit_query(request: Request):
 
 
 async def run_agent_task(task_id: str, query: str):
-    """在后台运行agent任务"""
+    """在后台运行agent任务（CrewAI 是同步的，需要在线程池中运行）"""
     try:
         # 创建一个自定义的输出收集器
         output_collector = OutputCollector(task_id)
         agent_runner.output_collector = output_collector
         
-        # 执行agent
-        result = await agent_runner.run_agent(query, task_id=task_id)
+        # 更新当前步骤
+        query_tasks[task_id]["current_step"] = "正在分析任务..."
         
-        # 等待一小段时间，确保所有异步输出都被添加
+        # CrewAI 是同步的，需要在线程池中运行以避免阻塞事件循环
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: agent_runner.run_agent(query, task_id=task_id))
+        
+        # 等待一小段时间，确保所有输出都被添加
         await asyncio.sleep(0.5)
         
         # 获取最终输出
-        final_output = getattr(result, "final_output", "") if result else ""
+        final_output = str(result) if result else ""
         
         # 再次等待，确保所有输出都添加完成
         await asyncio.sleep(0.3)
@@ -150,10 +155,12 @@ async def run_agent_task(task_id: str, query: str):
         # 更新任务状态
         query_tasks[task_id]["status"] = "completed"
         query_tasks[task_id]["final_response"] = final_output
+        query_tasks[task_id]["current_step"] = "执行完成"
         
     except Exception as e:
         query_tasks[task_id]["status"] = "error"
         query_tasks[task_id]["error"] = str(e)
+        query_tasks[task_id]["current_step"] = "执行失败"
         import traceback
         traceback.print_exc()
 
@@ -183,6 +190,26 @@ class OutputCollector:
         # 对于工具调用和工具输出，额外打印确认信息
         if output_type in ["tool_call", "tool_output"]:
             print(f"[OutputCollector] ✓ {output_type} 已添加到任务 {self.task_id}，当前输出数量: {len(query_tasks[self.task_id]['output'])}")
+
+
+@app.get("/api/query/{task_id}")
+async def get_query_status(task_id: str):
+    """获取查询任务状态"""
+    if task_id not in query_tasks:
+        return {
+            "status": "error",
+            "message": "任务不存在"
+        }
+    
+    task = query_tasks[task_id]
+    return {
+        "status": task["status"],
+        "task_id": task_id,
+        "query": task["query"],
+        "final_response": task.get("final_response"),
+        "current_step": task.get("current_step", "处理中..."),
+        "error": task.get("error")
+    }
 
 
 @app.get("/api/query/{task_id}/stream")
