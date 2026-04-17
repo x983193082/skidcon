@@ -196,7 +196,7 @@ Kali Linux 直接执行
 - 等等...
 
 修改 `.env` 文件中的 `MODEL_NAME` 即可切换模型。
-# Kali Code Executor（附hexstrike-ai docker下载链接）
+# SkidCon（附hexstrike-ai docker下载链接）
 
 一个基于三层Agent架构的容器代码执行系统，在 **Docker** 中执行渗透测试相关代码与命令行工具。
 

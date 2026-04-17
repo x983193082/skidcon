@@ -1,2 +1,2 @@
-"""Core modules for Kali Code Executor."""
+"""Core modules for SkidCon."""
 

@@ -1,4 +1,4 @@
-"""Main entry point for Kali Code Executor."""
+"""Main entry point for SkidCon."""
 
 import os
 import threading
@@ -47,7 +47,7 @@ def start_web_server():
 def main():
     """Main function to run the agent system."""
     print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}Kali Code Executor - Three-Level Agent System (CrewAI){Style.RESET_ALL}")
+    print(f"{Fore.CYAN}SkidCon - Three-Level Agent System (CrewAI){Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
     
     # Check environment variables

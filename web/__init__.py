@@ -1,2 +1,2 @@
-"""Web application for Kali Code Executor."""
+"""Web application for SkidCon."""
 

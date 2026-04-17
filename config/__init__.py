@@ -1,2 +1,2 @@
-"""Configuration modules for Kali Code Executor."""
+"""Configuration modules for SkidCon."""
 

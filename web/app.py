@@ -13,7 +13,7 @@ import uuid
 # 导入agent_runner以访问对话历史
 from core.agent_runner import agent_runner
 
-app = FastAPI(title="Kali Code Executor Web Interface")
+app = FastAPI(title="SkidCon Web Interface")
 
 # 添加CORS中间件
 app.add_middleware(
