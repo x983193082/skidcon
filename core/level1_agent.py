@@ -1,17 +1,17 @@
 """Level 1 Agent: Task Classifier using CrewAI."""
 
-from crewai import Agent
+from crewai import Agent, LLM
 from config.execute_config import MODEL_NAME, LLM_CONFIG
 from config.tool_category_mapping import get_tool_category_mapping_text
-from langchain_openai import ChatOpenAI
 
 
 def create_llm():
-    """创建OpenRouter LLM实例"""
-    return ChatOpenAI(
+    """创建 CrewAI LLM 实例"""
+    return LLM(
         model=LLM_CONFIG["model"],
-        openai_api_base=LLM_CONFIG["base_url"],
-        openai_api_key=LLM_CONFIG["api_key"],
+        base_url=LLM_CONFIG["base_url"],
+        api_key=LLM_CONFIG["api_key"],
+        provider="openrouter",
         temperature=0.1,
     )
 
@@ -41,7 +41,9 @@ JSON 格式严格如下（不要多字段，不要少字段，不要加注释）
   - 当 action="chat" 时，target 必须为 null
 - "target": 仅在 action="handoff" 时有效，用于二级Agent选择具体工具类别
 
-""" + get_tool_category_mapping_text() + """
+"""
+    + get_tool_category_mapping_text()
+    + """
 
 📌 选择示例：
 - "使用nmap扫描192.168.1.1" → target: "scanning"
@@ -66,4 +68,3 @@ JSON 格式严格如下（不要多字段，不要少字段，不要加注释）
     verbose=True,
     allow_delegation=False,
 )
-

@@ -1,13 +1,14 @@
 ﻿<template>
   <div class="app">
     <header class="header">
-      <div class="header-content">
+        <div class="header-content">
         <h1>🛡️ SkidCon - AI渗透测试助手</h1>
         <div class="header-actions">
           <span v-if="isStreaming" class="streaming-badge">
             <span class="pulse-dot"></span>
-            实时流式输出中
+            {{ isAutonomous ? '自主测试中' : '实时流式输出中' }}
           </span>
+          <button v-if="!isAutonomous" @click="showAutonomousModal = true" class="btn-autonomous" :disabled="isStreaming">🤖 自主测试</button>
           <button @click="clearHistory" class="btn-clear">清空历史</button>
           <button @click="exportHistory" class="btn-export">导出历史</button>
         </div>
@@ -99,6 +100,51 @@
         </div>
       </div>
     </main>
+
+    <!-- 自主测试模态框 -->
+    <div v-if="showAutonomousModal" class="modal-overlay" @click.self="showAutonomousModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>🤖 自主渗透测试</h3>
+          <button @click="showAutonomousModal = false" class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p>输入目标IP或域名，系统将自动执行完整的渗透测试流程：</p>
+          <div class="phase-list">
+            <span class="phase-item">信息收集</span> →
+            <span class="phase-item">扫描</span> →
+            <span class="phase-item">枚举</span> →
+            <span class="phase-item">漏洞识别</span> →
+            <span class="phase-item">利用</span> →
+            <span class="phase-item">报告</span>
+          </div>
+          <input v-model="autonomousTarget" type="text" placeholder="输入目标 (如: 192.168.1.1 或 example.com)" class="target-input" @keydown.enter="startAutonomousTest" />
+          <div class="modal-actions">
+            <button @click="showAutonomousModal = false" class="btn-cancel">取消</button>
+            <button @click="startAutonomousTest" :disabled="!autonomousTarget.trim() || isStreaming" class="btn-start">开始测试</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 测试进度面板 -->
+    <div v-if="isAutonomous && autonomousState.show" class="autonomous-panel">
+      <div class="panel-header">
+        <h4>📊 测试进度</h4>
+        <span class="step-counter">步骤 {{ autonomousState.currentStep }}/{{ autonomousState.maxSteps }}</span>
+      </div>
+      <div class="phase-indicator">
+        <div v-for="phase in autonomousPhases" :key="phase" class="phase-dot" :class="{ active: autonomousState.phase === phase, completed: autonomousState.completedPhases.includes(phase) }">
+          {{ phase.charAt(0).toUpperCase() }}
+        </div>
+      </div>
+      <div class="findings-summary">
+        <div class="finding-item"><span class="finding-icon">🖥️</span> 主机: {{ autonomousState.hostsFound }}</div>
+        <div class="finding-item"><span class="finding-icon">🔌</span> 服务: {{ autonomousState.servicesFound }}</div>
+        <div class="finding-item"><span class="finding-icon">🔓</span> 漏洞: {{ autonomousState.vulnsFound }}</div>
+        <div class="finding-item"><span class="finding-icon">🔑</span> 凭据: {{ autonomousState.credsFound }}</div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -120,6 +166,22 @@ export default {
     const currentAgent = ref('')
     const streamingContent = ref('')
     const currentToolCall = ref(null)
+
+    const showAutonomousModal = ref(false)
+    const autonomousTarget = ref('')
+    const isAutonomous = ref(false)
+    const autonomousPhases = ['reconnaissance', 'scanning', 'enumeration', 'vulnerability', 'exploitation', 'post_exploitation']
+    const autonomousState = ref({
+      show: false,
+      phase: '',
+      currentStep: 0,
+      maxSteps: 12,
+      hostsFound: 0,
+      servicesFound: 0,
+      vulnsFound: 0,
+      credsFound: 0,
+      completedPhases: []
+    })
 
     const scrollToBottom = () => {
       nextTick(() => {
@@ -149,10 +211,62 @@ export default {
       currentAgent.value = ''
       currentToolCall.value = null
       isLoading.value = false
+      if (isAutonomous.value) {
+        autonomousState.value.show = false
+        isAutonomous.value = false
+      }
     }
 
     const handleSSEMessage = (data) => {
       switch (data.type) {
+        case 'autonomous_start':
+          isAutonomous.value = true
+          autonomousState.value = {
+            show: true,
+            phase: 'reconnaissance',
+            currentStep: 0,
+            maxSteps: data.data.max_steps || 12,
+            hostsFound: 0,
+            servicesFound: 0,
+            vulnsFound: 0,
+            credsFound: 0,
+            completedPhases: []
+          }
+          messages.value.push({ role: 'ai', type: 'agent_status', icon: '🚀', content: `开始自主渗透测试: ${data.data.target}`, statusClass: 'info' })
+          break
+        case 'phase_update':
+          autonomousState.value.currentStep = data.data.step
+          autonomousState.value.phase = data.data.phase
+          if (data.data.action) {
+            messages.value.push({ role: 'ai', type: 'agent_status', icon: '🔄', content: `[${data.data.phase}] ${data.data.action}`, statusClass: 'info' })
+          }
+          break
+        case 'phase_transition':
+          if (!autonomousState.value.completedPhases.includes(data.data.from)) {
+            autonomousState.value.completedPhases.push(data.data.from)
+          }
+          messages.value.push({ role: 'ai', type: 'agent_status', icon: '➡️', content: data.data.message, statusClass: 'success' })
+          break
+        case 'step_completed':
+          autonomousState.value.hostsFound = data.data.findings_count || autonomousState.value.hostsFound
+          if (data.data.verified) {
+            messages.value.push({ role: 'ai', type: 'agent_status', icon: '✅', content: `步骤${data.data.step}完成 (置信度: ${Math.round(data.data.confidence * 100)}%)`, statusClass: 'success' })
+          }
+          break
+        case 'plan_generated':
+          messages.value.push({ role: 'ai', type: 'agent_status', icon: '📋', content: '测试计划已生成，开始执行...', statusClass: 'info' })
+          break
+        case 'autonomous_complete':
+          autonomousState.value.hostsFound = data.data.services_found || 0
+          autonomousState.value.servicesFound = data.data.services_found || 0
+          autonomousState.value.vulnsFound = data.data.vulnerabilities_found || 0
+          autonomousState.value.credsFound = data.data.credentials_found || 0
+          messages.value.push({ role: 'ai', type: 'agent_status', icon: '🎉', content: '自主测试完成！正在生成报告...', statusClass: 'success' })
+          if (data.data.report_markdown) {
+            messages.value.push({ role: 'ai', content: '## 📋 渗透测试报告\n\n' + data.data.report_markdown })
+          }
+          isAutonomous.value = false
+          break
         case 'agent_thinking':
           if (data.data.agent.includes('Level 1')) currentAgent.value = '🔍 正在分析任务...'
           else if (data.data.agent.includes('Level 2')) currentAgent.value = data.data.message || '⚙️ 正在执行任务...'
@@ -246,6 +360,40 @@ export default {
 
     const sendExample = (example) => { inputMessage.value = example; sendMessage() }
 
+    const startAutonomousTest = async () => {
+      const target = autonomousTarget.value.trim()
+      if (!target || isStreaming.value) return
+
+      showAutonomousModal.value = false
+      messages.value.push({ role: 'user', content: `🤖 开始自主渗透测试: ${target}` })
+      isLoading.value = true
+      isStreaming.value = true
+      isAutonomous.value = true
+      streamingContent.value = ''
+      currentAgent.value = '🤖 正在初始化自主测试...'
+      scrollToBottom()
+
+      try {
+        const response = await axios.post('/api/autonomous-test', { target })
+        if (response.data.status === 'success') {
+          const taskId = response.data.task_id
+          const eventSource = new EventSource('/api/query/' + taskId + '/stream')
+          currentEventSource.value = eventSource
+
+          eventSource.onmessage = (event) => {
+            try { handleSSEMessage(JSON.parse(event.data)); scrollToBottom() }
+            catch (e) { console.error('解析SSE消息失败:', e) }
+          }
+          eventSource.onerror = () => { if (eventSource.readyState === EventSource.CLOSED) closeSSEStream() }
+        }
+      } catch (error) {
+        messages.value.push({ role: 'ai', type: 'agent_status', icon: '❌', content: '启动自主测试失败: ' + (error.response?.data?.message || error.message), statusClass: 'error' })
+        closeSSEStream()
+        isAutonomous.value = false
+      }
+      autonomousTarget.value = ''
+    }
+
     const clearHistory = async () => {
       if (!confirm('确定要清空所有对话历史吗？')) return
       try { await axios.post('/api/history/clear'); messages.value = [] }
@@ -264,7 +412,7 @@ export default {
     onMounted(() => { loadHistory() })
     onUnmounted(() => { closeSSEStream() })
 
-    return { messages, inputMessage, isLoading, isStreaming, loadingText, chatContainer, currentAgent, streamingContent, currentToolCall, sendMessage, sendExample, renderMarkdown, clearHistory, exportHistory, stopStreaming }
+    return { messages, inputMessage, isLoading, isStreaming, loadingText, chatContainer, currentAgent, streamingContent, currentToolCall, sendMessage, sendExample, renderMarkdown, clearHistory, exportHistory, stopStreaming, showAutonomousModal, autonomousTarget, isAutonomous, autonomousPhases, autonomousState, startAutonomousTest }
   }
 }
 </script>
@@ -336,4 +484,35 @@ export default {
 .send-btn:hover:not(:disabled) { background: #5568d3; }
 .send-btn:disabled { background: #ccc; cursor: not-allowed; }
 .stop-icon { color: white; }
+.btn-autonomous { padding: 0.5rem 1rem; border: none; border-radius: 6px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; cursor: pointer; transition: all 0.2s; font-size: 0.9rem; font-weight: 500; }
+.btn-autonomous:hover:not(:disabled) { background: linear-gradient(135deg, #059669 0%, #047857 100%); transform: translateY(-1px); }
+.btn-autonomous:disabled { background: #ccc; cursor: not-allowed; transform: none; }
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal { background: white; border-radius: 12px; width: 90%; max-width: 500px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2); }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-bottom: 1px solid #e0e0e0; }
+.modal-header h3 { margin: 0; color: #333; }
+.modal-close { background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #666; }
+.modal-close:hover { color: #333; }
+.modal-body { padding: 1.5rem; }
+.modal-body p { margin-bottom: 1rem; color: #666; }
+.phase-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.5rem; }
+.phase-item { padding: 0.25rem 0.75rem; background: #f0f4ff; border-radius: 20px; font-size: 0.8rem; color: #667eea; }
+.target-input { width: 100%; padding: 0.75rem 1rem; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1rem; margin-bottom: 1rem; }
+.target-input:focus { outline: none; border-color: #667eea; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 0.75rem; }
+.btn-cancel { padding: 0.5rem 1rem; border: 1px solid #e0e0e0; border-radius: 6px; background: white; cursor: pointer; }
+.btn-start { padding: 0.5rem 1.5rem; border: none; border-radius: 6px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; cursor: pointer; font-weight: 500; }
+.btn-start:hover:not(:disabled) { transform: translateY(-1px); }
+.btn-start:disabled { background: #ccc; cursor: not-allowed; }
+.autonomous-panel { position: fixed; bottom: 100px; right: 20px; background: white; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); width: 280px; z-index: 100; }
+.panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+.panel-header h4 { margin: 0; color: #333; font-size: 0.95rem; }
+.step-counter { font-size: 0.8rem; color: #666; }
+.phase-indicator { display: flex; justify-content: space-between; margin-bottom: 1rem; }
+.phase-dot { width: 32px; height: 32px; border-radius: 50%; background: #e0e0e0; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-weight: bold; color: #666; transition: all 0.3s; }
+.phase-dot.active { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; transform: scale(1.1); }
+.phase-dot.completed { background: #10b981; color: white; }
+.findings-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+.finding-item { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #666; }
+.finding-icon { font-size: 1rem; }
 </style>

@@ -1,16 +1,16 @@
 """Chat agent for non-tool conversations using CrewAI."""
 
-from crewai import Agent
+from crewai import Agent, LLM
 from config.execute_config import MODEL_NAME, LLM_CONFIG
-from langchain_openai import ChatOpenAI
 
 
 def create_llm():
-    """创建OpenRouter LLM实例"""
-    return ChatOpenAI(
+    """创建 CrewAI LLM 实例"""
+    return LLM(
         model=LLM_CONFIG["model"],
-        openai_api_base=LLM_CONFIG["base_url"],
-        openai_api_key=LLM_CONFIG["api_key"],
+        base_url=LLM_CONFIG["base_url"],
+        api_key=LLM_CONFIG["api_key"],
+        provider="openrouter",
         temperature=0.7,
     )
 
