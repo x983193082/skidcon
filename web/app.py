@@ -58,8 +58,17 @@ cd frontend && npm run dev</pre>
 @app.get("/api/history")
 async def get_history():
     """获取对话历史"""
-    history = agent_runner.conversation_history
-    return {"status": "success", "count": len(history), "history": history}
+    history = agent_runner.memory_manager.conversation_history
+    formatted_history = []
+    for entry in history:
+        formatted_history.append({"role": "user", "content": entry.user_query})
+        if entry.ai_response:
+            formatted_history.append({"role": "ai", "content": entry.ai_response})
+    return {
+        "status": "success",
+        "count": len(formatted_history),
+        "history": formatted_history,
+    }
 
 
 @app.get("/api/history/summary")
@@ -407,3 +416,6 @@ import os
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    assets_dir = os.path.join(static_dir, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")

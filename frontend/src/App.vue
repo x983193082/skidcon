@@ -69,7 +69,8 @@
               <span class="thinking-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
             </div>
             <div v-if="streamingContent" class="ai-message streaming-text">
-              <span v-html="renderMarkdown(streamingContent)"></span><span class="cursor"></span>
+              <div v-html="renderMarkdown(streamingContent)"></div>
+              <span class="cursor"></span>
             </div>
             <div v-if="currentToolCall" class="tool-call active">
               <div class="tool-call-header">
