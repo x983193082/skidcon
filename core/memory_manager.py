@@ -45,11 +45,16 @@ class MemoryManager:
         self.token_encoder = self._get_token_encoder(model_name)
 
         # 保留给系统提示和当前查询的token数
-        self.reserved_tokens = 1000
+        self.reserved_tokens = 2000
 
         # 总结相关配置
         self.summary_threshold_days = 7  # 7天前的对话会被考虑总结
         self.min_conversations_before_summary = 5  # 最少保留5个对话再开始总结
+        
+        # 单条响应最大token数（防止工具输出过大）
+        self.max_response_tokens = 3000
+        # 历史上下文最大token数（不超过max_tokens的60%）
+        self.max_history_tokens = int(self.max_tokens * 0.6)
 
     def _get_default_max_tokens(self, model_name: str) -> int:
         """根据模型名称获取默认的最大token数"""
@@ -63,8 +68,24 @@ class MemoryManager:
             "claude-3-opus": 200000,
             "claude-3-sonnet": 200000,
             "claude-3-haiku": 200000,
+            # GLM系列
+            "glm-4": 128000,
+            "glm-5": 128000,
+            "glm-5.1": 128000,
+            # DeepSeek
+            "deepseek": 128000,
+            # Qwen
+            "qwen": 128000,
         }
-        return model_limits.get(model_name, 4096)  # 默认4K tokens
+        
+        # 尝试匹配模型名称中的关键词
+        model_lower = model_name.lower()
+        for key, limit in model_limits.items():
+            if key in model_lower:
+                return limit
+        
+        # 默认使用保守值，防止超出上下文窗口
+        return 32768
 
     def _get_token_encoder(self, model_name: str):
         """获取token编码器"""
@@ -100,6 +121,10 @@ class MemoryManager:
             user_query: 用户查询
             ai_response: AI响应
         """
+        # 截断过长的AI响应，防止token爆炸
+        if ai_response:
+            ai_response = self._truncate_response(ai_response)
+        
         # 计算token数
         query_tokens = self._count_tokens(user_query)
         response_tokens = self._count_tokens(ai_response) if ai_response else 0
@@ -121,6 +146,33 @@ class MemoryManager:
 
         # 执行记忆管理，控制上下文长度
         self._manage_memory()
+
+    def _truncate_response(self, response: str) -> str:
+        """截断过长的AI响应，防止token爆炸"""
+        # 先按token数判断是否需要截断
+        response_tokens = self._count_tokens(response)
+        if response_tokens <= self.max_response_tokens:
+            return response
+        
+        # 按字符数粗略截断（1 token ≈ 1.5 中文字符或0.75英文单词）
+        max_chars = int(self.max_response_tokens * 1.2)
+        
+        if len(response) <= max_chars:
+            return response
+        
+        # 尝试在行边界截断
+        lines = response.split('\n')
+        truncated_lines = []
+        current_length = 0
+        
+        for line in lines:
+            if current_length + len(line) + 1 > max_chars:
+                break
+            truncated_lines.append(line)
+            current_length += len(line) + 1
+        
+        truncated = '\n'.join(truncated_lines)
+        return truncated + f"\n\n...(响应已截断，原始长度 {len(response)} 字符，{response_tokens} tokens)"
 
     def _calculate_importance(self, user_query: str, ai_response: Optional[str]) -> float:
         """
@@ -169,8 +221,8 @@ class MemoryManager:
         # 计算当前总token数
         total_tokens = sum(entry.token_count for entry in self.conversation_history)
 
-        # 如果没有超出限制，不需要管理
-        if total_tokens <= self.max_tokens - self.reserved_tokens:
+        # 使用更严格的阈值：历史上下文不超过max_history_tokens
+        if total_tokens <= self.max_history_tokens:
             return
 
         # 执行多种记忆管理策略
@@ -280,24 +332,26 @@ class MemoryManager:
 
     def _apply_sliding_window(self):
         """应用滑动窗口策略，保留最近的对话"""
-        total_tokens = sum(entry.token_count for entry in self.conversation_history)
-
-        # 如果仍然超出限制，从最旧的开始删除
-        while (total_tokens > self.max_tokens - self.reserved_tokens and
-               len(self.conversation_history) > 3):  # 至少保留3个对话
-
-            # 优先删除低重要性的条目
-            low_importance_entries = [entry for entry in self.conversation_history if entry.importance_score < 0.6]
-            if low_importance_entries:
-                # 删除最旧的低重要性条目
-                oldest_low_importance = min(low_importance_entries, key=lambda x: x.timestamp)
-                self.conversation_history.remove(oldest_low_importance)
+        # 严格限制：只保留最近的N条对话，确保总token数在限制内
+        # 按时间倒序排序
+        sorted_entries = sorted(self.conversation_history, key=lambda x: x.timestamp, reverse=True)
+        
+        # 保留最近的条目，直到token数在限制内
+        kept_entries = []
+        total_tokens = 0
+        
+        for entry in sorted_entries:
+            if total_tokens + entry.token_count <= self.max_history_tokens:
+                kept_entries.append(entry)
+                total_tokens += entry.token_count
             else:
-                # 如果没有低重要性条目，删除最旧的条目
-                oldest_entry = min(self.conversation_history, key=lambda x: x.timestamp)
-                self.conversation_history.remove(oldest_entry)
-
-            total_tokens = sum(entry.token_count for entry in self.conversation_history)
+                # 如果连第一条都放不下，至少保留最新的一条
+                if not kept_entries:
+                    kept_entries.append(entry)
+                break
+        
+        # 按时间正序保存
+        self.conversation_history = sorted(kept_entries, key=lambda x: x.timestamp)
 
     def build_context(self, current_query: str, max_history_items: int = None) -> str:
         """
@@ -319,22 +373,33 @@ class MemoryManager:
         if not selected_entries:
             return current_query
 
-        # 构建历史上下文
+        # 构建历史上下文，严格控制token数
         history_parts = []
-
+        current_history_tokens = 0
+        
         for i, entry in enumerate(selected_entries, 1):
             if entry.is_summarized and entry.summary:
-                # 总结条目
-                history_parts.append(f"[历史总结 {i}]\n{entry.summary}")
+                part = f"[历史总结 {i}]\n{entry.summary}"
             else:
                 # 普通对话条目
-                history_parts.append(f"[对话 {i}]\n用户: {entry.user_query}")
+                part = f"[对话 {i}]\n用户: {entry.user_query}"
                 if entry.ai_response:
-                    # 控制响应长度
+                    # 进一步控制响应长度
                     response = entry.ai_response
-                    if len(response) > 800:  # 放宽字符限制，因为我们控制token
-                        response = response[:800] + "...(已截断)"
-                    history_parts.append(f"助手: {response}")
+                    response_tokens = self._count_tokens(response)
+                    if response_tokens > 1500:  # 单条响应最多1500 tokens
+                        # 按token数截断
+                        max_chars = int(1500 * 1.2)
+                        if len(response) > max_chars:
+                            response = response[:max_chars] + "...(已截断)"
+                    part += f"\n助手: {response}"
+            
+            part_tokens = self._count_tokens(part)
+            if current_history_tokens + part_tokens > self.max_history_tokens:
+                break  # 超出预算，停止添加
+            
+            history_parts.append(part)
+            current_history_tokens += part_tokens
 
         history_text = "\n\n📋 对话历史上下文：\n" + "\n\n".join(history_parts)
         history_text += f"\n\n[当前查询]\n用户: {current_query}"
@@ -345,9 +410,9 @@ class MemoryManager:
         """选择相关历史条目"""
         if not max_items:
             # 根据可用token空间自动计算最大条目数
-            available_tokens = self.max_tokens - self.reserved_tokens - self._count_tokens(current_query)
-            # 估算每个条目平均使用150个token
-            max_items = max(3, available_tokens // 150)
+            available_tokens = self.max_history_tokens - self._count_tokens(current_query)
+            # 估算每个条目平均使用200个token
+            max_items = max(2, min(10, available_tokens // 200))
 
         # 按时间倒序排序（最新的在前）
         sorted_entries = sorted(self.conversation_history, key=lambda x: x.timestamp, reverse=True)
@@ -361,10 +426,10 @@ class MemoryManager:
             relevance_score = self._calculate_relevance(entry, current_query)
 
             # 如果相关性足够高，或者是最近的条目，加入选择
-            if (relevance_score > 0.6 or len(selected) < 3 or
+            if (relevance_score > 0.5 or len(selected) < 2 or
                 entry.timestamp > datetime.now() - timedelta(hours=1)):
 
-                if total_tokens + entry.token_count <= self.max_tokens * 0.8:  # 留80%的空间
+                if total_tokens + entry.token_count <= self.max_history_tokens:
                     selected.append(entry)
                     total_tokens += entry.token_count
 
