@@ -60,6 +60,22 @@ JSON 格式严格如下（不要多字段，不要少字段，不要加注释）
 - "帮我执行Python代码" → target: "custom_code"
 - "自定义代码执行" → target: "custom_code"
 
+🔐 逻辑漏洞测试示例：
+- "测试IDOR越权访问" → target: "web_exploitation"
+- "检测用户ID越权漏洞" → target: "web_exploitation"
+- "测试水平越权" → target: "web_exploitation"
+- "测试垂直越权" → target: "web_exploitation"
+- "测试参数篡改漏洞" → target: "web_exploitation"
+- "修改价格参数测试" → target: "web_exploitation"
+- "测试订单价格篡改" → target: "web_exploitation"
+- "测试并发竞争条件" → target: "web_exploitation"
+- "优惠券重复使用测试" → target: "web_exploitation"
+- "并发转账测试" → target: "web_exploitation"
+- "测试认证绕过" → target: "web_exploitation"
+- "尝试绕过登录验证" → target: "web_exploitation"
+- "测试业务流程绕过" → target: "web_exploitation"
+- "跳过支付流程测试" → target: "web_exploitation"
+
 - "你好/闲聊/聊天" → action: "chat", target: null
 - "你能解释一下这段话吗（不需要任何工具）" → action: "chat", target: null
 - "给我一句普通建议" → action: "chat", target: null
