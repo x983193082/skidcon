@@ -68,7 +68,9 @@
               <span class="agent-text">{{ currentAgent }}</span>
               <span class="thinking-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
             </div>
-            <div v-if="streamingContent" class="ai-message streaming-text" v-html="renderMarkdown(streamingContent)"><span class="cursor"></span></div>
+            <div v-if="streamingContent" class="ai-message streaming-text">
+              <span v-html="renderMarkdown(streamingContent)"></span><span class="cursor"></span>
+            </div>
             <div v-if="currentToolCall" class="tool-call active">
               <div class="tool-call-header">
                 <span class="tool-icon">⚡</span>
