@@ -114,7 +114,7 @@ class DecisionEngine:
             {
                 "condition": lambda s: len(s.discovered_services) > 0,
                 "action": "使用漏洞扫描器检查已知CVE漏洞",
-                "category": "vulnerability",
+                "category": "enumeration",
             },
         ],
         "exploitation": [

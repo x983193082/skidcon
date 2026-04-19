@@ -45,11 +45,14 @@ API_KEY = os.getenv("LLM_API_KEY") or os.getenv(
     os.getenv("OPENROUTER_API_KEY", ""),
 )
 
-if not API_KEY:
-    raise ValueError(
-        f"未设置API密钥。请设置 LLM_API_KEY 或 "
-        f"{SUPPORTED_PROVIDERS.get(PROVIDER, {}).get('env_key', 'API_KEY')} 环境变量"
-    )
+# 延迟验证API密钥，允许模块导入后再检查
+def validate_api_key():
+    """验证API密钥是否已设置"""
+    if not API_KEY:
+        raise ValueError(
+            f"未设置API密钥。请设置 LLM_API_KEY 或 "
+            f"{SUPPORTED_PROVIDERS.get(PROVIDER, {}).get('env_key', 'API_KEY')} 环境变量"
+        )
 
 OPENROUTER_API_KEY = API_KEY
 OPENROUTER_BASE_URL = BASE_URL

@@ -296,10 +296,14 @@ export default {
           currentToolCall.value = { toolName: data.data.tool_name === 'python_execute' ? '代码执行' : data.data.tool_name, args: data.data.tool_args }
           break
         case 'tool_output':
+          // 如果有对应的tool_call，一起显示；否则单独显示
           if (currentToolCall.value) {
             messages.value.push({ role: 'ai', type: 'tool_call', toolName: currentToolCall.value.toolName, args: currentToolCall.value.args })
             messages.value.push({ role: 'ai', type: 'tool_output', output: data.data.output })
             currentToolCall.value = null
+          } else {
+            // 没有对应的tool_call，单独显示输出
+            messages.value.push({ role: 'ai', type: 'tool_output', output: data.data.output })
           }
           break
         case 'task_completed':
@@ -346,7 +350,9 @@ export default {
         const response = await axios.post('/api/query', { query: message })
         if (response.data.status === 'success') {
           const taskId = response.data.task_id
-          const eventSource = new EventSource('/api/query/' + taskId + '/stream')
+          // 使用相对路径，开发模式下Vite代理会转发到后端
+          const streamUrl = '/api/query/' + taskId + '/stream'
+          const eventSource = new EventSource(streamUrl)
           currentEventSource.value = eventSource
 
           eventSource.onmessage = (event) => {
@@ -380,7 +386,9 @@ export default {
         const response = await axios.post('/api/autonomous-test', { target })
         if (response.data.status === 'success') {
           const taskId = response.data.task_id
-          const eventSource = new EventSource('/api/query/' + taskId + '/stream')
+          // 使用相对路径，开发模式下Vite代理会转发到后端
+          const streamUrl = '/api/query/' + taskId + '/stream'
+          const eventSource = new EventSource(streamUrl)
           currentEventSource.value = eventSource
 
           eventSource.onmessage = (event) => {

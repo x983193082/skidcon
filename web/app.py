@@ -28,6 +28,40 @@ app.add_middleware(
 query_tasks: Dict[str, Dict[str, Any]] = {}
 
 
+class OutputCollector:
+    """收集agent执行过程中的输出（同步版本，可在线程中安全调用）"""
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+
+    def add_output(self, output_type: str, data: Any):
+        """添加输出到任务（同步方法，可在线程中直接调用）"""
+        if self.task_id not in query_tasks:
+            print(
+                f"[OutputCollector ERROR] Task {self.task_id} 不存在于 query_tasks 中"
+            )
+            return
+
+        output_item = {
+            "type": output_type,
+            "data": data,
+            "timestamp": datetime.now().isoformat(),
+        }
+        query_tasks[self.task_id]["output"].append(output_item)
+
+        # 只在非text_delta类型时打印调试信息（避免输出过多）
+        if output_type != "text_delta":
+            print(
+                f"[OutputCollector] Task {self.task_id}: {output_type} - {str(data)[:200]}"
+            )
+
+        # 对于工具调用和工具输出，额外打印确认信息
+        if output_type in ["tool_call", "tool_output"]:
+            print(
+                f"[OutputCollector] ✓ {output_type} 已添加到任务 {self.task_id}，当前输出数量: {len(query_tasks[self.task_id]['output'])}"
+            )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
     """返回主页面（Vue3构建产物）"""
@@ -179,40 +213,6 @@ async def run_agent_task(task_id: str, query: str):
         import traceback
 
         traceback.print_exc()
-
-
-class OutputCollector:
-    """收集agent执行过程中的输出（同步版本，可在线程中安全调用）"""
-
-    def __init__(self, task_id: str):
-        self.task_id = task_id
-
-    def add_output(self, output_type: str, data: Any):
-        """添加输出到任务（同步方法，可在线程中直接调用）"""
-        if self.task_id not in query_tasks:
-            print(
-                f"[OutputCollector ERROR] Task {self.task_id} 不存在于 query_tasks 中"
-            )
-            return
-
-        output_item = {
-            "type": output_type,
-            "data": data,
-            "timestamp": datetime.now().isoformat(),
-        }
-        query_tasks[self.task_id]["output"].append(output_item)
-
-        # 只在非text_delta类型时打印调试信息（避免输出过多）
-        if output_type != "text_delta":
-            print(
-                f"[OutputCollector] Task {self.task_id}: {output_type} - {str(data)[:200]}"
-            )
-
-        # 对于工具调用和工具输出，额外打印确认信息
-        if output_type in ["tool_call", "tool_output"]:
-            print(
-                f"[OutputCollector] ✓ {output_type} 已添加到任务 {self.task_id}，当前输出数量: {len(query_tasks[self.task_id]['output'])}"
-            )
 
 
 @app.get("/api/query/{task_id}")

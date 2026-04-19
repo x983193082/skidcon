@@ -128,10 +128,46 @@ class AgentRunner:
         # 创建任务
         task = Task(description=query, agent=agent, expected_output="执行结果")
 
-        # 创建 Crew 并执行
-        crew = Crew(agents=[agent], tasks=[task], verbose=True)
+        # 创建 Crew 并启用流式输出
+        crew = Crew(agents=[agent], tasks=[task], verbose=True, stream=True)
 
-        result = crew.kickoff()
+        # 执行并处理流式输出
+        streaming_output = crew.kickoff()
+        
+        # 如果有task_id且output_collector存在，处理流式输出
+        if task_id and self.output_collector:
+            try:
+                # CrewAI的stream输出是可迭代的
+                for chunk in streaming_output:
+                    # 处理文本chunk
+                    if hasattr(chunk, 'content') and chunk.content:
+                        self.output_collector.add_output(
+                            "text_delta",
+                            {"delta": chunk.content, "agent": agent.role}
+                        )
+                    # 处理工具调用chunk
+                    if hasattr(chunk, 'tool_call') and chunk.tool_call:
+                        tool_call_info = chunk.tool_call
+                        self.output_collector.add_output(
+                            "tool_call",
+                            {
+                                "tool_name": getattr(tool_call_info, 'tool_name', 'unknown'),
+                                "tool_args": getattr(tool_call_info, 'arguments', {})
+                            }
+                        )
+                    # 处理工具输出（某些版本的CrewAI会在工具调用后发送输出）
+                    if hasattr(chunk, 'tool_output') and chunk.tool_output:
+                        self.output_collector.add_output(
+                            "tool_output",
+                            {"output": str(chunk.tool_output)}
+                        )
+            except Exception as e:
+                print(f"{Fore.YELLOW}[Warning] 流式输出处理失败: {e}{Style.RESET_ALL}")
+                import traceback
+                traceback.print_exc()
+        
+        # 获取最终结果
+        result = streaming_output.result if hasattr(streaming_output, 'result') else str(streaming_output)
         return str(result)
 
     def route_and_run_level2(self, query: str, task_id: str = None):

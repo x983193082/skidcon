@@ -59,6 +59,14 @@ def main():
         print(f"{Fore.YELLOW}请在 .env 文件中设置这些环境变量{Style.RESET_ALL}")
         return
     
+    # 验证API密钥
+    try:
+        from config.execute_config import validate_api_key
+        validate_api_key()
+    except ValueError as e:
+        print(f"{Fore.RED}错误: {e}{Style.RESET_ALL}")
+        return
+    
     print(f"{Fore.GREEN}✓ API配置: {base_url}{Style.RESET_ALL}\n")
     
     # 启动Web服务器
@@ -66,12 +74,21 @@ def main():
     web_thread = threading.Thread(target=start_web_server, daemon=True)
     web_thread.start()
     
-    # 等待一下让服务器启动
+    # 等待服务器启动，使用重试机制
     import time
-    time.sleep(2)
-    
-    # 获取端口用于显示
     port = int(os.getenv('PORT', '8000'))
+    max_retries = 10
+    for i in range(max_retries):
+        time.sleep(0.5)
+        try:
+            import urllib.request
+            urllib.request.urlopen(f'http://localhost:{port}/', timeout=1)
+            break
+        except:
+            if i == max_retries - 1:
+                print(f"{Fore.YELLOW}Web界面可能未正常启动，请检查配置{Style.RESET_ALL}")
+            continue
+    
     print(f"{Fore.GREEN}✓ Web界面已启动: http://localhost:{port}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}你可以在浏览器中打开上述地址查看对话历史{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}注意: Web界面会实时显示对话历史，无需手动刷新{Style.RESET_ALL}\n")

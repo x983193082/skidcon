@@ -426,14 +426,22 @@ TOOL_MANUALS = {
     }
 },
 "msfconsole": {
-    "description": "Metasploit 漏洞利用框架",
+    "description": "Metasploit 框架，用于漏洞利用与后渗透操作",
     "manual": """
-通过 msfconsole 脚本化执行 exploit 模块
+通过 msfconsole 非交互脚本模式
+执行 exploit 模块、后渗透模块、内网扫描、凭据收集等操作
+解析 session 与模块输出
 """,
     "return_format": {
         "type": "json",
         "schema": {
-            "sessions": ["string"]
+            "sessions": [
+                {
+                    "session_id": "string",
+                    "type": "string",
+                    "target": "string"
+                }
+            ]
         }
     }
 },
@@ -465,14 +473,18 @@ TOOL_MANUALS = {
 },
 
 "evil-winrm": {
-    "description": "Windows WinRM Shell 工具",
+    "description": "基于 WinRM 的 Windows 后渗透交互式 Shell 工具",
     "manual": """
-执行 evil-winrm -i <ip> -u <user> -p <pass>
+通过 evil-winrm 连接已获取凭据的 Windows 主机
+执行系统命令、上传下载文件、权限验证
+使用 Python subprocess 调用命令行并捕获输出
 """,
     "return_format": {
         "type": "json",
         "schema": {
-            "shell": "string"
+            "host": "string",
+            "user": "string",
+            "output": ["string"]
         }
     }
 },
@@ -519,12 +531,20 @@ TOOL_MANUALS = {
 "responder": {
     "description": "LLMNR/NBT-NS 欺骗与凭据捕获工具",
     "manual": """
-执行 responder -I <iface>
+在内网环境中运行 responder
+捕获 NTLMv1/v2 Hash 信息
+解析并结构化输出
 """,
     "return_format": {
         "type": "json",
         "schema": {
-            "hashes": ["string"]
+            "captured_hashes": [
+                {
+                    "username": "string",
+                    "hash": "string",
+                    "protocol": "string"
+                }
+            ]
         }
     }
 },
@@ -794,100 +814,6 @@ TOOL_MANUALS = {
         "type": "json",
         "schema": {
             "files": ["string"]
-        }
-    }
-},
-"evil-winrm": {
-    "description": "基于 WinRM 的 Windows 后渗透交互式 Shell 工具",
-    "manual": """
-通过 evil-winrm 连接已获取凭据的 Windows 主机
-执行系统命令、上传下载文件、权限验证
-使用 Python subprocess 调用命令行并捕获输出
-""",
-    "return_format": {
-        "type": "json",
-        "schema": {
-            "host": "string",
-            "user": "string",
-            "output": ["string"]
-        }
-    }
-},
-
-"responder": {
-    "description": "用于内网监听与欺骗的凭据捕获工具（LLMNR/NBT-NS）",
-    "manual": """
-在内网环境中运行 responder
-捕获 NTLMv1/v2 Hash 信息
-解析并结构化输出
-""",
-    "return_format": {
-        "type": "json",
-        "schema": {
-            "captured_hashes": [
-                {
-                    "username": "string",
-                    "hash": "string",
-                    "protocol": "string"
-                }
-            ]
-        }
-    }
-},
-
-"msfconsole": {
-    "description": "Metasploit 框架，用于后渗透操作与横向移动",
-    "manual": """
-通过 msfconsole 非交互脚本模式
-执行 post 模块、内网扫描、凭据收集等操作
-解析 session 与模块输出
-""",
-    "return_format": {
-        "type": "json",
-        "schema": {
-            "sessions": [
-                {
-                    "session_id": "string",
-                    "type": "string",
-                    "target": "string"
-                }
-            ]
-        }
-    }
-},
-
-"smbmap": {
-    "description": "内网 SMB 共享与权限枚举工具（横向移动前置）",
-    "manual": """
-使用 smbmap 枚举内网主机共享资源
-验证读写权限，为横向移动做准备
-""",
-    "return_format": {
-        "type": "json",
-        "schema": {
-            "host": "string",
-            "shares": [
-                {
-                    "name": "string",
-                    "permission": "string"
-                }
-            ]
-        }
-    }
-},
-
-"rpcclient": {
-    "description": "基于 RPC 的 Windows 内部信息枚举工具",
-    "manual": """
-通过 rpcclient 对内网 Windows 主机执行枚举命令
-获取用户、组、SID 等信息
-""",
-    "return_format": {
-        "type": "json",
-        "schema": {
-            "host": "string",
-            "users": ["string"],
-            "groups": ["string"]
         }
     }
 },
