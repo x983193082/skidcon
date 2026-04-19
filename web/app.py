@@ -239,8 +239,10 @@ async def stream_query_output(task_id: str):
 
     async def event_generator():
         last_index = 0
-        max_wait_time = 300  # 最大等待时间30秒（300 * 0.1秒）
+        max_wait_time = 3000  # 最大等待时间150秒（3000 * 0.05秒）
         wait_count = 0
+        heartbeat_interval = 200  # 每200次循环（约10秒）发送一次心跳
+        heartbeat_count = 0
 
         # 立即发送已存在的输出
         if task_id in query_tasks:
@@ -315,6 +317,12 @@ async def stream_query_output(task_id: str):
             if wait_count > max_wait_time:
                 yield f"data: {json.dumps({'type': 'error', 'data': {'error': '任务执行超时'}})}\n\n"
                 break
+
+            # 发送心跳消息，保持连接活跃
+            heartbeat_count += 1
+            if heartbeat_count >= heartbeat_interval:
+                yield f"data: {json.dumps({'type': 'heartbeat', 'data': {'timestamp': datetime.now().isoformat()}})}\n\n"
+                heartbeat_count = 0
 
             # 减少轮询间隔，提高实时性
             await asyncio.sleep(0.05)  # 50ms轮询间隔，提高响应速度
