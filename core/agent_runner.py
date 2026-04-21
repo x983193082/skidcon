@@ -135,9 +135,10 @@ class AgentRunner:
         streaming_output = crew.kickoff()
         
         # 如果有task_id且output_collector存在，处理流式输出
+        final_result = None
         if task_id and self.output_collector:
             try:
-                # CrewAI的stream输出是可迭代的
+                # CrewAI的stream输出是可迭代的，必须完全迭代后才能访问result
                 for chunk in streaming_output:
                     # 处理文本chunk
                     if hasattr(chunk, 'content') and chunk.content:
@@ -161,14 +162,22 @@ class AgentRunner:
                             "tool_output",
                             {"output": str(chunk.tool_output)}
                         )
+                # 流式迭代完成后，安全访问result
+                final_result = streaming_output.result if hasattr(streaming_output, 'result') else None
             except Exception as e:
                 print(f"{Fore.YELLOW}[Warning] 流式输出处理失败: {e}{Style.RESET_ALL}")
                 import traceback
                 traceback.print_exc()
+                # 如果流式处理失败，尝试直接获取result
+                final_result = getattr(streaming_output, 'result', None)
+        else:
+            # 无task_id时，直接获取result
+            final_result = getattr(streaming_output, 'result', None)
         
-        # 获取最终结果
-        result = streaming_output.result if hasattr(streaming_output, 'result') else str(streaming_output)
-        return str(result)
+        # 如果final_result仍未获取，使用str转换作为后备
+        if final_result is None:
+            final_result = str(streaming_output)
+        return str(final_result)
 
     def route_and_run_level2(self, query: str, task_id: str = None):
         """
