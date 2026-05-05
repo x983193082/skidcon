@@ -21,6 +21,7 @@ from core.level2_agent import (
     agent_forensics,
     agent_post_exploitation,
     agent_custom_code,
+    agent_browser_testing
 )
 from core.memory_manager import MemoryManager
 from core.chat_agent import chat_agent
@@ -38,6 +39,7 @@ TARGET_TO_AGENT = {
     "forensics": agent_forensics,
     "post_exploitation": agent_post_exploitation,
     "custom_code": agent_custom_code,
+    "browser_testing": agent_browser_testing,
 }
 
 

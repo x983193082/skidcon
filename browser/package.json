@@ -1,0 +1,14 @@
+{
+  "name": "skidcon-browser",
+  "version": "2.0.0",
+  "description": "Playwright CLI integration for SkidCon - browser automation via playwright-cli",
+  "scripts": {
+    "install-cli": "npm install -g @playwright/cli@latest",
+    "install-browsers": "playwright-cli install --with-deps chromium firefox webkit",
+    "install-skills": "playwright-cli install --skills",
+    "setup": "npm run install-cli && npm run install-browsers && npm run install-skills"
+  },
+  "keywords": ["playwright", "browser-automation", "skidcon"],
+  "author": "",
+  "license": "ISC"
+}

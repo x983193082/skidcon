@@ -32,7 +32,7 @@ task_classifier_agent = Agent(
 JSON 格式严格如下（不要多字段，不要少字段，不要加注释）：
 {
   "action": "<one_of: handoff | chat>",
-  "target": "<one_of: information_collection | scanning | enumeration | web_exploitation | exploitation | password_crypto | wireless_attack | reverse_engineering | forensics | post_exploitation | custom_code> 或 null"
+  "target": "<one_of: information_collection | scanning | enumeration | web_exploitation | exploitation | password_crypto | wireless_attack | reverse_engineering | forensics | post_exploitation | custom_code | browser_testing> 或 null"
 }
 
 含义：
@@ -75,6 +75,17 @@ JSON 格式严格如下（不要多字段，不要少字段，不要加注释）
 - "尝试绕过登录验证" → target: "web_exploitation"
 - "测试业务流程绕过" → target: "web_exploitation"
 - "跳过支付流程测试" → target: "web_exploitation"
+
+- "用浏览器打开https://example.com" → target: "browser_testing"
+- "截取网页截图" → target: "browser_testing"
+- "测试SPA页面" → target: "browser_testing"
+- "模拟登录操作" → target: "browser_testing"
+- "跨浏览器测试" → target: "browser_testing"
+- "用playwright-cli测试" → target: "browser_testing"
+- "抓取动态渲染页面" → target: "browser_testing"
+- "测试页面交互" → target: "browser_testing"
+- "Cookie注入测试" → target: "browser_testing"
+- "检查网页元素" → target: "browser_testing"
 
 - "你好/闲聊/聊天" → action: "chat", target: null
 - "你能解释一下这段话吗（不需要任何工具）" → action: "chat", target: null

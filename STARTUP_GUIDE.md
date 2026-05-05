@@ -33,10 +33,11 @@ chmod +x setup.sh run.sh dev.sh
 2. ✅ 检查系统依赖
 3. ✅ 创建Python虚拟环境（venv）
 4. ✅ 安装requirements.txt中的依赖
-5. ✅ 检查并创建.env配置文件
-6. ✅ 可选安装前端依赖
-7. ✅ 可选构建前端
-8. ✅ 启动应用
+5. ✅ 可选安装Playwright CLI和浏览器（交互式选择）
+6. ✅ 检查并创建.env配置文件
+7. ✅ 可选安装前端依赖
+8. ✅ 可选构建前端
+9. ✅ 启动应用
 
 ### 日常启动
 
@@ -70,7 +71,16 @@ chmod +x setup.sh run.sh dev.sh
 # 仅安装依赖，不启动应用
 ./setup.sh --install-only
 
-# 跳过前端相关步骤
+# 安装时跳过浏览器安装
+./setup.sh --no-browser
+
+# 单独安装Playwright CLI和浏览器（任何时候都可以运行）
+./setup.sh --browser
+
+# 安装并指定端口
+./setup.sh --port 9000
+
+# 安装时跳过前端
 ./setup.sh --no-frontend
 
 # 指定Web服务端口
@@ -114,7 +124,7 @@ python main.py
 
 - **操作系统**: Kali Linux（推荐）或Debian系Linux
 - **Python**: 3.10+
-- **Node.js**: 18+（仅前端开发需要）
+- **Node.js**: 18+（Playwright CLI需要）
 
 ### 必要工具
 
@@ -123,9 +133,62 @@ python main.py
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip
 
-# 安装Node.js（可选，前端开发需要）
+# 安装Node.js（Playwright CLI需要）
 sudo apt install -y nodejs npm
+
+# 安装Playwright CLI和浏览器（可选，交互式选择）
+./setup.sh --browser
 ```
+
+### Playwright CLI 安装
+
+Playwright CLI 是 SkidCon 浏览器自动化功能的核心依赖。
+
+**方式一：通过 setup.sh 安装（推荐）**
+
+```bash
+# 完整安装时交互式选择
+./setup.sh
+
+# 或单独安装浏览器工具
+./setup.sh --browser
+```
+
+安装时会提示选择浏览器范围：
+- `[1]` 仅 Chromium（推荐，约400MB）
+- `[2]` Chromium + Firefox（约600MB）
+- `[3]` 全部安装（约950MB）
+- `[4]` 跳过
+
+**方式二：手动安装**
+
+```bash
+# 1. 安装 Node.js 18+
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# 2. 安装 Playwright CLI
+sudo npm install -g @playwright/cli@latest
+
+# 3. 安装浏览器（至少安装 Chromium）
+sudo playwright-cli install --with-deps chromium
+
+# 4. 验证安装
+playwright-cli --help
+playwright-cli open https://example.com
+```
+
+**方式三：跳过安装**
+
+```bash
+# 安装时跳过浏览器
+./setup.sh --no-browser
+
+# 稍后单独安装
+./setup.sh --browser
+```
+
+> ⚠️ 不安装 Playwright CLI 不影响其他功能，但浏览器测试相关命令将不可用。
 
 ## 虚拟环境说明
 
@@ -289,6 +352,36 @@ cd ..
 
 # 或使用开发模式
 ./dev.sh
+```
+
+### 问题6: Playwright CLI 未安装
+
+```bash
+# 检查是否安装
+playwright-cli --help
+
+# 如果未安装，运行
+./setup.sh --browser
+
+# 或手动安装
+sudo npm install -g @playwright/cli@latest
+sudo playwright-cli install --with-deps chromium
+```
+
+### 问题7: playwright-cli 命令找不到
+
+```bash
+# 检查Node.js版本（需要18+）
+node -v
+
+# 检查npm全局路径
+npm config get prefix
+
+# 如果playwright-cli不在PATH中，添加软链接
+sudo ln -s $(npm config get prefix)/bin/playwright-cli /usr/local/bin/playwright-cli
+
+# 或者重新安装
+sudo npm install -g @playwright/cli@latest
 ```
 
 ## 停止应用

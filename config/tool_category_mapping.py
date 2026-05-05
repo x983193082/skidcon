@@ -128,6 +128,36 @@ TOOL_TO_CATEGORY = {
     "scalpel": "forensics",
     # 后渗透 (post_exploitation)
     # 注意：以下工具的主要用途在其他类别，但明确用于后渗透场景时选择此类别
+    # 浏览器自动化测试 (browser_testing) - Playwright CLI
+    "browser_open": "browser_testing",
+    "browser_goto": "browser_testing",
+    "browser_click": "browser_testing",
+    "browser_type": "browser_testing",
+    "browser_fill": "browser_testing",
+    "browser_screenshot": "browser_testing",
+    "browser_snapshot": "browser_testing",
+    "browser_eval": "browser_testing",
+    "browser_press": "browser_testing",
+    "browser_cookie_list": "browser_testing",
+    "browser_cookie_set": "browser_testing",
+    "browser_cookie_delete": "browser_testing",
+    "browser_state_save": "browser_testing",
+    "browser_state_load": "browser_testing",
+    "browser_network": "browser_testing",
+    "browser_route": "browser_testing",
+    "browser_go_back": "browser_testing",
+    "browser_go_forward": "browser_testing",
+    "browser_reload": "browser_testing",
+    "browser_close": "browser_testing",
+    "browser_tab_list": "browser_testing",
+    "browser_console": "browser_testing",
+    "browser_select": "browser_testing",
+    "browser_hover": "browser_testing",
+    "browser_upload": "browser_testing",
+    "browser_video_start": "browser_testing",
+    "browser_run_code": "browser_testing",
+    "browser_session": "browser_testing",
+    "playwright_cli": "browser_testing",
 }
 
 # 多类别工具映射（工具可能在多个类别中使用）
@@ -151,6 +181,10 @@ MULTI_CATEGORY_TOOLS = {
     "tshark": ["scanning", "forensics"],
     "wireshark": ["scanning", "forensics"],
     "python_execute": ["web_exploitation", "custom_code"],  # 逻辑漏洞测试需要
+    "playwright_cli": [
+        "browser_testing",
+        "web_exploitation",
+    ],  # 浏览器自动化也可用于Web漏洞测试
 }
 
 # 类别描述
@@ -166,6 +200,7 @@ CATEGORY_DESCRIPTIONS = {
     "forensics": "数字取证与数据恢复工具，包括文件分析、数据恢复等",
     "post_exploitation": "后渗透与内网横向移动工具，包括权限提升、横向移动等",
     "custom_code": "自定义代码执行，用于执行用户自定义的Python代码或脚本",
+    "browser_testing": "浏览器自动化测试工具（Playwright CLI），支持跨浏览器会话、页面交互、快照定位、截图、JS执行、Cookie管理、网络拦截、会话保持等",
 }
 
 

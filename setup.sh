@@ -118,6 +118,107 @@ install_dependencies() {
     fi
 }
 
+# 安装Playwright CLI和浏览器（交互式可选）
+install_playwright_cli() {
+    echo ""
+    print_info "=========================================="
+    print_info "  Playwright CLI (浏览器自动化工具)"
+    print_info "=========================================="
+    print_info "SkidCon 的浏览器测试功能需要 Playwright CLI。"
+    echo ""
+    
+    # 检查是否已安装
+    if command -v playwright-cli &> /dev/null; then
+        print_success "Playwright CLI 已安装: $(playwright-cli --version 2>/dev/null || echo '未知')"
+        
+        # 检查浏览器是否已安装
+        print_info "检查已安装的浏览器..."
+        BROWSER_STATUS=""
+        for browser in chromium firefox webkit; do
+            if playwright-cli install --dry-run "$browser" &>/dev/null; then
+                BROWSER_STATUS="$BROWSER_STATUS  ✅ $browser 已安装"
+            else
+                BROWSER_STATUS="$BROWSER_STATUS  ❌ $browser 未安装"
+            fi
+        done
+        echo "$BROWSER_STATUS"
+        echo ""
+        print_info "如需重新安装浏览器，运行: ./setup.sh --browser"
+        return 0
+    fi
+    
+    print_warning "未安装 Playwright CLI"
+    print_info "安装需要下载浏览器文件："
+    print_info "  [1] 仅 Chromium (推荐，约 400MB) - 覆盖 95% 测试场景"
+    print_info "  [2] Chromium + Firefox (约 600MB) - 支持跨浏览器测试"
+    print_info "  [3] 全部安装 (约 950MB) - Chromium + Firefox + WebKit"
+    print_info "  [4] 跳过 - 稍后手动安装"
+    echo ""
+    read -p "请选择 [1-4] (默认1): " -n 1 -r BROWSER_CHOICE
+    echo ""
+    
+    case "${BROWSER_CHOICE:-1}" in
+        1)
+            BROWSERS="chromium"
+            ;;
+        2)
+            BROWSERS="chromium firefox"
+            ;;
+        3)
+            BROWSERS="chromium firefox webkit"
+            ;;
+        4)
+            print_warning "跳过 Playwright CLI 安装"
+            print_info "浏览器测试功能将不可用"
+            print_info "稍后可手动安装: ./setup.sh --browser"
+            return 0
+            ;;
+        *)
+            print_warning "无效选择，默认安装 Chromium"
+            BROWSERS="chromium"
+            ;;
+    esac
+    
+    # 检查Node.js
+    if ! command -v node &> /dev/null; then
+        print_info "安装 Node.js..."
+        sudo apt-get update -qq
+        sudo apt-get install -y nodejs npm
+    fi
+    
+    NODE_VERSION=$(node -v 2>/dev/null | sed 's/v//' | cut -d. -f1)
+    if [ -n "$NODE_VERSION" ] && [ "$NODE_VERSION" -lt 18 ] 2>/dev/null; then
+        print_warning "Node.js 版本过低 (当前v$(node -v)，需要 18+)，正在升级..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+    fi
+    print_success "Node.js: $(node -v)"
+    
+    # 安装 Playwright CLI
+    print_info "安装 Playwright CLI..."
+    sudo npm install -g @playwright/cli@latest
+    
+    if ! command -v playwright-cli &> /dev/null; then
+        print_error "Playwright CLI 安装失败"
+        print_info "请手动运行: sudo npm install -g @playwright/cli@latest"
+        return 1
+    fi
+    print_success "Playwright CLI 安装完成"
+    
+    # 安装浏览器和系统依赖
+    print_info "安装浏览器及系统依赖..."
+    print_info "正在安装: $BROWSERS"
+    sudo playwright-cli install --with-deps $BROWSERS
+    
+    # 验证安装
+    if command -v playwright-cli &> /dev/null; then
+        print_success "Playwright CLI 安装完成！"
+        print_info "验证: playwright-cli open https://example.com"
+    else
+        print_error "Playwright CLI 安装验证失败"
+    fi
+}
+
 # 检查.env文件
 check_env_file() {
     if [ ! -f ".env" ]; then
@@ -231,12 +332,16 @@ show_help() {
     echo "选项:"
     echo "  --install-only    仅安装，不启动应用"
     echo "  --no-frontend     跳过前端相关步骤"
+    echo "  --no-browser      跳过 Playwright CLI 安装"
+    echo "  --browser         单独安装 Playwright CLI 和浏览器"
     echo "  --port PORT       指定Web服务端口（默认8000）"
     echo "  --help            显示此帮助信息"
     echo ""
     echo "示例:"
     echo "  $0                  # 完整安装并启动"
     echo "  $0 --install-only   # 仅安装依赖"
+    echo "  $0 --no-browser     # 安装但跳过浏览器"
+    echo "  $0 --browser        # 单独安装浏览器工具"
     echo "  $0 --port 9000      # 使用9000端口启动"
     echo ""
 }
@@ -252,6 +357,7 @@ main() {
     # 解析命令行参数
     INSTALL_ONLY=false
     NO_FRONTEND=false
+    NO_BROWSER=false
     PORT=8000
     
     while [[ $# -gt 0 ]]; do
@@ -263,6 +369,15 @@ main() {
             --no-frontend)
                 NO_FRONTEND=true
                 shift
+                ;;
+            --no-browser)
+                NO_BROWSER=true
+                shift
+                ;;
+            --browser)
+                cd "$(dirname "$0")"
+                install_playwright_cli
+                exit 0
                 ;;
             --port)
                 PORT="$2"
@@ -288,6 +403,14 @@ main() {
     check_dependencies
     setup_venv
     install_dependencies
+    
+    if [ "$NO_BROWSER" = false ]; then
+        install_playwright_cli
+    else
+        print_info "跳过 Playwright CLI 安装 (--no-browser)"
+        print_info "稍后可运行: ./setup.sh --browser"
+    fi
+    
     check_env_file
     
     if [ "$NO_FRONTEND" = false ]; then

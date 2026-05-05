@@ -752,4 +752,363 @@ curl -X POST "http://target/api/register/complete" -d "email=victim@test.com"
             },
         },
     },
+    # =========================
+    # 🌐 4.浏览器自动化工具 (Playwright CLI)
+    # =========================
+    "browser_open": {
+        "description": "打开浏览器并导航到指定URL，启动浏览器会话",
+        "manual": """
+命令: playwright-cli open <url> [options]
+
+参数:
+  <url>                              要打开的URL
+  --browser=<type>                  浏览器类型: chromium/firefox/webkit/msedge (默认: chromium)
+  --headed                           显示浏览器界面（默认无头模式）
+  --persistent                       保存浏览器配置到磁盘（保持登录态）
+
+示例:
+  playwright-cli open https://example.com
+  playwright-cli open https://example.com --browser=firefox
+  playwright-cli open https://example.com --headed
+  playwright-cli -s=stealth open https://example.com --persistent
+
+⚠️ 重要:
+  - open命令会启动一个持久浏览器会话
+  - 后续命令（click、type、screenshot等）在同一会话中执行
+  - 使用 playwright-cli close 关闭会话
+  - 使用 -s=name 指定命名会话，支持多项目并行
+""",
+        "return_format": {
+            "type": "text",
+            "schema": {
+                "page_url": "string",
+                "page_title": "string",
+                "snapshot": "string",
+            },
+        },
+    },
+    "browser_goto": {
+        "description": "在当前浏览器会话中导航到新URL（不需要重新打开浏览器）",
+        "manual": """
+命令: playwright-cli goto <url>
+
+示例:
+  playwright-cli goto https://example.com/login
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_click": {
+        "description": "点击页面元素，支持元素引用(ref)和CSS选择器",
+        "manual": """
+命令: playwright-cli click <ref_or_selector> [button]
+
+参数:
+  <ref_or_selector>    元素引用(如e15)或CSS选择器(如#submit-btn)
+  [button]             可选: left/right/middle (默认: left)
+
+先用 playwright-cli snapshot 获取元素ref
+
+示例:
+  playwright-cli click e15
+  playwright-cli click "#submit-btn"
+  playwright-cli click "role=button[name=Submit]"
+  playwright-cli click "#menu" right
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_type": {
+        "description": "在当前聚焦元素中输入文本（逐字符输入，模拟真实键盘）",
+        "manual": """
+命令: playwright-cli type <text>
+
+示例:
+  playwright-cli type "admin"
+  playwright-cli type "hello world"
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_fill": {
+        "description": "清空指定元素并填入文本（比type更快）",
+        "manual": """
+命令: playwright-cli fill <ref> <text>
+
+示例:
+  playwright-cli fill e5 "admin"
+  playwright-cli fill "#username" "admin"
+  playwright-cli fill "role=searchbox" "test"
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_screenshot": {
+        "description": "截取当前页面或指定元素的截图",
+        "manual": """
+命令: playwright-cli screenshot [ref] [options]
+
+参数:
+  [ref]                     可选，截取指定元素
+  --filename=<path>         保存到指定文件路径
+
+示例:
+  playwright-cli screenshot
+  playwright-cli screenshot e15
+  playwright-cli screenshot --filename=reports/screenshots/test.png
+  playwright-cli pdf                    # 保存为PDF
+""",
+        "return_format": {"type": "text", "schema": {"screenshot_path": "string"}},
+    },
+    "browser_snapshot": {
+        "description": "获取当前页面的可访问性快照，包含元素引用(ref)，用于定位交互元素",
+        "manual": """
+命令: playwright-cli snapshot [options]
+
+参数:
+  --filename=<path>         保存快照到指定文件
+
+示例:
+  playwright-cli snapshot
+  playwright-cli snapshot --filename=page-snapshot.yml
+
+⚠️ 重要:
+  - 快照返回元素引用(如e15)，后续click/fill等操作使用这些引用
+  - 页面DOM变化后，元素引用可能失效，需要重新snapshot
+  - 在重大操作后应重新获取快照
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_eval": {
+        "description": "在当前页面执行JavaScript代码并返回结果",
+        "manual": """
+命令: playwright-cli eval <function> [ref]
+
+示例:
+  playwright-cli eval "document.title"
+  playwright-cli eval "document.cookie"
+  playwright-cli eval "Array.from(document.links).map(l=>l.href)"
+  playwright-cli eval "() => document.querySelector('#result').textContent"
+  playwright-cli eval "el => el.getAttribute('href')" e8
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_press": {
+        "description": "按下键盘按键（如Enter、Tab、Escape等）",
+        "manual": """
+命令: playwright-cli press <key>
+
+常用按键: Enter, Tab, Escape, ArrowDown, ArrowUp, Backspace, Delete, Control+a
+
+示例:
+  playwright-cli press Enter
+  playwright-cli press Tab
+  playwright-cli press Escape
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_cookie_list": {
+        "description": "列出当前页面的所有Cookie",
+        "manual": """
+命令: playwright-cli cookie-list [--domain=<domain>]
+
+示例:
+  playwright-cli cookie-list
+  playwright-cli cookie-list --domain=example.com
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_cookie_set": {
+        "description": "设置Cookie，用于模拟登录态或绕过认证",
+        "manual": """
+命令: playwright-cli cookie-set <name> <value>
+
+示例:
+  playwright-cli cookie-set session abc123
+  playwright-cli cookie-set token "bearer eyJhbGci..."
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_cookie_delete": {
+        "description": "删除指定名称的Cookie或清除所有Cookie",
+        "manual": """
+命令: playwright-cli cookie-delete <name>    # 删除指定Cookie
+命令: playwright-cli cookie-clear             # 清除所有Cookie
+
+示例:
+  playwright-cli cookie-delete session
+  playwright-cli cookie-clear
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_state_save": {
+        "description": "保存当前浏览器状态（Cookie、localStorage等），用于后续恢复会话",
+        "manual": """
+命令: playwright-cli state-save [filename]
+
+示例:
+  playwright-cli state-save login_state.json
+  playwright-cli state-save                    # 自动生成文件名
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_state_load": {
+        "description": "加载之前保存的浏览器状态，恢复登录态",
+        "manual": """
+命令: playwright-cli state-load <filename>
+
+示例:
+  playwright-cli state-load login_state.json
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_network": {
+        "description": "列出页面加载以来的所有网络请求，用于分析API调用",
+        "manual": """
+命令: playwright-cli network
+
+示例:
+  playwright-cli network
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_route": {
+        "description": "模拟或拦截网络请求（Mock API）",
+        "manual": """
+命令:
+  playwright-cli route <pattern> [opts]      # 拦截请求
+  playwright-cli route-list                   # 列出活跃路由
+  playwright-cli unroute <pattern>            # 移除路由
+
+示例:
+  playwright-cli route "**/api/**" --mock='{"status":200}'
+  playwright-cli route-list
+  playwright-cli unroute "**/api/**"
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_go_back": {
+        "description": "浏览器后退",
+        "manual": "命令: playwright-cli go-back",
+        "return_format": {"type": "text"},
+    },
+    "browser_go_forward": {
+        "description": "浏览器前进",
+        "manual": "命令: playwright-cli go-forward",
+        "return_format": {"type": "text"},
+    },
+    "browser_reload": {
+        "description": "刷新当前页面",
+        "manual": "命令: playwright-cli reload",
+        "return_format": {"type": "text"},
+    },
+    "browser_close": {
+        "description": "关闭当前浏览器会话",
+        "manual": """命令: playwright-cli close
+
+其他会话管理命令:
+  playwright-cli list                           # 列出所有会话
+  playwright-cli close-all                      # 关闭所有会话
+  playwright-cli kill-all                       # 强制关闭所有浏览器进程""",
+        "return_format": {"type": "text"},
+    },
+    "browser_tab_list": {
+        "description": "标签页管理：列出、新建、切换、关闭标签页",
+        "manual": """
+命令: playwright-cli tab-list                   # 列出所有标签页
+命令: playwright-cli tab-new [url]               # 新建标签页
+命令: playwright-cli tab-select <index>           # 切换标签页
+命令: playwright-cli tab-close [index]            # 关闭标签页
+
+示例:
+  playwright-cli tab-new https://example.com
+  playwright-cli tab-select 1
+  playwright-cli tab-close 1
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_console": {
+        "description": "查看浏览器控制台消息，用于调试和提取日志",
+        "manual": """
+命令: playwright-cli console [min-level]
+
+参数:
+  min-level             最低日志级别: error/warning/info/log/verbose
+
+示例:
+  playwright-cli console
+  playwright-cli console error
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_select": {
+        "description": "在下拉框中选择选项",
+        "manual": """
+命令: playwright-cli select <ref> <value>
+
+示例:
+  playwright-cli select e13 "China"
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_hover": {
+        "description": "鼠标悬停在指定元素上",
+        "manual": """
+命令: playwright-cli hover <ref>
+
+示例:
+  playwright-cli hover e15
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_upload": {
+        "description": "上传文件",
+        "manual": """
+命令: playwright-cli upload <file_path>
+
+示例:
+  playwright-cli upload /tmp/test_file.txt
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_video_start": {
+        "description": "开始录制浏览器操作视频",
+        "manual": """命令: playwright-cli video-start
+
+停止录制: playwright-cli video-stop --filename=reports/screenshots/demo.mp4
+添加章节标记: playwright-cli video-chapter "登录完成"
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_run_code": {
+        "description": "运行Playwright代码片段（高级操作，如等待、拖拽等）",
+        "manual": """
+命令: playwright-cli run-code <code>
+
+示例:
+  playwright-cli run-code "await page.waitForSelector('.dynamic-content')"
+  playwright-cli run-code "await page.waitForTimeout(3000)"
+  playwright-cli run-code "await page.waitForLoadState('networkidle')"
+""",
+        "return_format": {"type": "text"},
+    },
+    "browser_session": {
+        "description": "浏览器会话管理，支持命名会话和多实例并行",
+        "manual": """
+命令:
+  playwright-cli -s=<name> open <url>            # 使用命名会话
+  playwright-cli list                             # 列出所有会话
+  playwright-cli close-all                        # 关闭所有会话
+  playwright-cli kill-all                         # 强制关闭所有浏览器进程
+  playwright-cli -s=<name> delete-data             # 删除命名会话数据
+
+⚠️ 会话保持特性:
+  - 默认会话中Cookie和状态自动保持
+  - 使用 --persistent 参数保存到磁盘
+  - 使用 -s=name 创建隔离的命名会话
+
+示例:
+  playwright-cli open https://example.com                          # 默认会话
+  playwright-cli -s=project1 open https://example.com --persistent  # 命名会话
+  playwright-cli -s=project1 goto https://example.com/admin         # 继续同一会话
+  playwright-cli list                                               # 查看所有会话
+""",
+        "return_format": {"type": "text"},
+    },
 }
