@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class KaliExecutor:
     """直接在Kali Linux环境中执行命令，不使用Docker"""
 
-    def __init__(self, timeout: int = 300):
+    def __init__(self, timeout: int = 1800):
         """
         初始化Kali执行器
 

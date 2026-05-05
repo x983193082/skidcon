@@ -165,18 +165,24 @@ class AgentRunner:
                             "tool_output", {"output": str(chunk.tool_output)}
                         )
                 # 流式迭代完成后，安全访问result
-                final_result = (
-                    streaming_output.result
-                    if hasattr(streaming_output, "result")
-                    else None
-                )
+                final_result = None
+                try:
+                    final_result = streaming_output.result
+                except (RuntimeError, AttributeError):
+                    try:
+                        final_result = str(streaming_output)
+                    except Exception:
+                        final_result = None
             except Exception as e:
                 print(f"{Fore.YELLOW}[Warning] 流式输出处理失败: {e}{Style.RESET_ALL}")
                 import traceback
 
                 traceback.print_exc()
                 # 如果流式处理失败，尝试直接获取result
-                final_result = getattr(streaming_output, "result", None)
+                try:
+                    final_result = streaming_output.result
+                except (RuntimeError, AttributeError):
+                    final_result = str(streaming_output)
         else:
             # 无task_id时，直接获取result
             final_result = getattr(streaming_output, "result", None)
