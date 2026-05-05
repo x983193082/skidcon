@@ -21,7 +21,7 @@ from core.level2_agent import (
     agent_forensics,
     agent_post_exploitation,
     agent_custom_code,
-    agent_browser_testing
+    agent_browser_testing,
 )
 from core.memory_manager import MemoryManager
 from core.chat_agent import chat_agent
@@ -135,7 +135,7 @@ class AgentRunner:
 
         # 执行并处理流式输出
         streaming_output = crew.kickoff()
-        
+
         # 如果有task_id且output_collector存在，处理流式输出
         final_result = None
         if task_id and self.output_collector:
@@ -143,39 +143,44 @@ class AgentRunner:
                 # CrewAI的stream输出是可迭代的，必须完全迭代后才能访问result
                 for chunk in streaming_output:
                     # 处理文本chunk
-                    if hasattr(chunk, 'content') and chunk.content:
+                    if hasattr(chunk, "content") and chunk.content:
                         self.output_collector.add_output(
-                            "text_delta",
-                            {"delta": chunk.content, "agent": agent.role}
+                            "text_delta", {"delta": chunk.content, "agent": agent.role}
                         )
                     # 处理工具调用chunk
-                    if hasattr(chunk, 'tool_call') and chunk.tool_call:
+                    if hasattr(chunk, "tool_call") and chunk.tool_call:
                         tool_call_info = chunk.tool_call
                         self.output_collector.add_output(
                             "tool_call",
                             {
-                                "tool_name": getattr(tool_call_info, 'tool_name', 'unknown'),
-                                "tool_args": getattr(tool_call_info, 'arguments', {})
-                            }
+                                "tool_name": getattr(
+                                    tool_call_info, "tool_name", "unknown"
+                                ),
+                                "tool_args": getattr(tool_call_info, "arguments", {}),
+                            },
                         )
                     # 处理工具输出（某些版本的CrewAI会在工具调用后发送输出）
-                    if hasattr(chunk, 'tool_output') and chunk.tool_output:
+                    if hasattr(chunk, "tool_output") and chunk.tool_output:
                         self.output_collector.add_output(
-                            "tool_output",
-                            {"output": str(chunk.tool_output)}
+                            "tool_output", {"output": str(chunk.tool_output)}
                         )
                 # 流式迭代完成后，安全访问result
-                final_result = streaming_output.result if hasattr(streaming_output, 'result') else None
+                final_result = (
+                    streaming_output.result
+                    if hasattr(streaming_output, "result")
+                    else None
+                )
             except Exception as e:
                 print(f"{Fore.YELLOW}[Warning] 流式输出处理失败: {e}{Style.RESET_ALL}")
                 import traceback
+
                 traceback.print_exc()
                 # 如果流式处理失败，尝试直接获取result
-                final_result = getattr(streaming_output, 'result', None)
+                final_result = getattr(streaming_output, "result", None)
         else:
             # 无task_id时，直接获取result
-            final_result = getattr(streaming_output, 'result', None)
-        
+            final_result = getattr(streaming_output, "result", None)
+
         # 如果final_result仍未获取，使用str转换作为后备
         if final_result is None:
             final_result = str(streaming_output)
@@ -478,12 +483,12 @@ class AutonomousAgentRunner(AgentRunner):
 
             # 1. 决策
             last_result = (
-                self.test_state.executed_steps[-1]["result_summary"]
+                self.test_state.executed_steps[-1].result_summary
                 if self.test_state.executed_steps
                 else ""
             )
             last_verified = (
-                self.test_state.executed_steps[-1].get("verified", False)
+                self.test_state.executed_steps[-1].verified
                 if self.test_state.executed_steps
                 else False
             )
