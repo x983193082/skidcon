@@ -20,6 +20,14 @@ class KaliExecutor:
         """
         self.timeout = timeout
 
+    @staticmethod
+    def _needs_shell(command: str) -> bool:
+        shell_features = ["|", "&&", "||", ">", ">>", "<", "2>", "&>", "$(", "`"]
+        for feature in shell_features:
+            if feature in command:
+                return True
+        return False
+
     def execute(self, command: str, working_dir: Optional[str] = None) -> str:
         """
         在Kali Linux中执行命令
@@ -32,22 +40,23 @@ class KaliExecutor:
             执行结果（stdout + stderr）
         """
         try:
-            # 使用shlex分割命令，防止注入
-            cmd_parts = shlex.split(command)
+            use_shell = self._needs_shell(command)
+
+            if use_shell:
+                cmd_args = ["bash", "-c", command]
+            else:
+                cmd_args = shlex.split(command)
 
             logger.info(f"执行命令: {command}")
 
-            # 执行命令
             result = subprocess.run(
-                cmd_parts,
+                cmd_args,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
                 cwd=working_dir,
-                shell=False,  # 不使用shell=True防止注入
             )
 
-            # 组合stdout和stderr
             output = ""
             if result.stdout:
                 output += result.stdout
@@ -56,7 +65,6 @@ class KaliExecutor:
                     output += "\n--- STDERR ---\n"
                 output += result.stderr
 
-            # 检查退出码
             if result.returncode != 0:
                 logger.warning(
                     f"命令执行失败 (exit code: {result.returncode}): {command}"
