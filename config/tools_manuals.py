@@ -473,22 +473,21 @@ TOOL_MANUALS = {
     "hydra": {
         "description": "多协议口令爆破工具",
         "manual": """
-⚠️ hydra 使用规则 ⚠️
+⚠️ hydra 使用规则（必须严格遵守）⚠️
 
 ════════════════════════════════════════════════
-分阶段爆破策略（必须严格遵守）：
+分阶段爆破策略：
 ════════════════════════════════════════════════
-阶段1 - 常见弱口令（~1分钟）：
+阶段1 - 快速弱口令尝试（几秒~1分钟）：
   hydra -l admin -P /usr/share/wordlists/fasttrack.txt -s <port> <target> <service>
-  hydra -l admin -P /usr/share/wordlists/best1050.txt -s <port> <target> <service>
-  → 先用小字典快速尝试常见密码
+  → 必须先用小字典！绝大多数弱口令都能在这里找到
 
-阶段2 - 中等字典（~5-10分钟）：
-  hydra -l admin -P /usr/share/wordlists/rockyou.txt -t 4 -s <port> <target> <service>
-  → 仅在阶段1失败时使用，-t 4 限制并发数
+阶段2 - 中等字典（1~3分钟）：
+  hydra -l admin -P /usr/share/wordlists/best1050.txt -s <port> <target> <service>
+  → 仅在阶段1失败时使用
 
 ════════════════════════════════════════════════
-常用命令模板：
+常用命令模板（直接使用）：
 ════════════════════════════════════════════════
 HTTP基础认证爆破：
   hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> http-get / -s <port>
@@ -496,20 +495,22 @@ SSH爆破：
   hydra -l root -P /usr/share/wordlists/fasttrack.txt <target> ssh
 FTP爆破：
   hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> ftp
+多用户名尝试：
+  hydra -L /usr/share/wordlists/fasttrack.txt -P /usr/share/wordlists/fasttrack.txt <target> <service> -s <port>
 
 ════════════════════════════════════════════════
 绝对禁止：
 ════════════════════════════════════════════════
-❌ 直接使用 rockyou.txt 作为第一步（1400万条，需数小时）
-❌ 不指定并发数限制（-t 参数）
-❌ 长时间爆破不停止（超过10分钟应中断换策略）
+❌ 禁止使用 rockyou.txt（1400万条，HTTP认证需数天才能跑完）
+❌ 禁止不指定并发数限制（必须加 -t 4 或 -t 10）
+❌ 禁止长时间爆破（超过5分钟应中断换策略）
 
 ════════════════════════════════════════════════
-推荐字典（按大小）：
+推荐字典：
 ════════════════════════════════════════════════
-  fasttrack.txt    - 极小（ hundreds条，几秒）
-  best1050.txt     - 小（1050条，~1分钟）
-  rockyou.txt      - 大（1400万条，仅最后手段）
+  fasttrack.txt    - 极小（几百条，几秒完成）← 始终先用这个
+  best1050.txt     - 小（1050条，1~3分钟）← fasttrack失败后用
+  ⛔ rockyou.txt   - 禁止使用（1400万条，会卡死）
 """,
         "return_format": {
             "type": "json",
