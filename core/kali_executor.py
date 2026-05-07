@@ -36,6 +36,11 @@ class KaliExecutor:
         for feature in shell_features:
             if feature in command:
                 return True
+        # Check for background & (but not &> which is already handled)
+        import re
+
+        if re.search(r"(?<!&)&(?!>|>)", command):
+            return True
         return False
 
     def execute(self, command: str, working_dir: Optional[str] = None) -> str:

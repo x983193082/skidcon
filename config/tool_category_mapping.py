@@ -50,6 +50,7 @@ TOOL_TO_CATEGORY = {
     "wp-scan": "enumeration",  # 别名
     "gobuster": "enumeration",  # 注意：也在scanning和web_exploitation中
     "go-buster": "enumeration",  # 别名
+    "ftp": "enumeration",
     "curl": "enumeration",  # 注意：在多个类别中，但枚举场景最常见
     # Web利用 (web_exploitation)
     "sqlmap": "web_exploitation",
@@ -69,6 +70,7 @@ TOOL_TO_CATEGORY = {
     "business_bypass": "web_exploitation",
     "business-bypass": "web_exploitation",  # 别名
     # 漏洞利用 (exploitation)
+    "lfi_rce": "exploitation",
     "msfvenom": "exploitation",
     "msf-venom": "exploitation",  # 别名
     "searchsploit": "exploitation",
@@ -163,6 +165,7 @@ TOOL_TO_CATEGORY = {
 # 多类别工具映射（工具可能在多个类别中使用）
 MULTI_CATEGORY_TOOLS = {
     "curl": ["information_collection", "scanning", "enumeration", "web_exploitation"],
+    "ftp": ["enumeration", "exploitation"],
     "gobuster": ["scanning", "enumeration", "web_exploitation"],
     "nikto": ["enumeration", "web_exploitation"],
     "wpscan": ["enumeration", "web_exploitation"],
@@ -180,6 +183,7 @@ MULTI_CATEGORY_TOOLS = {
     "tcpdump": ["scanning", "forensics"],
     "tshark": ["scanning", "forensics"],
     "wireshark": ["scanning", "forensics"],
+    "lfi_rce": ["enumeration", "exploitation"],
     "python_execute": ["web_exploitation", "custom_code"],  # 逻辑漏洞测试需要
     "playwright_cli": [
         "browser_testing",

