@@ -312,21 +312,64 @@ TOOL_MANUALS = {
         "description": "Web 目录爆破工具",
         "manual": """
 执行 dirb <url> -S
-解析发现的路径
+常用字典：/usr/share/wordlists/dirb/common.txt
+带认证：dirb <url> -S -u <user>:<password>
 """,
         "return_format": {"type": "json", "schema": {"paths": ["string"]}},
     },
     "gobuster": {
         "description": "高性能目录与子域枚举工具",
         "manual": """
-执行 gobuster dir -u <url> -w /usr/share/seclists/Discovery/Web-Content/common.txt
+⚠️ gobuster 使用规则 ⚠️
+
+════════════════════════════════════════════════
+目录枚举（最常用）：
+════════════════════════════════════════════════
+基础扫描：
+  gobuster dir -u <url> -w /usr/share/wordlists/dirb/common.txt
+
+带认证的扫描：
+  gobuster dir -u <url> -w /usr/share/wordlists/dirb/common.txt -U <user> -P <password>
+
+排除特定状态码（如排除401）：
+  gobuster dir -u <url> -w /usr/share/wordlists/dirb/common.txt -b 401
+
+指定状态码白名单：
+  gobuster dir -u <url> -w /usr/share/wordlists/dirb/common.txt -s "200,204,301,302,307,403"
+
+════════════════════════════════════════════════
+子域名枚举：
+════════════════════════════════════════════════
+  gobuster dns -d <domain> -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt
+
+════════════════════════════════════════════════
+推荐字典（按大小）：
+════════════════════════════════════════════════
+  /usr/share/wordlists/dirb/common.txt              - 小（~4600条，快）
+  /usr/share/seclists/Discovery/Web-Content/common.txt - 中（~4700条）
+  /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt - 大（仅最后手段）
+
+════════════════════════════════════════════════
+绝对禁止：
+════════════════════════════════════════════════
+❌ 同时使用 -s 和 -b 参数（会报错，只能用其中一个）
+❌ 对需要认证的站点不提供 -U/-P 参数（所有路径都返回401无意义）
+❌ 第一次扫描就用大字典（先用 common.txt 快速发现，再用大字典补充）
 """,
-        "return_format": {"type": "json", "schema": {"paths": ["string"]}},
+        "return_format": {
+            "type": "json",
+            "schema": {"paths": ["string"]},
+        },
     },
     "ffuf": {
         "description": "快速模糊测试/路径枚举工具",
         "manual": """
-执行 ffuf -u <url>/FUZZ -w <wordlist>
+目录枚举：
+  ffuf -u <url>/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,204,301,302,307,403
+带认证：
+  ffuf -u <url>/FUZZ -w /usr/share/wordlists/dirb/common.txt -H "Authorization: Basic <base64>"
+排除401：
+  ffuf -u <url>/FUZZ -w /usr/share/wordlists/dirb/common.txt -fc 401
 """,
         "return_format": {
             "type": "json",
