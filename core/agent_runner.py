@@ -25,6 +25,7 @@ from core.level2_agent import (
 )
 from core.memory_manager import MemoryManager
 from core.chat_agent import chat_agent
+from core.logger import logger as skidcon_logger
 
 
 TARGET_TO_AGENT = {
@@ -250,6 +251,9 @@ class AgentRunner:
             chat_result = self._run_agent(
                 chat_agent, query_with_history, task_id=task_id
             )
+            skidcon_logger.save_conversation(
+                user_query=query, ai_response=chat_result, agent_type="chat"
+            )
             return classify_result, chat_result
 
         # action=handoff：根据 target 映射到二级Agent
@@ -281,6 +285,17 @@ class AgentRunner:
         print(f"{Fore.CYAN}[Level 2] 正在执行 {target} 任务...{Style.RESET_ALL}")
         level2_result = self._run_agent(
             level2_agent, query_with_history, task_id=task_id
+        )
+
+        skidcon_logger.log_pentest_event(
+            target=query,
+            phase=target,
+            action=query,
+            result=level2_result[:500] if level2_result else "",
+            findings={"target": target, "action": action},
+        )
+        skidcon_logger.save_conversation(
+            user_query=query, ai_response=level2_result, agent_type=target
         )
 
         # Level 2完成
@@ -321,6 +336,7 @@ class AgentRunner:
             import traceback
 
             traceback.print_exc()
+            skidcon_logger.log_error("agent_error", error_msg, {"query": query[:200]})
             # 即使出错也保存查询（但不保存响应）
             self._add_to_history(query, None)
 
@@ -349,6 +365,11 @@ class AgentRunner:
             ai_response: AI响应（可选）
         """
         self.memory_manager.add_conversation(user_query, ai_response)
+        skidcon_logger.save_conversation(
+            user_query=user_query,
+            ai_response=ai_response,
+            agent_type="unknown",
+        )
 
     def clear_history(self):
         """清空对话历史。"""
