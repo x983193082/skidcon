@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import threading
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -164,7 +165,8 @@ class SkidConLogger:
         """
         log_entry = {
             "timestamp": self._get_timestamp(),
-            "target": target,
+            "target": self._extract_target(target),
+            "raw_query": target[:200],
             "phase": phase,
             "action": action[:500],
             "result_preview": (result[:500] if result else ""),
@@ -176,7 +178,8 @@ class SkidConLogger:
         self._write_jsonl(filepath, log_entry)
 
         # 更新当前目标的渗透测试摘要
-        self._update_pentest_summary(target, phase, action, result, findings)
+        clean_target = self._extract_target(target)
+        self._update_pentest_summary(clean_target, phase, action, result, findings)
 
     def _update_pentest_summary(
         self,
@@ -250,19 +253,38 @@ class SkidConLogger:
         Returns:
             渗透测试摘要字典
         """
+        clean_target = self._extract_target(target)
         summary_path = os.path.join(
             self.log_dir,
-            f"pentest_summary_{target.replace('.', '_').replace('/', '_')}.json",
+            f"pentest_summary_{clean_target.replace('.', '_').replace('/', '_')}.json",
         )
 
         if not os.path.exists(summary_path):
-            return {"target": target, "phases": {}, "all_findings": {}}
+            return {"target": clean_target, "phases": {}, "all_findings": {}}
 
         try:
             with open(summary_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
-            return {"target": target, "phases": {}, "all_findings": {}}
+            return {"target": clean_target, "phases": {}, "all_findings": {}}
+
+    @staticmethod
+    def _extract_target(query: str) -> str:
+        """从查询字符串中提取目标IP或域名"""
+        ip_pattern = r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
+        domain_pattern = (
+            r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b"
+        )
+
+        ip_match = re.search(ip_pattern, query)
+        if ip_match:
+            return ip_match.group()
+
+        domain_match = re.search(domain_pattern, query)
+        if domain_match:
+            return domain_match.group()
+
+        return query[:50]
 
     # ==================== 错误日志 ====================
 

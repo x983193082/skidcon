@@ -96,6 +96,39 @@ agent_enumeration = Agent(
 - 你【禁止】说'我将使用''我会调用'等描述性语句
 - 你【必须】使用 kali_command 工具执行具体命令
 
+════════════════════════════════════════════════
+通用渗透测试枚举策略：
+════════════════════════════════════════════════
+1.【端口发现后立即做服务识别】
+   nmap -sV -Pn -p <端口> <target>
+
+2.【Web服务枚举优先级】
+   a) 先访问首页：curl -s http://<target>/
+   b) 查看源代码中的注释、隐藏路径、JS文件
+   c) 目录枚举：gobuster dir -u <url> -w common.txt
+   d) 发现目录后逐级深入枚举
+   e) 发现可疑文件（如info.php、debug.php）立即检查是否可利用
+
+3.【LFI/文件包含检测流程】
+   发现参数如 ?file= ?page= ?image= ?path= ?include= 时：
+   a) 直接包含：curl "http://<target>/page?file=/etc/passwd"
+   b) PHP filter读源码：curl "http://<target>/page?file=php://filter/convert.base64-encode/resource=<文件>"
+   c) 解码结果：echo '<base64>' | base64 -d
+   d) 用LFI读取：/etc/nginx/.htpasswd、配置文件、数据库配置
+   e) 确认LFI可用后，立即读取敏感文件，不要停留在探测
+
+4.【发现哈希后的处理】
+   a) 识别哈希类型（$apr1$=Apache APR1, $6$=SHA-512等）
+   b) 用 hashcat -m <类型> 或 john 破解
+   c) 结合目标主题（如Tomato→密码可能是tomato/potato等）生成定制字典
+
+5.【发现认证页面（401/403）的绕过策略】
+   a) 常见弱口令：admin:admin, admin:password, root:root
+   b) 请求头绕过：X-Original-URL, X-Forwarded-For, X-Forwarded-Host
+   c) 路径绕过：/..%2f/, /;/, /;admin
+   d) HTTP方法绕过：PUT, PATCH, OPTIONS
+   e) 如果以上都失败，寻找其他端口/服务上的信息（LFI读密码文件）
+
 可用工具：
 """
     + f"""   - Enum4linux（SMB 枚举）: {TOOL_MANUALS["enum4linux"]["description"]}
@@ -214,6 +247,41 @@ agent_exploitation = Agent(
 - 你【禁止】直接输出自然语言答案
 - 你【禁止】说'我将使用''我会调用'等描述性语句
 - 你【必须】使用 kali_command 工具执行具体命令
+
+════════════════════════════════════════════════
+通用渗透测试利用策略：
+════════════════════════════════════════════════
+1.【从枚举结果中提取攻击向量】
+   - 开放端口 → 每个端口对应一个服务 → 查找服务已知漏洞
+   - Web应用 → 目录结构、参数、版本号 → LFI/RFI/SQLi/RCE
+   - 配置文件泄露 → 数据库密码、API密钥、内部路径
+   - 用户名/密码 → 横向移动到SSH/FTP/其他服务
+
+2.【LFI利用步骤】
+   a) 确认LFI漏洞可用（读取/etc/passwd验证）
+   b) 用PHP filter读取源码（base64编码）
+   c) 读取配置文件获取数据库凭据
+   d) 读取.htpasswd/.htaccess获取认证信息
+   e) 尝试LFI → RCE（日志注入、Session文件包含、/proc/self/environ）
+   f) 不要停留在探测阶段，确认LFI后立即读敏感文件
+
+3.【哈希破解步骤】
+   a) 识别哈希类型（$apr1$=Apache APR1-MD5, $6$=SHA-512等）
+   b) 使用hashcat指定正确模式：hashcat -m 1600（APR1）等
+   c) 先用fasttrack.txt快速尝试
+   d) 结合目标主题生成定制字典（如Tomato→tomato/potato/ketchup等）
+   e) 破解成功后立即尝试SSH/FTP/Web登录
+
+4.【拿到凭据后的行动】
+   a) SSH登录：ssh -p <端口> <用户>@<目标>
+   b) 横向移动：用相同凭据尝试其他服务
+   c) 权限提升：sudo -l, find / -perm -4000, 检查内核版本
+   d) 信息收集：cat /etc/shadow, 查找其他用户的SSH密钥
+
+5.【不要重复已经失败的方法】
+   - 如果hydra爆破失败，不要换字典继续爆破
+   - 如果认证绕过失败，寻找其他攻击面（如其他端口的Web服务）
+   - 如果一个方法不行，换思路而不是重复
 
 可用工具：
 """
