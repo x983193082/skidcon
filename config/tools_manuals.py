@@ -430,7 +430,43 @@ TOOL_MANUALS = {
     "hydra": {
         "description": "多协议口令爆破工具",
         "manual": """
-执行 hydra -l <user> -P <passlist> <service>
+⚠️ hydra 使用规则 ⚠️
+
+════════════════════════════════════════════════
+分阶段爆破策略（必须严格遵守）：
+════════════════════════════════════════════════
+阶段1 - 常见弱口令（~1分钟）：
+  hydra -l admin -P /usr/share/wordlists/fasttrack.txt -s <port> <target> <service>
+  hydra -l admin -P /usr/share/wordlists/best1050.txt -s <port> <target> <service>
+  → 先用小字典快速尝试常见密码
+
+阶段2 - 中等字典（~5-10分钟）：
+  hydra -l admin -P /usr/share/wordlists/rockyou.txt -t 4 -s <port> <target> <service>
+  → 仅在阶段1失败时使用，-t 4 限制并发数
+
+════════════════════════════════════════════════
+常用命令模板：
+════════════════════════════════════════════════
+HTTP基础认证爆破：
+  hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> http-get / -s <port>
+SSH爆破：
+  hydra -l root -P /usr/share/wordlists/fasttrack.txt <target> ssh
+FTP爆破：
+  hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> ftp
+
+════════════════════════════════════════════════
+绝对禁止：
+════════════════════════════════════════════════
+❌ 直接使用 rockyou.txt 作为第一步（1400万条，需数小时）
+❌ 不指定并发数限制（-t 参数）
+❌ 长时间爆破不停止（超过10分钟应中断换策略）
+
+════════════════════════════════════════════════
+推荐字典（按大小）：
+════════════════════════════════════════════════
+  fasttrack.txt    - 极小（ hundreds条，几秒）
+  best1050.txt     - 小（1050条，~1分钟）
+  rockyou.txt      - 大（1400万条，仅最后手段）
 """,
         "return_format": {
             "type": "json",
