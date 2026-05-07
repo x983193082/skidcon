@@ -136,20 +136,22 @@ class AgentRunner:
         # 执行并处理流式输出
         streaming_output = crew.kickoff()
 
-        # 如果有task_id且output_collector存在，处理流式输出
+        # CrewAI的stream输出是可迭代的，必须完全迭代后才能访问result
+        # 无论是否有task_id，都必须迭代完整个流式输出
         final_result = None
-        if task_id and self.output_collector:
-            try:
-                # CrewAI的stream输出是可迭代的，必须完全迭代后才能访问result
-                for chunk in streaming_output:
-                    # 处理文本chunk
-                    if hasattr(chunk, "content") and chunk.content:
+        chunks_text = []
+        try:
+            for chunk in streaming_output:
+                chunk_text = ""
+                if hasattr(chunk, "content") and chunk.content:
+                    chunk_text = chunk.content
+                    if task_id and self.output_collector:
                         self.output_collector.add_output(
                             "text_delta", {"delta": chunk.content, "agent": agent.role}
                         )
-                    # 处理工具调用chunk
-                    if hasattr(chunk, "tool_call") and chunk.tool_call:
-                        tool_call_info = chunk.tool_call
+                if hasattr(chunk, "tool_call") and chunk.tool_call:
+                    tool_call_info = chunk.tool_call
+                    if task_id and self.output_collector:
                         self.output_collector.add_output(
                             "tool_call",
                             {
@@ -159,33 +161,21 @@ class AgentRunner:
                                 "tool_args": getattr(tool_call_info, "arguments", {}),
                             },
                         )
-                    # 处理工具输出（某些版本的CrewAI会在工具调用后发送输出）
-                    if hasattr(chunk, "tool_output") and chunk.tool_output:
+                if hasattr(chunk, "tool_output") and chunk.tool_output:
+                    if task_id and self.output_collector:
                         self.output_collector.add_output(
                             "tool_output", {"output": str(chunk.tool_output)}
                         )
-                # 流式迭代完成后，安全访问result
-                final_result = None
-                try:
-                    final_result = streaming_output.result
-                except (RuntimeError, AttributeError):
-                    try:
-                        final_result = str(streaming_output)
-                    except Exception:
-                        final_result = None
-            except Exception as e:
-                print(f"{Fore.YELLOW}[Warning] 流式输出处理失败: {e}{Style.RESET_ALL}")
-                import traceback
+                if chunk_text:
+                    chunks_text.append(chunk_text)
+        except Exception as e:
+            print(f"{Fore.YELLOW}[Warning] 流式输出迭代失败: {e}{Style.RESET_ALL}")
 
-                traceback.print_exc()
-                # 如果流式处理失败，尝试直接获取result
-                try:
-                    final_result = streaming_output.result
-                except (RuntimeError, AttributeError):
-                    final_result = str(streaming_output)
-        else:
-            # 无task_id时，直接获取result
-            final_result = getattr(streaming_output, "result", None)
+        # 流式迭代完成后，安全访问result
+        try:
+            final_result = streaming_output.result
+        except (RuntimeError, AttributeError):
+            final_result = "".join(chunks_text) if chunks_text else None
 
         # 如果final_result仍未获取，使用str转换作为后备
         if final_result is None:
