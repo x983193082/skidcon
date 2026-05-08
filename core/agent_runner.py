@@ -463,6 +463,11 @@ class AutonomousAgentRunner(AgentRunner):
                 self.blackboard.resume_meta.is_resumed = True
                 self.blackboard.resume_meta.last_timestamp = datetime.now().isoformat()
                 self.blackboard.save(self._blackboard_path)
+                report_path = self._blackboard_path.replace(".json", "_report.md")
+                try:
+                    self.blackboard.save_report(f"logs/{os.path.basename(report_path)}")
+                except Exception:
+                    pass
                 print(
                     f"{Fore.GREEN}[✓] 黑板状态已保存到 {self._blackboard_path}{Style.RESET_ALL}"
                 )
@@ -661,6 +666,8 @@ class AutonomousAgentRunner(AgentRunner):
             self.blackboard.resume_meta.last_timestamp = datetime.now().isoformat()
             try:
                 self.blackboard.save(self._blackboard_path)
+                report_path = self._blackboard_path.replace(".json", "_report.md")
+                self.blackboard.save_report(f"logs/{os.path.basename(report_path)}")
             except Exception as e:
                 print(f"{Fore.YELLOW}[Warning] 保存黑板状态失败: {e}{Style.RESET_ALL}")
 
@@ -705,6 +712,8 @@ class AutonomousAgentRunner(AgentRunner):
         self.blackboard.resume_meta.completed_steps = step
         try:
             self.blackboard.save(self._blackboard_path)
+            report_path = self._blackboard_path.replace(".json", "_report.md")
+            self.blackboard.save_report(f"logs/{os.path.basename(report_path)}")
         except Exception as e:
             print(f"{Fore.YELLOW}[Warning] 保存黑板状态失败: {e}{Style.RESET_ALL}")
 
@@ -743,6 +752,11 @@ class AutonomousAgentRunner(AgentRunner):
                 self.blackboard.resume_meta.is_resumed = True
                 self.blackboard.resume_meta.last_timestamp = datetime.now().isoformat()
                 self.blackboard.save(self._blackboard_path)
+                report_path = self._blackboard_path.replace(".json", "_report.md")
+                try:
+                    self.blackboard.save_report(f"logs/{os.path.basename(report_path)}")
+                except Exception:
+                    pass
                 print(
                     f"{Fore.GREEN}[✓] 测试已停止，状态已保存到 {self._blackboard_path}{Style.RESET_ALL}"
                 )

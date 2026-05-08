@@ -950,3 +950,173 @@ class Blackboard:
             parts.append(f"建议下一步: {next_hint}")
 
         return " | ".join(parts)
+
+    def generate_report(self) -> str:
+        """生成 Markdown 格式的渗透测试黑板报告"""
+
+        phase_names = {
+            "reconnaissance": "信息收集",
+            "scanning": "扫描",
+            "enumeration": "枚举",
+            "vulnerability": "漏洞分析",
+            "exploitation": "漏洞利用",
+            "post_exploitation": "后渗透",
+            "reporting": "报告生成",
+        }
+        phase_display = phase_names.get(self.phase, self.phase)
+
+        status_emoji = {
+            "pending": "⏳",
+            "in_progress": "🔄",
+            "success": "✅",
+            "failed": "❌",
+        }
+
+        lines = []
+        lines.append(f"# 渗透测试黑板报告")
+        lines.append(f"")
+        lines.append(
+            f"**目标**: {self.target or '未设定'} | "
+            f"**阶段**: {phase_display} ({self.phase}) | "
+            f"**步骤**: {self.resume_meta.completed_steps} | "
+            f"**时间**: {self.resume_meta.last_timestamp or '-'}"
+        )
+        lines.append(f"")
+
+        lines.append(f"---")
+        lines.append(f"")
+        lines.append(f"## 端口发现 ({len(self.ports)}个)")
+        lines.append(f"")
+        if self.ports:
+            lines.append(f"| 端口/协议 | 服务 | 版本 | Banner | 状态 |")
+            lines.append(f"|-----------|------|------|--------|------|")
+            for key, p in sorted(self.ports.items(), key=lambda x: x[1].port):
+                lines.append(
+                    f"| {p.port}/{p.protocol} | {p.service} | "
+                    f"{p.version or '-'} | {p.banner or '-'} | {p.state} |"
+                )
+        else:
+            lines.append(f"*尚未发现端口*")
+        lines.append(f"")
+
+        lines.append(f"## 漏洞 ({len(self.vulns)}个)")
+        lines.append(f"")
+        if self.vulns:
+            lines.append(f"| 漏洞 | 严重性 | 状态 | 证据 |")
+            lines.append(f"|------|--------|------|------|")
+            for key, v in self.vulns.items():
+                confirmed_str = "✅已确认" if v.confirmed else "⚠️待确认"
+                exploited_str = " |已利用" if v.exploited else ""
+                evidence_short = (v.evidence or "")[:60]
+                lines.append(
+                    f"| {v.name} | {v.severity} | {confirmed_str}{exploited_str} | {evidence_short} |"
+                )
+        else:
+            lines.append(f"*尚未发现漏洞*")
+        lines.append(f"")
+
+        if self.rce:
+            lines.append(f"## RCE (远程代码执行)")
+            lines.append(f"")
+            lines.append(f"- **方法**: {self.rce.method}")
+            lines.append(f"- **输出方式**: {self.rce.output_method}")
+            lines.append(f"- **权限**: {self.rce.privilege}")
+            lines.append(
+                f"- **交互式Shell**: {'✅已获取' if self.rce.shell_access else '❌未获取'}"
+            )
+            if self.rce.output_method == "redirect" and self.lfi_param:
+                lines.append(
+                    f"- **RCE模板**: `?{self.lfi_param}=/var/log/auth.log&cmd={{CMD}} > /tmp/out.txt`"
+                )
+                lines.append(f"- **读取结果**: `?{self.lfi_param}=/tmp/out.txt`")
+            elif self.rce.output_method == "webshell":
+                lines.append(
+                    f"- **Webshell**: `curl http://{self.target}/shell.php?c={{CMD}}`"
+                )
+            lines.append(f"")
+        elif self._rce_pending_count >= 1:
+            lines.append(f"## RCE (待确认)")
+            lines.append(f"")
+            lines.append(f"- 检测到命令执行回显，等待二次确认")
+            lines.append(f"")
+
+        if self.lfi_confirmed:
+            lines.append(f"## LFI 状态")
+            lines.append(f"")
+            lines.append(f"- **确认**: ✅")
+            if self.lfi_param:
+                lines.append(f"- **参数**: `{self.lfi_param}`")
+            if self.lfi_url:
+                lines.append(f"- **URL**: `{self.lfi_url}...`")
+            phpinfo_status = (
+                "✅需要输出重定向" if self.lfi_includes_phpinfo else "❌无污染"
+            )
+            lines.append(f"- **phpinfo污染**: {phpinfo_status}")
+            lines.append(f"")
+
+        lines.append(f"## 凭据 ({len(self.creds)}个)")
+        lines.append(f"")
+        if self.creds:
+            lines.append(f"| 用户名 | 密码 | 哈希 | 哈希类型 | 来源 |")
+            lines.append(f"|--------|------|------|----------|------|")
+            for key, c in self.creds.items():
+                pwd = c.password or "-"
+                ht = c.hash_type or "-"
+                hv = (c.hash_value or "-")[:20]
+                src = c.source or "-"
+                lines.append(f"| {c.username} | {pwd} | {hv} | {ht} | {src} |")
+        else:
+            lines.append(f"*尚未发现凭据*")
+        lines.append(f"")
+
+        if self.attack_paths:
+            lines.append(f"## 攻击路径")
+            lines.append(f"")
+            lines.append(f"| # | 路径 | 优先级 | 状态 |")
+            lines.append(f"|---|------|--------|------|")
+            for p in sorted(self.attack_paths, key=lambda x: x.priority):
+                status_emoji_str = status_emoji.get(p.status, "❓")
+                lines.append(
+                    f"| {p.priority} | {p.name} | {status_emoji_str}{p.status} |"
+                )
+            lines.append(f"")
+
+        if self.execution_log:
+            lines.append(f"## 执行时间线 ({len(self.execution_log)}步)")
+            lines.append(f"")
+            lines.append(f"| 步骤 | 状态 | 输出摘要 |")
+            lines.append(f"|------|------|----------|")
+            for step_name, log in list(self.execution_log.items())[-20:]:
+                status_icon = "✅" if log.status == "success" else "❌"
+                output_short = (log.output or "")[:80].replace("\n", " ")
+                lines.append(f"| {step_name} | {status_icon} | {output_short} |")
+            lines.append(f"")
+
+        if self.failed_attempts:
+            lines.append(f"## 失败尝试 ({len(self.failed_attempts)}个)")
+            lines.append(f"")
+            for attempt in self.failed_attempts[-10:]:
+                lines.append(f"- {attempt}")
+            lines.append(f"")
+
+        lines.append(f"## 建议下一步")
+        lines.append(f"")
+        next_hint = self.get_next_action_hint()
+        lines.append(f"**{next_hint}**")
+        lines.append(f"")
+
+        lines.append(f"---")
+        lines.append(f"*报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+
+        return "\n".join(lines)
+
+    def save_report(self, filepath: str):
+        """保存 Markdown 报告到文件"""
+        report = self.generate_report()
+        os.makedirs(
+            os.path.dirname(filepath) if os.path.dirname(filepath) else ".",
+            exist_ok=True,
+        )
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(report)
+        return filepath
