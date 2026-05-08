@@ -4,6 +4,7 @@ import subprocess
 import shlex
 import time
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -30,13 +31,29 @@ class KaliExecutor:
             self._skidcon_logger = skidcon_logger
         return self._skidcon_logger
 
+    BLOCKED_PATTERNS = {
+        r'rockyou\.txt': '[BLOCKED] rockyou.txt is forbidden (14M entries, will timeout). Use fasttrack.txt or best1050.txt',
+        r'/big\.txt\b': '[BLOCKED] big.txt is forbidden (will timeout). Use common.txt or small.txt',
+        r'unix_users\.txt': '[BLOCKED] unix_users.txt is forbidden (will timeout). Use fasttrack.txt or custom user list',
+        r'<<\s*\w': '[BLOCKED] heredoc (<<) is not supported (will hang). Use curl instead of interactive commands',
+        r'nohup\s': '[BLOCKED] nohup is not supported (will hang). Run commands directly',
+    }
+
+    @classmethod
+    def _check_blocked(cls, command: str) -> Optional[str]:
+        import re
+
+        for pattern, message in cls.BLOCKED_PATTERNS.items():
+            if re.search(pattern, command):
+                return message
+        return None
+
     @staticmethod
     def _needs_shell(command: str) -> bool:
         shell_features = ["|", "&&", "||", ">", ">>", "<", "2>", "&>", "$(", "`"]
         for feature in shell_features:
             if feature in command:
                 return True
-        # Check for background & (but not &> which is already handled)
         import re
 
         if re.search(r"(?<!&)&(?!>|>)", command):
@@ -56,6 +73,19 @@ class KaliExecutor:
         """
         start_time = time.time()
         try:
+            blocked_msg = self._check_blocked(command)
+            if blocked_msg:
+                duration = time.time() - start_time
+                logger.warning(f"命令被拦截: {command}")
+                self.skidcon_logger.log_command(
+                    command=command,
+                    output=blocked_msg,
+                    duration=duration,
+                    exit_code=-1,
+                    tool_type="shell",
+                )
+                return blocked_msg
+
             use_shell = self._needs_shell(command)
 
             if use_shell:
