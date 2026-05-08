@@ -1,6 +1,8 @@
 """Agent Runner for three-level agent system - CrewAI 版本"""
 
 import json
+import os
+import signal
 import re
 from datetime import datetime
 from typing import List, Dict, Optional, Any
@@ -438,7 +440,7 @@ from core.blackboard import Blackboard
 
 
 class AutonomousAgentRunner(AgentRunner):
-    """自主渗透测试运行器 - 具备反馈循环的自动化测试"""
+    """自主渗透测试运行器 - 具备反馈循环的自动化测试，支持断点恢复"""
 
     def __init__(self, model_name: str = "z-ai/glm-5.1"):
         super().__init__(model_name)
@@ -448,30 +450,94 @@ class AutonomousAgentRunner(AgentRunner):
         self.blackboard = Blackboard()
         self.report_generator = ReportGenerator()
         self._is_running = False
+        self._blackboard_path: str = ""
+        self._original_sigint = None
+        self._original_sigterm = None
+
+    def _handle_interrupt(self, signum, frame):
+        """优雅关机：保存黑板状态后退出"""
+        print(f"\n{Fore.YELLOW}[!] 收到中断信号，正在保存状态...{Style.RESET_ALL}")
+        self._is_running = False
+        if self.blackboard and self._blackboard_path:
+            try:
+                self.blackboard.resume_meta.is_resumed = True
+                self.blackboard.resume_meta.last_timestamp = datetime.now().isoformat()
+                self.blackboard.save(self._blackboard_path)
+                print(
+                    f"{Fore.GREEN}[✓] 黑板状态已保存到 {self._blackboard_path}{Style.RESET_ALL}"
+                )
+                print(f"{Fore.GREEN}[✓] 下次运行将从断点恢复{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}[✗] 保存黑板失败: {e}{Style.RESET_ALL}")
+        # 恢复原始信号处理
+        if self._original_sigint:
+            signal.signal(signal.SIGINT, self._original_sigint)
+        if self._original_sigterm:
+            signal.signal(signal.SIGTERM, self._original_sigterm)
 
     def run_autonomous_test(
         self, target: str, task_id: str = None, max_steps: int = 12
     ) -> str:
         """
-        自主执行完整渗透测试流程
+        自主执行完整渗透测试流程，支持从断点恢复
 
         核心循环：决策 → 执行 → 验证 → 提取结构化数据（反馈） → 更新状态 → 决策...
+        中断后可从黑板文件恢复，跳过已完成的步骤。
         """
         self._is_running = True
+        self._blackboard_path = f"logs/blackboard_{target.replace('.', '_')}.json"
 
-        self.test_state = TestState()
-        self.blackboard = Blackboard()
-        self.test_state.target = target
-        self.blackboard.target = target
-        self.test_state.start_time = datetime.now()
-
-        blackboard_path = f"logs/blackboard_{target.replace('.', '_')}.json"
+        # 注册信号处理（Ctrl+C 优雅关机）
         try:
-            self.blackboard.load(blackboard_path)
-            if self.blackboard.target != target:
-                self.blackboard.target = target
-        except Exception:
+            self._original_sigint = signal.getsignal(signal.SIGINT)
+            self._original_sigterm = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGINT, self._handle_interrupt)
+            signal.signal(signal.SIGTERM, self._handle_interrupt)
+        except (OSError, ValueError):
             pass
+
+        # 尝试从断点恢复
+        resumed = False
+        self.blackboard = Blackboard()
+        if os.path.exists(self._blackboard_path):
+            try:
+                self.blackboard.load(self._blackboard_path)
+                if self.blackboard.is_resumable(target):
+                    resumed = True
+                    self.test_state = TestState.from_blackboard(self.blackboard)
+                    self.test_state.target = target
+                    step = self.blackboard.resume_meta.completed_steps
+                    self.blackboard.resume_meta.is_resumed = True
+                    resume_summary = self.blackboard.get_resume_summary()
+                    print(
+                        f"{Fore.GREEN}[✓] 从断点恢复: {resume_summary}{Style.RESET_ALL}"
+                    )
+                    self._add_output_sync(
+                        task_id,
+                        "resumed",
+                        {
+                            "target": target,
+                            "resumed": True,
+                            "completed_steps": step,
+                            "summary": resume_summary,
+                            "message": f"从断点恢复（已完成 {step} 步）",
+                        },
+                    )
+                else:
+                    self.blackboard = Blackboard()
+            except Exception:
+                self.blackboard = Blackboard()
+
+        if not resumed:
+            self.test_state = TestState()
+            self.blackboard = Blackboard()
+            self.test_state.target = target
+            self.blackboard.target = target
+            self.test_state.start_time = datetime.now()
+            step = 0
+
+        # 确保目录存在
+        os.makedirs("logs", exist_ok=True)
 
         self._add_output_sync(
             task_id,
@@ -479,34 +545,34 @@ class AutonomousAgentRunner(AgentRunner):
             {
                 "target": target,
                 "max_steps": max_steps,
-                "message": f"开始自主渗透测试: {target}",
+                "message": f"{'恢复' if resumed else '开始'}自主渗透测试: {target}",
+                "resumed": resumed,
+                "completed_steps": step if resumed else 0,
             },
         )
 
-        # Phase 0: 规划
-        self._add_output_sync(
-            task_id,
-            "phase_update",
-            {
-                "step": 0,
-                "phase": "planning",
-                "message": "正在分析目标并制定测试计划...",
-            },
-        )
-
-        plan = generate_test_plan(target)
-
-        self._add_output_sync(
-            task_id,
-            "plan_generated",
-            {
-                "plan": plan,
-                "message": f"测试计划已生成，预计{len(plan.get('test_phases', []))}个阶段",
-            },
-        )
+        # Phase 0: 规划（恢复时跳过）
+        if not resumed:
+            self._add_output_sync(
+                task_id,
+                "phase_update",
+                {
+                    "step": 0,
+                    "phase": "planning",
+                    "message": "正在分析目标并制定测试计划...",
+                },
+            )
+            plan = generate_test_plan(target)
+            self._add_output_sync(
+                task_id,
+                "plan_generated",
+                {
+                    "plan": plan,
+                    "message": f"测试计划已生成，预计{len(plan.get('test_phases', []))}个阶段",
+                },
+            )
 
         # 主循环
-        step = 0
         while step < max_steps and self._is_running:
             step += 1
 
@@ -564,11 +630,12 @@ class AutonomousAgentRunner(AgentRunner):
             # 3. 验证
             verified_info = self.result_verifier.verify(category, level2_result or "")
 
-            # 4. 反馈：从迷宫更新结构化数据（黑板为唯一数据源）
+            # 4. 反馈：从黑板更新结构化数据
             self.blackboard.update_from_result(category, level2_result or "")
 
-            # 5. 从黑板同步到 test_state（兼容性）
+            # 5. 从黑板同步到 test_state
             self.test_state = TestState.from_blackboard(self.blackboard)
+            self.test_state.target = target
 
             # 6. 记录步骤
             self.test_state.add_step(
@@ -580,16 +647,27 @@ class AutonomousAgentRunner(AgentRunner):
             )
 
             # 7. 记录黑板执行日志
+            self.blackboard.step_counter = step
             self.blackboard.mark_attempt(
-                step_name=f"{category}_{self.test_state.step_counter}",
+                step_name=f"{category}_{step}",
                 status="success" if verified_info["verified"] else "failed",
                 output=(level2_result or "")[:200],
             )
 
-            # 8. 保存到MemoryManager
+            # 8. 更新恢复元数据并保存黑板（每步保存）
+            self.blackboard.resume_meta.completed_steps = step
+            self.blackboard.resume_meta.last_step = step
+            self.blackboard.resume_meta.last_phase = self.test_state.phase
+            self.blackboard.resume_meta.last_timestamp = datetime.now().isoformat()
+            try:
+                self.blackboard.save(self._blackboard_path)
+            except Exception as e:
+                print(f"{Fore.YELLOW}[Warning] 保存黑板状态失败: {e}{Style.RESET_ALL}")
+
+            # 9. 保存到MemoryManager
             self._add_to_history(query, level2_result)
 
-            # 7. 更新阶段
+            # 10. 更新阶段
             if next_phase != self.test_state.phase:
                 self._add_output_sync(
                     task_id,
@@ -601,8 +679,9 @@ class AutonomousAgentRunner(AgentRunner):
                     },
                 )
                 self.test_state.phase = next_phase
+                self.blackboard.phase = next_phase
 
-            # 8. 通知步骤完成
+            # 11. 通知步骤完成
             self._add_output_sync(
                 task_id,
                 "step_completed",
@@ -612,6 +691,7 @@ class AutonomousAgentRunner(AgentRunner):
                     "confidence": verified_info["confidence"],
                     "evidence": verified_info["evidence"][:200],
                     "findings_count": len(self.test_state.discovered_vulns),
+                    "blackboard_summary": self.blackboard.get_resume_summary(),
                 },
             )
 
@@ -620,10 +700,11 @@ class AutonomousAgentRunner(AgentRunner):
         report_json = self.report_generator.generate(self.test_state)
         report_md = self.report_generator.generate_markdown(self.test_state)
 
-        # 保存黑板状态到文件（持久化）
+        # 最终保存黑板状态
+        self.blackboard.resume_meta.is_resumed = False
+        self.blackboard.resume_meta.completed_steps = step
         try:
-            bb_path = f"logs/blackboard_{target.replace('.', '_')}.json"
-            self.blackboard.save(bb_path)
+            self.blackboard.save(self._blackboard_path)
         except Exception as e:
             print(f"{Fore.YELLOW}[Warning] 保存黑板状态失败: {e}{Style.RESET_ALL}")
 
@@ -642,11 +723,31 @@ class AutonomousAgentRunner(AgentRunner):
 
         self._add_output_sync(task_id, "task_completed", {"success": True})
 
+        # 恢复原始信号处理
+        try:
+            if self._original_sigint:
+                signal.signal(signal.SIGINT, self._original_sigint)
+            if self._original_sigterm:
+                signal.signal(signal.SIGTERM, self._original_sigterm)
+        except (OSError, ValueError):
+            pass
+
         self._is_running = False
         return report_json
 
     def stop(self):
+        """停止测试并保存状态"""
         self._is_running = False
+        if self.blackboard and self._blackboard_path:
+            try:
+                self.blackboard.resume_meta.is_resumed = True
+                self.blackboard.resume_meta.last_timestamp = datetime.now().isoformat()
+                self.blackboard.save(self._blackboard_path)
+                print(
+                    f"{Fore.GREEN}[✓] 测试已停止，状态已保存到 {self._blackboard_path}{Style.RESET_ALL}"
+                )
+            except Exception as e:
+                print(f"{Fore.RED}[✗] 保存状态失败: {e}{Style.RESET_ALL}")
 
 
 autonomous_runner = AutonomousAgentRunner()

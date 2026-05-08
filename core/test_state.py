@@ -385,6 +385,28 @@ class TestState:
                 )
             )
 
+        # 同步黑板执行日志到 executed_steps（兼容性）
+        if hasattr(blackboard, "execution_log") and blackboard.execution_log:
+            for step_name, exec_log in blackboard.execution_log.items():
+                category = "unknown"
+                if "_" in step_name:
+                    category = step_name.split("_")[0]
+                state.executed_steps.append(
+                    ExecutedStep(
+                        step=0,
+                        phase=exec_log.timestamp or "unknown",
+                        query=exec_log.step_name,
+                        result=exec_log.output,
+                        result_summary=exec_log.output[:200] if exec_log.output else "",
+                        verified=exec_log.status == "success",
+                        category=category,
+                    )
+                )
+
+        # 同步 step_counter
+        if hasattr(blackboard, "step_counter"):
+            state.step_counter = blackboard.step_counter
+
         return state
 
     def __str__(self) -> str:

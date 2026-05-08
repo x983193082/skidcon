@@ -198,7 +198,17 @@ class DecisionEngine:
     def _rule_based_decision(
         self, state: TestState, last_result: str, last_verified: bool, blackboard=None
     ) -> Optional[Dict[str, Any]]:
-        """基于规则的决策"""
+        """基于规则的决策，感知黑板状态避免重复"""
+
+        # 如果有黑板，检查是否可以从恢复中跳过已完成阶段
+        if (
+            blackboard is not None
+            and hasattr(blackboard, "target")
+            and blackboard.target
+        ):
+            skip_decision = self._check_blackboard_skip(state, blackboard)
+            if skip_decision:
+                return skip_decision
 
         current_phase = state.phase
         phase_idx = (
@@ -274,6 +284,68 @@ class DecisionEngine:
             "post_exploitation": len(state.executed_steps) >= 1,
         }
         return advance_criteria.get(current_phase, False)
+
+    def _check_blackboard_skip(
+        self, state: TestState, blackboard
+    ) -> Optional[Dict[str, Any]]:
+        """根据黑板状态判断是否可以跳过当前阶段，直接进入下一阶段
+
+        如果黑板显示某个阶段的关键发现已经足够，跳过该阶段以避免重复扫描。
+        例如：如果已发现端口和LFI漏洞，不再重新扫描端口。
+        """
+        # 如果黑板没有足够的恢复数据，不跳过
+        if not blackboard.resume_meta.is_resumed:
+            return None
+
+        current_phase = state.phase
+
+        if current_phase == "reconnaissance":
+            if blackboard.ports:
+                return {
+                    "action": self._customize_action(
+                        "跳过信息收集（已从断点恢复：发现端口），直接进入扫描",
+                        state,
+                        blackboard=blackboard,
+                    ),
+                    "category": "scanning",
+                    "next_phase": "scanning",
+                    "reasoning": f"断点恢复：已发现{len(blackboard.ports)}个端口，跳过信息收集",
+                    "source": "blackboard_skip",
+                    "is_complete": False,
+                }
+
+        if current_phase == "scanning":
+            if len(blackboard.ports) >= 2:
+                next_phase = "enumeration"
+                return {
+                    "action": self._customize_action(
+                        "跳过端口扫描（已从断点恢复端口信息），直接进入枚举",
+                        state,
+                        blackboard=blackboard,
+                    ),
+                    "category": "enumeration",
+                    "next_phase": next_phase,
+                    "reasoning": f"断点恢复：已发现{len(blackboard.ports)}个端口，跳过扫描",
+                    "source": "blackboard_skip",
+                    "is_complete": False,
+                }
+
+        if current_phase == "enumeration":
+            if blackboard.lfi_confirmed or blackboard.rce:
+                return {
+                    "action": self._customize_action(
+                        "跳过枚举（已从断点恢复：LFI确认/RCE获取），直接进入利用",
+                        state,
+                        blackboard=blackboard,
+                    ),
+                    "category": "exploitation",
+                    "next_phase": "exploitation",
+                    "reasoning": f"断点恢复：LFI={blackboard.lfi_confirmed}, RCE={blackboard.rce is not None}",
+                    "source": "blackboard_skip",
+                    "is_complete": False,
+                }
+
+        return None
 
     def _phase_complete(self, state: TestState, phase: str) -> bool:
         """判断阶段是否完成"""

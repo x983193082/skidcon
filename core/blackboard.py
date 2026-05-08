@@ -89,6 +89,17 @@ class ExecLog:
     timestamp: str = ""
 
 
+@dataclass
+class ResumeMeta:
+    """断点恢复元数据"""
+
+    last_step: int = 0
+    completed_steps: int = 0
+    last_phase: str = ""
+    last_timestamp: str = ""
+    is_resumed: bool = False
+
+
 LFI_CONFIRM_PATTERNS = [
     r"root:x:0:0",
     r"nobody:x:65534",
@@ -120,7 +131,7 @@ HTPASSWD_PATTERN = re.compile(
 class Blackboard:
     """渗透测试共享知识库 - 黑板模式"""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self):
         self.target: str = ""
@@ -146,6 +157,9 @@ class Blackboard:
         self.failed_attempts: List[str] = []
 
         self.page_keywords: List[str] = []
+
+        self.step_counter: int = 0
+        self.resume_meta: ResumeMeta = ResumeMeta()
 
     # ==================== 核心方法：生成Agent提示 ====================
 
@@ -781,6 +795,11 @@ class Blackboard:
             "execution_log": {k: asdict(v) for k, v in self.execution_log.items()},
             "failed_attempts": self.failed_attempts,
             "page_keywords": self.page_keywords,
+            "step_counter": self.step_counter,
+            "resume_meta": asdict(self.resume_meta),
+            "start_time": datetime.now().isoformat()
+            if hasattr(self, "_start_time")
+            else "",
         }
 
     def _from_dict(self, data: dict):
@@ -821,6 +840,14 @@ class Blackboard:
         self.failed_attempts = data.get("failed_attempts", [])
         self.page_keywords = data.get("page_keywords", [])
 
+        self.step_counter = data.get("step_counter", 0)
+
+        resume_data = data.get("resume_meta", {})
+        if isinstance(resume_data, dict):
+            self.resume_meta = ResumeMeta(**resume_data)
+        else:
+            self.resume_meta = ResumeMeta()
+
     def _migrate(self, data: dict, old_version: int) -> dict:
         if old_version < 1:
             data.setdefault("attack_paths", [])
@@ -829,6 +856,18 @@ class Blackboard:
             data.setdefault("execution_log", {})
             data.setdefault("_rce_pending_count", 0)
             data.setdefault("_rce_pending_method", "")
+        if old_version < 2:
+            data.setdefault("step_counter", 0)
+            data.setdefault(
+                "resume_meta",
+                {
+                    "last_step": 0,
+                    "completed_steps": 0,
+                    "last_phase": "",
+                    "last_timestamp": "",
+                    "is_resumed": False,
+                },
+            )
         data["_version"] = self.VERSION
         return data
 
@@ -868,3 +907,46 @@ class Blackboard:
             )
 
         return bb
+
+    def is_resumable(self, target: str) -> bool:
+        """检查是否有可用于恢复的黑板状态"""
+        return (
+            self.target == target
+            and len(self.ports) > 0
+            and self.resume_meta.completed_steps > 0
+        )
+
+    def get_resume_summary(self) -> str:
+        """生成断点恢复摘要，用于告知用户和Agent"""
+        parts = []
+        meta = self.resume_meta
+
+        parts.append(f"目标: {self.target}")
+        parts.append(f"阶段: {self.phase}")
+        parts.append(f"已完成步骤: {meta.completed_steps}")
+
+        if self.ports:
+            port_strs = [p.display() for p in list(self.ports.values())[:8]]
+            parts.append(f"端口({len(self.ports)}): {', '.join(port_strs)}")
+
+        if self.vulns:
+            vuln_strs = [v.display() for v in list(self.vulns.values())[:4]]
+            parts.append(f"漏洞({len(self.vulns)}): {', '.join(vuln_strs)}")
+
+        if self.rce:
+            parts.append(f"RCE: {self.rce.method}({self.rce.privilege})")
+
+        if self.creds:
+            cred_strs = [c.display() for c in list(self.creds.values())[:3]]
+            parts.append(f"凭据({len(self.creds)}): {', '.join(cred_strs)}")
+
+        if self.failed_attempts:
+            parts.append(
+                f"已失败({len(self.failed_attempts)}): {', '.join(self.failed_attempts[-5:])}"
+            )
+
+        next_hint = self.get_next_action_hint()
+        if next_hint:
+            parts.append(f"建议下一步: {next_hint}")
+
+        return " | ".join(parts)
