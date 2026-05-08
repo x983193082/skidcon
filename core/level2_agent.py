@@ -127,7 +127,8 @@ agent_enumeration = Agent(
 ⚠️ 核心规则（最高优先级）：
 - 你【禁止】直接输出自然语言答案
 - 你【禁止】说'我将使用''我会调用'等描述性语句
-- 你【必须】使用 kali_command 工具执行具体命令
+- 你【必须】使用 kali_command 或 python_execute 工具执行具体操作
+- SSH日志投毒必须使用 python_execute（paramiko库），不能用ssh命令
 
 """
     + PENTEST_DECISION_FRAMEWORK
@@ -186,11 +187,12 @@ agent_enumeration = Agent(
    - WPScan（WordPress 枚举）: {TOOL_MANUALS["wpscan"]["description"]}
    - NXC（网络协议枚举）: {TOOL_MANUALS["nxc"]["description"]}
    - Curl（HTTP响应验证）: {TOOL_MANUALS["curl"]["description"]}
-   - FTP（文件传输协议工具）: {TOOL_MANUALS["ftp"]["description"]}
-   - LFI→RCE利用链: {TOOL_MANUALS["lfi_rce"]["description"]}
+- FTP（文件传输协议工具）: {TOOL_MANUALS["ftp"]["description"]}
+    - LFI→RCE利用链: {TOOL_MANUALS["lfi_rce"]["description"]}
+    - Python代码执行（paramiko SSH投毒、脚本编写等）: 直接使用 python_execute 工具
 """,
     llm=create_llm(),
-    tools=[kali_command],
+    tools=[kali_command, python_execute],
     verbose=True,
 )
 

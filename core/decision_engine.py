@@ -266,7 +266,7 @@ class DecisionEngine:
         return len(phase_steps) >= min_steps_per_phase
 
     def _customize_action(self, action_template: str, state: TestState) -> str:
-        """自定义行动描述，填入具体目标信息"""
+        """自定义行动描述，填入具体目标信息和已发现的关键发现"""
         action = action_template
 
         if "{target}" in action:
@@ -276,9 +276,33 @@ class DecisionEngine:
             hosts_str = ", ".join(state.discovered_hosts[:3])
             action = action.replace("目标网段", f"{hosts_str}等主机")
 
+        context_parts = []
+
         if state.discovered_services:
-            ports = [f"{s.port}/{s.service}" for s in state.discovered_services[:5]]
-            action += f" (已发现端口: {', '.join(ports)})"
+            ports = [f"{s.port}/{s.service}" for s in state.discovered_services[:10]]
+            context_parts.append(f"已发现开放端口: {', '.join(ports)}")
+
+        if state.discovered_vulns:
+            vuln_strs = [f"{v.name}({v.severity})" for v in state.discovered_vulns[:5]]
+            context_parts.append(f"已发现漏洞: {', '.join(vuln_strs)}")
+
+        if state.discovered_creds:
+            cred_strs = []
+            for c in state.discovered_creds[:5]:
+                if c.password:
+                    cred_strs.append(f"{c.username}:{c.password}")
+                elif c.hash:
+                    cred_strs.append(f"{c.username}(hash:{c.hash[:20]}...)")
+                else:
+                    cred_strs.append(f"{c.username}")
+            context_parts.append(f"已获取凭据: {', '.join(cred_strs)}")
+
+        recent_queries = [s.query for s in state.executed_steps[-5:]]
+        if recent_queries:
+            context_parts.append(f"已完成操作: {'; '.join(recent_queries)}")
+
+        if context_parts:
+            action += " 【上下文: " + " | ".join(context_parts) + "】"
 
         return action
 

