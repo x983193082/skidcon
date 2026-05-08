@@ -434,6 +434,7 @@ from core.result_verifier import ResultVerifier
 from core.decision_engine import DecisionEngine
 from core.planning_agent import generate_test_plan
 from core.report_generator import ReportGenerator
+from core.blackboard import Blackboard
 
 
 class AutonomousAgentRunner(AgentRunner):
@@ -444,6 +445,7 @@ class AutonomousAgentRunner(AgentRunner):
         self.test_state = TestState()
         self.result_verifier = ResultVerifier()
         self.decision_engine = DecisionEngine()
+        self.blackboard = Blackboard()
         self.report_generator = ReportGenerator()
         self._is_running = False
 
@@ -458,8 +460,18 @@ class AutonomousAgentRunner(AgentRunner):
         self._is_running = True
 
         self.test_state = TestState()
+        self.blackboard = Blackboard()
         self.test_state.target = target
+        self.blackboard.target = target
         self.test_state.start_time = datetime.now()
+
+        blackboard_path = f"logs/blackboard_{target.replace('.', '_')}.json"
+        try:
+            self.blackboard.load(blackboard_path)
+            if self.blackboard.target != target:
+                self.blackboard.target = target
+        except Exception:
+            pass
 
         self._add_output_sync(
             task_id,
@@ -511,7 +523,7 @@ class AutonomousAgentRunner(AgentRunner):
             )
 
             decision = self.decision_engine.decide_next(
-                self.test_state, last_result, last_verified
+                self.test_state, last_result, last_verified, blackboard=self.blackboard
             )
 
             if decision.get("is_complete"):
@@ -552,10 +564,13 @@ class AutonomousAgentRunner(AgentRunner):
             # 3. 验证
             verified_info = self.result_verifier.verify(category, level2_result or "")
 
-            # 4. 反馈：提取结构化数据
-            self.test_state.extract_from_result(category, level2_result or "")
+            # 4. 反馈：从迷宫更新结构化数据（黑板为唯一数据源）
+            self.blackboard.update_from_result(category, level2_result or "")
 
-            # 5. 记录步骤
+            # 5. 从黑板同步到 test_state（兼容性）
+            self.test_state = TestState.from_blackboard(self.blackboard)
+
+            # 6. 记录步骤
             self.test_state.add_step(
                 phase=self.test_state.phase,
                 query=query,
@@ -564,7 +579,14 @@ class AutonomousAgentRunner(AgentRunner):
                 category=category,
             )
 
-            # 6. 保存到MemoryManager
+            # 7. 记录黑板执行日志
+            self.blackboard.mark_attempt(
+                step_name=f"{category}_{self.test_state.step_counter}",
+                status="success" if verified_info["verified"] else "failed",
+                output=(level2_result or "")[:200],
+            )
+
+            # 8. 保存到MemoryManager
             self._add_to_history(query, level2_result)
 
             # 7. 更新阶段
@@ -597,6 +619,13 @@ class AutonomousAgentRunner(AgentRunner):
         self.test_state.end_time = datetime.now()
         report_json = self.report_generator.generate(self.test_state)
         report_md = self.report_generator.generate_markdown(self.test_state)
+
+        # 保存黑板状态到文件（持久化）
+        try:
+            bb_path = f"logs/blackboard_{target.replace('.', '_')}.json"
+            self.blackboard.save(bb_path)
+        except Exception as e:
+            print(f"{Fore.YELLOW}[Warning] 保存黑板状态失败: {e}{Style.RESET_ALL}")
 
         self._add_output_sync(
             task_id,

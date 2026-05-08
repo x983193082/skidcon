@@ -11,6 +11,7 @@ import tiktoken
 @dataclass
 class ConversationEntry:
     """对话条目数据类"""
+
     user_query: str
     ai_response: Optional[str]
     timestamp: datetime
@@ -50,7 +51,7 @@ class MemoryManager:
         # 总结相关配置
         self.summary_threshold_days = 7  # 7天前的对话会被考虑总结
         self.min_conversations_before_summary = 5  # 最少保留5个对话再开始总结
-        
+
         # 单条响应最大token数（防止工具输出过大）
         self.max_response_tokens = 3000
         # 历史上下文最大token数（不超过max_tokens的60%）
@@ -77,13 +78,13 @@ class MemoryManager:
             # Qwen
             "qwen": 128000,
         }
-        
+
         # 尝试匹配模型名称中的关键词
         model_lower = model_name.lower()
         for key, limit in model_limits.items():
             if key in model_lower:
                 return limit
-        
+
         # 默认使用保守值，防止超出上下文窗口
         return 32768
 
@@ -109,8 +110,10 @@ class MemoryManager:
                 pass
 
         # 简单估算：1个中文字符≈1.5个token，英文单词≈1.3个token
-        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
-        english_words = len(re.findall(r'\b\w+\b', re.sub(r'[\u4e00-\u9fff]', '', text)))
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        english_words = len(
+            re.findall(r"\b\w+\b", re.sub(r"[\u4e00-\u9fff]", "", text))
+        )
         return int(chinese_chars * 1.5 + english_words * 1.3)
 
     def add_conversation(self, user_query: str, ai_response: Optional[str] = None):
@@ -124,7 +127,7 @@ class MemoryManager:
         # 截断过长的AI响应，防止token爆炸
         if ai_response:
             ai_response = self._truncate_response(ai_response)
-        
+
         # 计算token数
         query_tokens = self._count_tokens(user_query)
         response_tokens = self._count_tokens(ai_response) if ai_response else 0
@@ -139,7 +142,7 @@ class MemoryManager:
             ai_response=ai_response,
             timestamp=datetime.now(),
             importance_score=importance_score,
-            token_count=total_tokens
+            token_count=total_tokens,
         )
 
         self.conversation_history.append(entry)
@@ -153,28 +156,33 @@ class MemoryManager:
         response_tokens = self._count_tokens(response)
         if response_tokens <= self.max_response_tokens:
             return response
-        
+
         # 按字符数粗略截断（1 token ≈ 1.5 中文字符或0.75英文单词）
         max_chars = int(self.max_response_tokens * 1.2)
-        
+
         if len(response) <= max_chars:
             return response
-        
+
         # 尝试在行边界截断
-        lines = response.split('\n')
+        lines = response.split("\n")
         truncated_lines = []
         current_length = 0
-        
+
         for line in lines:
             if current_length + len(line) + 1 > max_chars:
                 break
             truncated_lines.append(line)
             current_length += len(line) + 1
-        
-        truncated = '\n'.join(truncated_lines)
-        return truncated + f"\n\n...(响应已截断，原始长度 {len(response)} 字符，{response_tokens} tokens)"
 
-    def _calculate_importance(self, user_query: str, ai_response: Optional[str]) -> float:
+        truncated = "\n".join(truncated_lines)
+        return (
+            truncated
+            + f"\n\n...(响应已截断，原始长度 {len(response)} 字符，{response_tokens} tokens)"
+        )
+
+    def _calculate_importance(
+        self, user_query: str, ai_response: Optional[str]
+    ) -> float:
         """
         计算对话的重要性评分
 
@@ -187,27 +195,49 @@ class MemoryManager:
         """
         # 检查用户查询的重要性
         query_lower = user_query.lower()
-        if any(keyword in query_lower for keyword in [
-            'python', '代码', '执行', '运行', '脚本', 'program', 'code', 'execute', 'run'
-        ]):
+        if any(
+            keyword in query_lower
+            for keyword in [
+                "python",
+                "代码",
+                "执行",
+                "运行",
+                "脚本",
+                "program",
+                "code",
+                "execute",
+                "run",
+            ]
+        ):
             return 0.9
 
-        if any(keyword in query_lower for keyword in [
-            '错误', '失败', '问题', 'bug', 'error', 'fail', 'problem'
-        ]):
+        if any(
+            keyword in query_lower
+            for keyword in ["错误", "失败", "问题", "bug", "error", "fail", "problem"]
+        ):
             return 0.8
 
         # 检查AI响应的内容
         if ai_response:
             response_lower = ai_response.lower()
-            if any(keyword in response_lower for keyword in [
-                '执行完成', '成功', '结果', 'output', 'completed', 'success', 'result'
-            ]):
+            if any(
+                keyword in response_lower
+                for keyword in [
+                    "执行完成",
+                    "成功",
+                    "结果",
+                    "output",
+                    "completed",
+                    "success",
+                    "result",
+                ]
+            ):
                 return 0.8
 
-            if any(keyword in response_lower for keyword in [
-                '错误', '失败', '异常', 'error', 'fail', 'exception'
-            ]):
+            if any(
+                keyword in response_lower
+                for keyword in ["错误", "失败", "异常", "error", "fail", "exception"]
+            ):
                 return 0.8
 
         # 一般对话
@@ -245,7 +275,8 @@ class MemoryManager:
         cutoff_date = datetime.now() - timedelta(days=self.summary_threshold_days)
 
         self.conversation_history = [
-            entry for entry in self.conversation_history
+            entry
+            for entry in self.conversation_history
             if not (entry.importance_score < 0.5 and entry.timestamp < cutoff_date)
         ]
 
@@ -256,7 +287,11 @@ class MemoryManager:
 
         # 找出超过7天的对话进行总结
         cutoff_date = datetime.now() - timedelta(days=self.summary_threshold_days)
-        old_entries = [entry for entry in self.conversation_history if entry.timestamp < cutoff_date]
+        old_entries = [
+            entry
+            for entry in self.conversation_history
+            if entry.timestamp < cutoff_date
+        ]
 
         if len(old_entries) >= 3:  # 至少3个旧对话才进行总结
             summary_text = self._generate_conversation_summary(old_entries)
@@ -269,12 +304,13 @@ class MemoryManager:
                 importance_score=0.7,  # 总结有中等重要性
                 token_count=self._count_tokens(summary_text),
                 summary=summary_text,
-                is_summarized=True
+                is_summarized=True,
             )
 
             # 替换旧条目为总结
             self.conversation_history = [
-                entry for entry in self.conversation_history
+                entry
+                for entry in self.conversation_history
                 if entry.timestamp >= cutoff_date
             ]
             self.conversation_history.insert(0, summary_entry)
@@ -295,19 +331,19 @@ class MemoryManager:
                 query_lower = entry.user_query.lower()
 
                 # 记录代码执行
-                if '执行完成' in response_lower or 'success' in response_lower:
+                if "执行完成" in response_lower or "success" in response_lower:
                     code_executions.append(entry.user_query[:50] + "...")
 
                 # 记录错误
-                if '错误' in response_lower or 'error' in response_lower:
+                if "错误" in response_lower or "error" in response_lower:
                     errors.append(entry.user_query[:50] + "...")
 
                 # 记录话题
-                if '代码' in query_lower or 'code' in query_lower:
+                if "代码" in query_lower or "code" in query_lower:
                     topics.append("代码执行")
-                elif '扫描' in query_lower or 'scan' in query_lower:
+                elif "扫描" in query_lower or "scan" in query_lower:
                     topics.append("安全扫描")
-                elif '渗透' in query_lower or 'exploit' in query_lower:
+                elif "渗透" in query_lower or "exploit" in query_lower:
                     topics.append("渗透测试")
 
         # 生成总结文本
@@ -334,12 +370,14 @@ class MemoryManager:
         """应用滑动窗口策略，保留最近的对话"""
         # 严格限制：只保留最近的N条对话，确保总token数在限制内
         # 按时间倒序排序
-        sorted_entries = sorted(self.conversation_history, key=lambda x: x.timestamp, reverse=True)
-        
+        sorted_entries = sorted(
+            self.conversation_history, key=lambda x: x.timestamp, reverse=True
+        )
+
         # 保留最近的条目，直到token数在限制内
         kept_entries = []
         total_tokens = 0
-        
+
         for entry in sorted_entries:
             if total_tokens + entry.token_count <= self.max_history_tokens:
                 kept_entries.append(entry)
@@ -349,73 +387,98 @@ class MemoryManager:
                 if not kept_entries:
                     kept_entries.append(entry)
                 break
-        
+
         # 按时间正序保存
         self.conversation_history = sorted(kept_entries, key=lambda x: x.timestamp)
 
-    def build_context(self, current_query: str, max_history_items: int = None) -> str:
+    def build_context(
+        self,
+        current_query: str,
+        max_history_items: int = None,
+        blackboard_prompt: str = None,
+    ) -> str:
         """
         构建上下文字符串，用于发送给LLM
 
         Args:
             current_query: 当前用户查询
             max_history_items: 最大历史条目数，默认自动计算
+            blackboard_prompt: 黑板提示（如有），优先注入并从历史预算中扣除
 
         Returns:
             完整的上下文字符串
         """
         if not self.conversation_history:
+            if blackboard_prompt:
+                return f"{blackboard_prompt}\n\n[当前查询]\n用户: {current_query}"
             return current_query
 
-        # 选择要包含的历史条目
-        selected_entries = self._select_relevant_history(current_query, max_history_items)
+        bb_tokens = 0
+        if blackboard_prompt:
+            bb_tokens = self._count_tokens(blackboard_prompt)
 
-        if not selected_entries:
-            return current_query
+        original_max_history = self.max_history_tokens
+        self.max_history_tokens = max(original_max_history - bb_tokens, 800)
 
-        # 构建历史上下文，严格控制token数
-        history_parts = []
-        current_history_tokens = 0
-        
-        for i, entry in enumerate(selected_entries, 1):
-            if entry.is_summarized and entry.summary:
-                part = f"[历史总结 {i}]\n{entry.summary}"
+        try:
+            selected_entries = self._select_relevant_history(
+                current_query, max_history_items
+            )
+
+            if not selected_entries:
+                result = current_query
             else:
-                # 普通对话条目
-                part = f"[对话 {i}]\n用户: {entry.user_query}"
-                if entry.ai_response:
-                    # 进一步控制响应长度
-                    response = entry.ai_response
-                    response_tokens = self._count_tokens(response)
-                    if response_tokens > 1500:  # 单条响应最多1500 tokens
-                        # 按token数截断
-                        max_chars = int(1500 * 1.2)
-                        if len(response) > max_chars:
-                            response = response[:max_chars] + "...(已截断)"
-                    part += f"\n助手: {response}"
-            
-            part_tokens = self._count_tokens(part)
-            if current_history_tokens + part_tokens > self.max_history_tokens:
-                break  # 超出预算，停止添加
-            
-            history_parts.append(part)
-            current_history_tokens += part_tokens
+                history_parts = []
+                current_history_tokens = 0
 
-        history_text = "\n\n📋 对话历史上下文：\n" + "\n\n".join(history_parts)
-        history_text += f"\n\n[当前查询]\n用户: {current_query}"
+                for i, entry in enumerate(selected_entries, 1):
+                    if entry.is_summarized and entry.summary:
+                        part = f"[历史总结 {i}]\n{entry.summary}"
+                    else:
+                        part = f"[对话 {i}]\n用户: {entry.user_query}"
+                        if entry.ai_response:
+                            response = entry.ai_response
+                            response_tokens = self._count_tokens(response)
+                            if response_tokens > 1500:
+                                max_chars = int(1500 * 1.2)
+                                if len(response) > max_chars:
+                                    response = response[:max_chars] + "...(已截断)"
+                            part += f"\n助手: {response}"
 
-        return history_text
+                    part_tokens = self._count_tokens(part)
+                    if current_history_tokens + part_tokens > self.max_history_tokens:
+                        break
 
-    def _select_relevant_history(self, current_query: str, max_items: int = None) -> List[ConversationEntry]:
+                    history_parts.append(part)
+                    current_history_tokens += part_tokens
+
+                history_text = "\n\n📋 对话历史上下文：\n" + "\n\n".join(history_parts)
+                history_text += f"\n\n[当前查询]\n用户: {current_query}"
+                result = history_text
+        finally:
+            self.max_history_tokens = original_max_history
+
+        if blackboard_prompt:
+            result = f"{blackboard_prompt}\n\n{result}"
+
+        return result
+
+    def _select_relevant_history(
+        self, current_query: str, max_items: int = None
+    ) -> List[ConversationEntry]:
         """选择相关历史条目"""
         if not max_items:
             # 根据可用token空间自动计算最大条目数
-            available_tokens = self.max_history_tokens - self._count_tokens(current_query)
+            available_tokens = self.max_history_tokens - self._count_tokens(
+                current_query
+            )
             # 估算每个条目平均使用200个token
             max_items = max(2, min(10, available_tokens // 200))
 
         # 按时间倒序排序（最新的在前）
-        sorted_entries = sorted(self.conversation_history, key=lambda x: x.timestamp, reverse=True)
+        sorted_entries = sorted(
+            self.conversation_history, key=lambda x: x.timestamp, reverse=True
+        )
 
         # 选择相关性最高的条目
         selected = []
@@ -426,9 +489,11 @@ class MemoryManager:
             relevance_score = self._calculate_relevance(entry, current_query)
 
             # 如果相关性足够高，或者是最近的条目，加入选择
-            if (relevance_score > 0.5 or len(selected) < 2 or
-                entry.timestamp > datetime.now() - timedelta(hours=1)):
-
+            if (
+                relevance_score > 0.5
+                or len(selected) < 2
+                or entry.timestamp > datetime.now() - timedelta(hours=1)
+            ):
                 if total_tokens + entry.token_count <= self.max_history_tokens:
                     selected.append(entry)
                     total_tokens += entry.token_count
@@ -439,14 +504,16 @@ class MemoryManager:
         # 按时间正序返回（最早的在前）
         return sorted(selected, key=lambda x: x.timestamp)
 
-    def _calculate_relevance(self, entry: ConversationEntry, current_query: str) -> float:
+    def _calculate_relevance(
+        self, entry: ConversationEntry, current_query: str
+    ) -> float:
         """计算历史条目与当前查询的相关性"""
         current_lower = current_query.lower()
         query_lower = entry.user_query.lower()
 
         # 关键词匹配
-        current_words = set(re.findall(r'\b\w+\b', current_lower))
-        query_words = set(re.findall(r'\b\w+\b', query_lower))
+        current_words = set(re.findall(r"\b\w+\b", current_lower))
+        query_words = set(re.findall(r"\b\w+\b", query_lower))
 
         if not current_words or not query_words:
             return 0.5  # 默认相关性
@@ -464,7 +531,7 @@ class MemoryManager:
         # 重要性加成
         importance_boost = entry.importance_score
 
-        return (jaccard_similarity * 0.6 + time_decay * 0.3 + importance_boost * 0.1)
+        return jaccard_similarity * 0.6 + time_decay * 0.3 + importance_boost * 0.1
 
     def clear_memory(self):
         """清空所有记忆"""
@@ -474,25 +541,39 @@ class MemoryManager:
         """获取记忆统计信息"""
         total_conversations = len(self.conversation_history)
         total_tokens = sum(entry.token_count for entry in self.conversation_history)
-        summarized_count = sum(1 for entry in self.conversation_history if entry.is_summarized)
+        summarized_count = sum(
+            1 for entry in self.conversation_history if entry.is_summarized
+        )
 
-        avg_importance = (sum(entry.importance_score for entry in self.conversation_history) /
-                         total_conversations) if total_conversations > 0 else 0
+        avg_importance = (
+            (
+                sum(entry.importance_score for entry in self.conversation_history)
+                / total_conversations
+            )
+            if total_conversations > 0
+            else 0
+        )
 
-        oldest_date = min((entry.timestamp for entry in self.conversation_history), default=None)
-        newest_date = max((entry.timestamp for entry in self.conversation_history), default=None)
+        oldest_date = min(
+            (entry.timestamp for entry in self.conversation_history), default=None
+        )
+        newest_date = max(
+            (entry.timestamp for entry in self.conversation_history), default=None
+        )
 
         return {
             "total_conversations": total_conversations,
             "total_tokens": total_tokens,
             "token_limit": self.max_tokens,
-            "token_usage_percent": (total_tokens / self.max_tokens * 100) if self.max_tokens > 0 else 0,
+            "token_usage_percent": (total_tokens / self.max_tokens * 100)
+            if self.max_tokens > 0
+            else 0,
             "summarized_conversations": summarized_count,
             "average_importance": round(avg_importance, 2),
             "date_range": {
                 "oldest": oldest_date.isoformat() if oldest_date else None,
-                "newest": newest_date.isoformat() if newest_date else None
-            }
+                "newest": newest_date.isoformat() if newest_date else None,
+            },
         }
 
     def optimize_for_model(self, model_name: str):

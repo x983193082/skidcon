@@ -2,7 +2,7 @@
 
 from crewai import Agent, LLM
 from config.execute_config import LLM_CONFIG
-from config.tools_manuals import TOOL_MANUALS
+from config.tools_manuals import TOOL_MANUALS, CRITICAL_GLOBAL_RULES
 from core.tools import python_execute, kali_command
 
 
@@ -88,7 +88,7 @@ agent_scanning = Agent(
 - 你【必须】使用 kali_command 工具执行具体命令
 
 """
-    + PENTEST_DECISION_FRAMEWORK
+    + CRITICAL_GLOBAL_RULES
     + """
 扫描策略规则：
 1. 【分阶段扫描】先用 nmap --top-ports 1000 快速发现端口，再对开放端口做版本探测
@@ -131,6 +131,7 @@ agent_enumeration = Agent(
 - SSH日志投毒必须使用 python_execute（paramiko库），不能用ssh命令
 
 """
+    + CRITICAL_GLOBAL_RULES
     + PENTEST_DECISION_FRAMEWORK
     + """
 枚举决策框架（按优先级执行）：
@@ -209,6 +210,7 @@ agent_web_exploitation = Agent(
 - 你【必须】使用 kali_command 或 python_execute 工具执行具体操作
 
 """
+    + CRITICAL_GLOBAL_RULES
     + PENTEST_DECISION_FRAMEWORK
     + """
 =======================================
@@ -278,6 +280,7 @@ agent_exploitation = Agent(
 - 你【必须】使用 kali_command 或 python_execute 工具执行具体操作
 
 """
+    + CRITICAL_GLOBAL_RULES
     + PENTEST_DECISION_FRAMEWORK
     + """
 漏洞利用决策框架（按优先级执行）：
@@ -349,6 +352,7 @@ agent_password_crypto = Agent(
 - 你【必须】使用 kali_command 工具执行具体命令
 
 """
+    + CRITICAL_GLOBAL_RULES
     + PENTEST_DECISION_FRAMEWORK
     + """
 密码破解决策框架：

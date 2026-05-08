@@ -156,24 +156,36 @@ class DecisionEngine:
         self.llm_fallback_enabled = True
 
     def decide_next(
-        self, state: TestState, last_result: str = "", last_verified: bool = False
+        self,
+        state: TestState,
+        last_result: str = "",
+        last_verified: bool = False,
+        blackboard=None,
     ) -> Dict[str, Any]:
         """
         决定下一步行动
 
+        Args:
+            state: 测试状态
+            last_result: 上一步结果
+            last_verified: 上一步是否验证通过
+            blackboard: 黑板对象，提供结构化上下文
+
         Returns:
             {
-                "action": str,           # 要执行的查询
-                "category": str,         # 任务类别
-                "next_phase": str,       # 下一个阶段
-                "reasoning": str,        # 决策理由
-                "source": str,           # "rule" 或 "llm"
-                "is_complete": bool      # 测试是否完成
+                "action": str,
+                "category": str,
+                "next_phase": str,
+                "reasoning": str,
+                "source": str,
+                "is_complete": bool
             }
         """
         self.step_count += 1
 
-        decision = self._rule_based_decision(state, last_result, last_verified)
+        decision = self._rule_based_decision(
+            state, last_result, last_verified, blackboard=blackboard
+        )
 
         if decision is None:
             decision = self._llm_decision(state, last_result)
@@ -184,7 +196,7 @@ class DecisionEngine:
         return decision
 
     def _rule_based_decision(
-        self, state: TestState, last_result: str, last_verified: bool
+        self, state: TestState, last_result: str, last_verified: bool, blackboard=None
     ) -> Optional[Dict[str, Any]]:
         """基于规则的决策"""
 
@@ -207,7 +219,9 @@ class DecisionEngine:
                         next_phase = self.PHASE_ORDER[next_idx]
 
                     return {
-                        "action": self._customize_action(action_def["action"], state),
+                        "action": self._customize_action(
+                            action_def["action"], state, blackboard=blackboard
+                        ),
                         "category": action_def["category"],
                         "next_phase": next_phase,
                         "reasoning": f"Phase {current_phase}: condition matched for {action_def['category']}",
@@ -234,7 +248,9 @@ class DecisionEngine:
             next_actions = self.PHASE_ACTIONS.get(next_phase, [])
             if next_actions:
                 return {
-                    "action": self._customize_action(next_actions[0]["action"], state),
+                    "action": self._customize_action(
+                        next_actions[0]["action"], state, blackboard=blackboard
+                    ),
                     "category": next_actions[0]["category"],
                     "next_phase": next_phase,
                     "reasoning": f"Advancing to {next_phase} phase",
@@ -265,16 +281,43 @@ class DecisionEngine:
         phase_steps = [s for s in state.executed_steps if s.phase == phase]
         return len(phase_steps) >= min_steps_per_phase
 
-    def _customize_action(self, action_template: str, state: TestState) -> str:
-        """自定义行动描述，填入具体目标信息和已发现的关键发现"""
+    def _customize_action(
+        self, action_template: str, state: TestState, blackboard=None
+    ) -> str:
+        """自定义行动描述，填入具体目标信息和已发现的关键发现
+
+        如果有黑板对象，优先使用黑板生成的紧凑提示；
+        否则回退到原有的简陋上下文拼接。
+        """
         action = action_template
 
         if "{target}" in action:
             action = action.replace("{target}", state.target)
 
-        if state.discovered_hosts:
-            hosts_str = ", ".join(state.discovered_hosts[:3])
-            action = action.replace("目标网段", f"{hosts_str}等主机")
+        if (
+            blackboard is not None
+            and hasattr(blackboard, "target")
+            and blackboard.target
+        ):
+            bb_prompt = blackboard.get_pentest_prompt()
+            if bb_prompt:
+                contextual_rules = ""
+                try:
+                    from config.tools_manuals import get_contextual_rules
+
+                    contextual_rules = get_contextual_rules(blackboard)
+                except Exception:
+                    pass
+
+                parts = [action]
+                if bb_prompt:
+                    parts.append(f"\n{bb_prompt}")
+                if contextual_rules:
+                    parts.append(f"\n{contextual_rules}")
+                action_hint = blackboard.get_next_action_hint()
+                if action_hint:
+                    parts.append(f"\n建议下一步: {action_hint}")
+                return "\n".join(parts)
 
         context_parts = []
 

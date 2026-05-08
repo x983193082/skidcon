@@ -344,5 +344,48 @@ class TestState:
             ],
         }
 
+    @classmethod
+    def from_blackboard(cls, blackboard) -> "TestState":
+        """从黑板创建 TestState 视图（黑板为唯一数据源，test_state为兼容视图）"""
+        state = cls()
+        state.target = blackboard.target or ""
+        state.phase = blackboard.phase or "reconnaissance"
+
+        for key, port_info in blackboard.ports.items():
+            state.discovered_services.append(
+                ServiceInfo(
+                    host=getattr(port_info, "host", blackboard.target)
+                    or blackboard.target
+                    or "",
+                    port=port_info.port,
+                    service=port_info.service,
+                    version=port_info.version,
+                    banner=getattr(port_info, "banner", None),
+                    extra={},
+                )
+            )
+
+        for key, vuln_info in blackboard.vulns.items():
+            state.discovered_vulns.append(
+                VulnerabilityInfo(
+                    name=vuln_info.name,
+                    severity=vuln_info.severity,
+                    evidence=vuln_info.evidence,
+                )
+            )
+
+        for key, cred_info in blackboard.creds.items():
+            state.discovered_creds.append(
+                CredentialInfo(
+                    username=cred_info.username,
+                    password=cred_info.password,
+                    hash=cred_info.hash_value,
+                    service=cred_info.service,
+                    source=cred_info.source,
+                )
+            )
+
+        return state
+
     def __str__(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False)

