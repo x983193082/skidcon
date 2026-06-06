@@ -24,3 +24,6 @@ dispatch.yaml
 .idea/
 .vscode/
 .DS_Store
+
+# pytest
+.pytest_cache/
