@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: skidc-app
+    pull_policy: never
     container_name: skidc-server
     ports:
       - "8000:8000"
@@ -27,6 +28,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: skidc-app
+    pull_policy: never
     container_name: skidc-dispatcher
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

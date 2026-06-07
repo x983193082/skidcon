@@ -62,13 +62,15 @@ workers:
   # keys (independent rate-limit/quota units).
 
   # ---- DeepSeek, driven through the Claude Code CLI loop ----
+  # Models: deepseek-v4-flash (fast) / deepseek-v4-pro (strong).
+  # (Old names deepseek-chat / deepseek-reasoner are deprecated after 2026-07-24.)
   - name: "claudecode_deepseek"
     type: "claudecode"
     task_types: [bootstrap, reason, explore]
     max_running: 2
     priority: 0
     env:
-      ANTHROPIC_MODEL: "deepseek-chat"
+      ANTHROPIC_MODEL: "deepseek-v4-flash"
       ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
       ANTHROPIC_AUTH_TOKEN: "sk-deepseek-xxx"
 
@@ -84,12 +86,12 @@ workers:
       OPENAI_API_KEY: "sk-qwen-xxx"
 
   # ---- A second DeepSeek worker on a different key = independent quota ----
-  - name: "claudecode_deepseek_reasoner"
+  - name: "claudecode_deepseek_pro"
     type: "claudecode"
     task_types: [reason]
     max_running: 1
     priority: 0
     env:
-      ANTHROPIC_MODEL: "deepseek-reasoner"
+      ANTHROPIC_MODEL: "deepseek-v4-pro"
       ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
       ANTHROPIC_AUTH_TOKEN: "sk-deepseek-yyy"

@@ -15,7 +15,21 @@ ENV TZ=UTC
 ENV PYTHONUNBUFFERED=1
 
 # Core CLI utilities + a headless offensive toolset. Trim or extend to taste.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The base image ships its apt sources in DEB822 format at
+# /etc/apt/sources.list.d/kali.sources (current Kali) and may also have the
+# legacy /etc/apt/sources.list (older pulls). Rewrite the URI to Aliyun's
+# Kali mirror over http — keep it http so apt can run before ca-certificates
+# is installed (HTTPS would fail certificate verification without it).
+RUN find /etc/apt/sources.list.d/ -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
+        -e 's|mirror\.wane\.kr|mirrors.aliyun.com|g' \
+        -e 's|http://http\.kali\.org|http://mirrors.aliyun.com|g' \
+        {} + \
+    && [ -f /etc/apt/sources.list ] && sed -i \
+        -e 's|mirror\.wane\.kr|mirrors.aliyun.com|g' \
+        -e 's|http://http\.kali\.org|http://mirrors.aliyun.com|g' \
+        /etc/apt/sources.list || true \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git jq yq ripgrep fd-find \
         python3 python3-pip nodejs npm \
         nmap ncat netcat-traditional dnsutils iputils-ping \
@@ -28,9 +42,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @anthropic-ai/claude-code @openai/codex \
     && npm cache clean --force
 
-# A writable workspace for agents to drop scan logs, payloads, proofs, etc.
-RUN mkdir -p /root/workspace
-WORKDIR /root/workspace
+# Non-root user — Claude Code refuses to run with --dangerously-skip-permissions
+# when executed as root. Mirror the setup in Cairn's container/Dockerfile.
+RUN useradd -m -s /bin/bash kali && \
+    echo "kali ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+USER kali
 
-COPY ./AGENTS.md /root/workspace/AGENTS.md
-COPY ./AGENTS.md /root/workspace/CLAUDE.md
+# A writable workspace for agents to drop scan logs, payloads, proofs, etc.
+RUN mkdir -p /home/kali/workspace
+WORKDIR /home/kali/workspace
+
+COPY --chown=kali:kali ./AGENTS.md /home/kali/workspace/AGENTS.md
+COPY --chown=kali:kali ./AGENTS.md /home/kali/workspace/CLAUDE.md
