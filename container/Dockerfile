@@ -12,10 +12,10 @@
 #
 # Build:  docker build -t skidc-worker:latest -f container/Dockerfile container
 
-FROM kalilinux/kali-rolling:latest
+FROM --platform=amd64 kalilinux/kali-rolling:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=UTC
+ENV TZ=Asia/Shanghai
 ENV PYTHONUNBUFFERED=1
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 # Let `node -e "require('puppeteer-core')"` resolve the globally-installed module
@@ -23,16 +23,32 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ENV NODE_PATH=/usr/local/lib/node_modules:/usr/lib/node_modules
 
 # ------------------------------------------------------------------
-# 1. Kali apt mirror fix + ALL apt tooling (one layer, one update/clean)
+# 1. Kali apt mirror fix + apt tooling, SPLIT INTO 4 CACHEABLE LAYERS
 # ------------------------------------------------------------------
 # The base image ships sources in DEB822 (/etc/apt/sources.list.d/kali.sources) and
-# may also have legacy /etc/apt/sources.list. Rewrite the URI to Aliyun's Kali mirror
-# over http — keep it http so apt can run before ca-certificates is installed.
+# may also have legacy /etc/apt/sources.list. Layer 1 rewrites the URI to Aliyun's Kali
+# mirror over http — keep it http so apt can run before ca-certificates is installed. The
+# sed runs ONCE; the rewritten sources persist in the image filesystem, so Layers 2-4 only
+# need apt-get update + install.
 #
-# Most tools below are in Kali's repos, so we avoid pinning release versions for
-# nuclei / naabu / dirsearch / gitleaks (no 404-on-wrong-tag build breaks, no version
-# drift). katana and dalfox are NOT in Kali repos and are fetched from GitHub in step 4.
-# Only the handful of tools Kali does NOT package are fetched manually in step 4.
+# WHY FOUR LAYERS: seclists is a single ~1.7 GB .deb and the Aliyun mirror frequently times
+# out mid-download. In one combined RUN, that timeout fails the whole layer and discards the
+# already-downloaded kali-linux-headless (~5 GB). Splitting by size/role lets BuildKit cache
+# each layer independently — a seclists timeout only reruns Layer 2 (starting in seconds)
+# instead of re-pulling the metapackage. Each layer self-cleans (clean + rm lists) so the
+# intermediate layers stay lean. Cost: apt-get update runs 4× (package indices are small).
+#
+# Most tools are in Kali's repos, so we avoid pinning release versions for
+# nuclei / naabu / dirsearch / gitleaks (no 404-on-wrong-tag build breaks, no version drift).
+# katana and dalfox are NOT in Kali repos and are fetched from GitHub in step 4.
+# kali-linux-headless is the official metapackage (~1300 pkgs / 500+ CLI tools): nmap, sqlmap,
+# nikto, hydra, netexec + base utils (curl/wget/git/unzip/tmux/sudo/python3-pip/
+# default-jre-headless). The explicit packages are those the metapackage does NOT pull in.
+# ffuf/gobuster/dirb/wfuzz ARE in the metapackage but are listed explicitly so they survive a
+# metapackage drop. Trade-off: ~16-20 GB image, ~25-40 min first build (cached after).
+
+# Layer 1: mirror fix + base system (kali-linux-headless + small utilities). Largest layer,
+# but the mirror is reliable for these; cached after the first successful build.
 RUN find /etc/apt/sources.list.d/ -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
         -e 's|mirror\.wane\.kr|mirrors.aliyun.com|g' \
         -e 's|http://http\.kali\.org|http://mirrors.aliyun.com|g' \
@@ -43,26 +59,49 @@ RUN find /etc/apt/sources.list.d/ -type f \( -name '*.list' -o -name '*.sources'
         /etc/apt/sources.list || true \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl wget git jq yq ripgrep fd-find unzip tmux sudo \
-        python3 python3-pip nodejs npm \
-        default-jre-headless \
-        nmap ncat netcat-traditional dnsutils iputils-ping \
-        sqlmap nikto hydra seclists \
+        kali-linux-headless \
+        jq yq ripgrep fd-find \
+        nodejs npm \
+        ncat dnsutils iputils-ping \
+        bsdextrautils sshpass rlwrap \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Layer 2: seclists (~1.7 GB — the frequent timeout offender). Retried once in-layer so a
+# single stalled connection resumes from apt's partial download cache before the layer fails.
+# No --fix-missing: we want a genuine failure to surface (and rerun ONLY this layer on the
+# next build) rather than silently produce an image with no wordlists.
+RUN apt-get update \
+    && (apt-get install -y --no-install-recommends seclists \
+        || (sleep 10 && apt-get install -y --no-install-recommends seclists)) \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Layer 3: web / recon tooling.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffuf gobuster dirb wfuzz \
         nuclei naabu dirsearch gitleaks \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Layer 4: remaining tooling + chromium runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
         chisel pwncat \
-        enum4linux-ng netexec krb5-user \
+        enum4linux-ng krb5-user \
         bloodyad coercer \
         adb \
-        bsdextrautils sshpass rlwrap \
         chromium fonts-liberation \
-    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------------
 # 2. Agent CLIs + puppeteer-core (Node CDP client, no bundled browser)
+#    Versions are PINNED for reproducible builds — the CLIs' loop/flag
+#    semantics matter to the dispatcher. Bump deliberately, not implicitly.
 # ------------------------------------------------------------------
-RUN npm install -g @anthropic-ai/claude-code @openai/codex puppeteer-core \
+RUN npm install -g \
+        @anthropic-ai/claude-code@2.1.98 \
+        @openai/codex@0.118.0 \
+        puppeteer-core \
     && npm cache clean --force
 
 # ------------------------------------------------------------------
@@ -139,6 +178,61 @@ RUN wget --tries=3 --retry-connrefused --max-redirect=10 -qO /tmp/dalfox.tar.gz 
 RUN git clone --depth=1 https://gitee.com/xqdd/nuclei-templates.git \
         /home/kali/.local/nuclei-templates \
     && printf 'disable-update-check: true\n' > /home/kali/.config/nuclei/config.yaml
+
+# ------------------------------------------------------------------
+# 4c. Knowledge bases — offline reference corpora the agent greps at
+#     test time (methodology, payloads, logic-flaw case libraries).
+#     Cloned shallow (--depth=1) via gh-proxy. Split across RUN layers
+#     so one slow/failed repo doesn't invalidate the others' cache.
+#     (gh-proxy DOES proxy `git clone` over https — verified — despite the
+#     note in step 4 that the zip path is used for release binaries.)
+#     Paths are referenced from AGENTS.md ("Knowledge bases" section). NOTE:
+#     this adds ~1 GB (HackTricks alone is ~770 MB); drop repos here to slim.
+# ------------------------------------------------------------------
+# ONE repo per RUN, each retried once after a 5 s pause. gh-proxy.com drops the TLS
+# connection mid-transfer on large repos ("GnuTLS recv error / early EOF"); when several
+# clones shared a layer, one drop discarded the repos that had already cloned. Isolating each
+# means a drop only reruns that repo's layer, and the in-layer retry usually rides out a
+# transient stall without a rebuild. --depth=1 is already set; a failed clone leaves no
+# partial dir (git cleans up), so the retry starts fresh.
+# General web/pentest methodology + payloads
+RUN mkdir -p /home/kali/knowledges && cd /home/kali/knowledges \
+    && (git clone --depth=1 "$GH/swisskyrepo/PayloadsAllTheThings.git" \
+        || (sleep 5 && git clone --depth=1 "$GH/swisskyrepo/PayloadsAllTheThings.git"))
+RUN cd /home/kali/knowledges \
+    && (git clone --depth=1 "$GH/swisskyrepo/InternalAllTheThings.git" \
+        || (sleep 5 && git clone --depth=1 "$GH/swisskyrepo/InternalAllTheThings.git"))
+# Awesome-POC / HackTricks / wooyun-legacy: fetched as archive zips, NOT git clone.
+# gh-proxy's git smart-http transport drops mid-pack on these (TLS recv error / early EOF)
+# and a broken pack can't resume — it restarts the whole transfer. A zip is one HTTP file,
+# so wget --tries=3 --retry-connrefused resumes instead of restarting. These are read-only
+# grep corpora; dropping .git costs nothing and shrinks them. (Same path jwt_tool uses in 4a.)
+RUN cd /home/kali/knowledges \
+    && wget --tries=3 --retry-connrefused -qO /tmp/apoc.zip \
+        "$GH/Threekiii/Awesome-POC/archive/refs/heads/master.zip" \
+    && unzip -oq /tmp/apoc.zip && mv Awesome-POC-master Awesome-POC \
+    && rm -f /tmp/apoc.zip
+# HackTricks is large (~770 MB) — isolate it in its own layer
+RUN cd /home/kali/knowledges \
+    && wget --tries=3 --retry-connrefused -qO /tmp/ht.zip \
+        "$GH/HackTricks-wiki/hacktricks/archive/refs/heads/master.zip" \
+    && unzip -oq /tmp/ht.zip && mv hacktricks-master hacktricks \
+    && rm -f /tmp/ht.zip
+# Business-logic / logic-flaw focused corpora — each in its own layer
+RUN cd /home/kali/knowledges \
+    && wget --tries=3 --retry-connrefused -qO /tmp/wy.zip \
+        "$GH/tanweai/wooyun-legacy/archive/refs/heads/main.zip" \
+    && unzip -oq /tmp/wy.zip && mv wooyun-legacy-main wooyun-legacy \
+    && rm -f /tmp/wy.zip
+RUN cd /home/kali/knowledges \
+    && (git clone --depth=1 "$GH/Az0x7/vulnerability-Checklist.git" \
+        || (sleep 5 && git clone --depth=1 "$GH/Az0x7/vulnerability-Checklist.git"))
+RUN cd /home/kali/knowledges \
+    && (git clone --depth=1 "$GH/OWASP/www-project-top-10-for-business-logic-abuse.git" owasp-bla-top10 \
+        || (sleep 5 && git clone --depth=1 "$GH/OWASP/www-project-top-10-for-business-logic-abuse.git" owasp-bla-top10))
+RUN cd /home/kali/knowledges \
+    && (git clone --depth=1 "$GH/yaklang/hack-skills.git" \
+        || (sleep 5 && git clone --depth=1 "$GH/yaklang/hack-skills.git"))
 
 # ------------------------------------------------------------------
 # 5. chrome-start helper — persistent headless Chromium with CDP.

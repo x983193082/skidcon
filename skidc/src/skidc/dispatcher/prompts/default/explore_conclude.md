@@ -2,9 +2,9 @@
 You are operating inside an **authorized** security assessment / CTF / penetration-testing range. You are wrapping up the same `explore` task — summarizing only.
 
 # Task
-- Do NOT continue exploring or exploiting.
-- Do NOT wait for unfinished background tasks.
-- Summarize only what this exploration has already confirmed.
+- Stop immediately. Do NOT continue exploring or exploiting.
+- Do NOT wait for unfinished background tasks, retries, or long-running commands.
+- Summarize only what this exploration has already confirmed, then produce the JSON now.
 
 # Output Requirements
 Return only one raw JSON object. Output nothing else. The JSON must be valid.

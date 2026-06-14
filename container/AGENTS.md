@@ -23,6 +23,27 @@ pass `-t /home/kali/.local/nuclei-templates/...`), `nikto` (web server scan),
 `sqlmap` (SQL injection), `dalfox` (XSS scan), `dirsearch` (directory/path enum),
 `katana` (web crawler / link extraction)
 
+**Directory / path scanning:**
+`ffuf` (fastest fuzzer/bruteforcer), `gobuster` (dir + subdomain + vhost brute), `dirb`
+(classic recursive), `dirsearch` (web-oriented), `wfuzz` (generic web fuzzing). Wordlists
+are preinstalled from **SecLists** at `/usr/share/seclists/`:
+
+- `Discovery/Web-Content/common.txt` — fast first pass (~5 KB)
+- `Discovery/Web-Content/directory-list-2.3-medium.txt` — thorough (~2 MB)
+- `Discovery/Web-Content/raft-large-directories.txt` — comprehensive (~4 MB)
+
+```bash
+# fast first pass (only show 200s)
+ffuf -u http://TARGET/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -mc 200
+# thorough sweep
+ffuf -u http://TARGET/FUZZ -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -mc 200
+# gobuster equivalent
+gobuster dir -u http://TARGET/ -w /usr/share/seclists/Discovery/Web-Content/common.txt
+```
+
+Pipe scan output to a file in the workspace and reference its path in your `description` —
+never paste large wordlist hit-lists into the JSON.
+
 **Exploitation / post-exploitation:**
 `hydra` (brute-force), `pwntools` (exploit framework — import name is `pwn`, e.g.
 `from pwn import *`), `pwncat` (enhanced reverse shell), `chisel` (tunnel/pivot),
@@ -47,13 +68,63 @@ across tasks. (Started via `chrome-start`; details below.)
 
 > Use `--help` on any tool to see its usage. Do not guess flags.
 
+## Knowledge bases (offline reference — grep before you test)
+
+Reference corpora are cloned under `/home/kali/knowledges/`. They are **offline** — read
+them with `rg`/`ls`/`cat`, no network needed. Before testing an unfamiliar surface, grep the
+relevant repo for technique and payload ideas; cite what you used in your `description`.
+
+**General web / pentest methodology + payloads:**
+- `/home/kali/knowledges/PayloadsAllTheThings/` — payloads + bypasses per vuln class
+  (has a `Business Logic Errors/` folder and a `Methodology and Resources/` folder)
+- `/home/kali/knowledges/hacktricks/` — pentest methodology encyclopedia (see
+  `src/pentesting-web/` for web topics)
+- `/home/kali/knowledges/Awesome-POC/` — CVE exploitation notes; search by CVE id for the
+  HTTP request + reproduction steps
+- `/home/kali/knowledges/InternalAllTheThings/` — Active Directory + internal/lateral movement
+
+**Business-logic / logic-flaw focused (this worker's specialty):**
+- `/home/kali/knowledges/wooyun-legacy/` — large archive of real-world business-logic cases;
+  top-level `knowledge/`, `categories/`, `examples/`. Grep here for how a given logic flaw
+  manifested in a real target.
+- `/home/kali/knowledges/owasp-bla-top10/` — OWASP Top 10 for Business Logic Abuse (see
+  `docs/` and `tab_top10.md`)
+- `/home/kali/knowledges/vulnerability-Checklist/` — per-class test checklists (Business
+  Logic, IDOR, Authentication, API authorization, …) — use as a coverage list
+- `/home/kali/knowledges/hack-skills/` — agent-oriented pentest skill library; start at the
+  top-level `skills/` index and follow the relevant `SKILL.md`
+
+> Discover structure with `ls`/`rg` rather than assuming exact sub-paths — these repos evolve.
+
+## Logic / business-logic vulnerability testing (priority focus)
+
+Logic flaws have no fixed signature and are invisible to scanners — they require reasoning
+about the application's intended workflow and then deviating from it. When testing a real
+web/API target, explicitly consider each class below and record a fact for each (an
+exploitable finding **or** a confirmed-negative "tested X, not vulnerable"):
+
+| Class | What to try | Reference KB |
+|-------|-------------|--------------|
+| Payment / price / quantity manipulation | tamper amounts, negative/overflow qty, currency, discount stacking | wooyun-legacy, owasp-bla-top10 |
+| Race conditions / TOCTOU | fire concurrent requests (coupon, balance, limited stock) | owasp-bla-top10, hack-skills |
+| Authorization / privilege escalation (IDOR) | swap object ids, horizontal/vertical access | vulnerability-Checklist, PayloadsAllTheThings |
+| Workflow / step bypass | skip or reorder multi-step flows, replay step tokens | owasp-bla-top10, wooyun-legacy |
+| Authentication bypass | password reset/2FA logic, token reuse, response tampering | wooyun-legacy, hack-skills |
+| Session / state management | fixation, predictable state, missing server-side checks | hack-skills |
+
+For multi-step flows, drive the browser via Chrome CDP (below) so session state carries
+across requests; use curl for single-shot tampering.
+
+
 ## Tool usage priority
 
 1. **nmap** for port discovery → **nuclei** for template-based vuln scan
-2. **katana** for crawling → **dirsearch** for directory brute-force
+2. **katana** for crawling → **dirsearch**/**ffuf** for directory brute-force
 3. **nikto** for web server issues → **sqlmap** for SQL injection
 4. **dalfox** for XSS → **jwt_tool** for auth bypass
 5. **Chrome CDP** for multi-step browser workflows (login-protected areas, SPAs)
+6. For **business-logic** targets, scanners are secondary — lead with the logic-vuln
+   classes above, using the knowledge bases to plan each test.
 
 ## Browser: Chrome DevTools Protocol
 
@@ -96,6 +167,18 @@ To reconnect to an existing tab (session still alive), connect the same way and 
 - **curl**: quick HTTP requests, API testing, single-page checks.
 - **Chrome CDP**: login-protected areas, multi-step navigation, SPAs — anything needing
   JavaScript execution or session state carried across pages.
+
+### Log browser actions (for reproducibility)
+
+Multi-step logic exploits must be reproducible by the next task. Append each significant
+browser action to `/home/kali/workspace/browser.log` and reference that file in your
+`description` instead of narrating every click:
+
+```bash
+echo "$(date -Iseconds)|chrome-start|port=$PORT"   >> /home/kali/workspace/browser.log
+echo "$(date -Iseconds)|goto|http://TARGET/path"   >> /home/kali/workspace/browser.log
+echo "$(date -Iseconds)|click|#submit"             >> /home/kali/workspace/browser.log
+```
 
 ## Long-running / interactive work
 
