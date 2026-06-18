@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS facts (
     id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     description TEXT NOT NULL,
+    scope TEXT,
+    vuln_type TEXT,
+    severity TEXT,
+    parent_fact TEXT,
     PRIMARY KEY (id, project_id)
 );
 
@@ -79,6 +83,17 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
     value INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, kind)
 );
+
+CREATE TABLE IF NOT EXISTS attack_paths (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    fact_chain TEXT NOT NULL,
+    description TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'medium',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id)
+);
 """
 
 
@@ -90,6 +105,26 @@ def configure(path: Path) -> None:
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+# Columns added after the initial release. CREATE TABLE IF NOT EXISTS will NOT add
+# these to a table that predates them, so we introspect and ALTER only what is
+# missing — idempotent across restarts and safe on a fresh DB (where SCHEMA already
+# created them, so nothing is added).
+_FACT_ADDED_COLUMNS = {
+    "scope": "TEXT",
+    "vuln_type": "TEXT",
+    "severity": "TEXT",
+    "parent_fact": "TEXT",
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(facts)")}
+    for column, decl in _FACT_ADDED_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE facts ADD COLUMN {column} {decl}")
 
 
 @contextmanager

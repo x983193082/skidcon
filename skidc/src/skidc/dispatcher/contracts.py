@@ -32,7 +32,7 @@ def _looks_like_reason_data(payload: dict[str, Any]) -> bool:
     if keys == {"complete"}:
         complete = payload["complete"]
         return isinstance(complete, dict) and "from" in complete and "description" in complete
-    if keys == {"intents"}:
+    if "intents" in keys and keys <= {"intents", "attack_paths"}:
         return isinstance(payload["intents"], list)
     if keys == {"intent"}:
         intent = payload["intent"]
@@ -56,7 +56,11 @@ def _looks_like_bootstrap_conclude_data(payload: dict[str, Any]) -> bool:
 
 
 def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
-    return isinstance(payload, dict) and set(payload) == {"description"}
+    # description is required; scope/vuln_type/severity/parent_fact are optional extras.
+    return isinstance(payload, dict) and "description" in payload
+
+
+_EXPLORE_OPTIONAL_FIELDS = ("scope", "vuln_type", "severity", "parent_fact")
 
 
 def validate_reason_payload(
@@ -99,6 +103,41 @@ def validate_reason_payload(
     if open_intents_empty:
         raise ValueError("intents is required when open_intents is empty")
     return "noop", None
+
+
+def extract_reason_attack_paths(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull optional attack_paths out of a reason payload (wrapped or bare).
+    Returns only well-formed entries (name + non-empty fact_chain); skips the rest.
+    Kept separate from validate_reason_payload so its return contract is unchanged."""
+    accepted, data = _unwrap_wrapped_payload(payload)
+    if accepted is False:
+        return []
+    if data is None:
+        data = payload if isinstance(payload, dict) else {}
+    raw = data.get("attack_paths")
+    if not isinstance(raw, list):
+        return []
+    paths: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        chain = entry.get("fact_chain")
+        description = entry.get("description")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(chain, list) or not chain or not all(isinstance(c, str) and c.strip() for c in chain):
+            continue
+        if not isinstance(description, str) or not description.strip():
+            continue
+        severity = entry.get("severity")
+        paths.append({
+            "name": name.strip(),
+            "fact_chain": [c.strip() for c in chain],
+            "description": description.strip(),
+            "severity": severity.strip() if isinstance(severity, str) and severity.strip() else "medium",
+        })
+    return paths
 
 
 def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, str] | None]:
@@ -154,7 +193,7 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
     return "fact", fact_description.strip()
 
 
-def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
+def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, str] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -167,4 +206,9 @@ def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description is required")
-    return "fact", description.strip()
+    result: dict[str, str] = {"description": description.strip()}
+    for field in _EXPLORE_OPTIONAL_FIELDS:
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            result[field] = value.strip()
+    return "fact", result

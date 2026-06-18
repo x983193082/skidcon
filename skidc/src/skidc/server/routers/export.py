@@ -1,10 +1,15 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from datetime import datetime
+import json
 import yaml
 
 from skidc.server.db import get_conn
-from skidc.server.services import expire_reason_leases, expire_workers, get_project_or_404
+from skidc.server.services import (
+    expire_reason_leases,
+    expire_workers,
+    get_project_or_404,
+)
 
 router = APIRouter(tags=["export"])
 
@@ -25,7 +30,8 @@ def _load_project_data(conn, project_id: str):
     proj = get_project_or_404(conn, project_id)
 
     facts = conn.execute(
-        "SELECT id, description FROM facts WHERE project_id = ?", (project_id,)
+        "SELECT id, description, scope, vuln_type, severity, parent_fact FROM facts WHERE project_id = ?",
+        (project_id,),
     ).fetchall()
     hints = conn.execute(
         "SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at",
@@ -44,11 +50,16 @@ def _load_project_data(conn, project_id: str):
         ).fetchall()
         sources_by_intent[i["id"]] = [r["fact_id"] for r in rows]
 
-    return proj, facts, hints, intents, sources_by_intent
+    attack_paths = conn.execute(
+        "SELECT * FROM attack_paths WHERE project_id = ? ORDER BY created_at",
+        (project_id,),
+    ).fetchall()
+
+    return proj, facts, hints, intents, sources_by_intent, attack_paths
 
 
 def _export_yaml(conn, project_id: str) -> str:
-    proj, facts, hints, intents, sources_by_intent = _load_project_data(conn, project_id)
+    proj, facts, hints, intents, sources_by_intent, attack_paths = _load_project_data(conn, project_id)
 
     origin_desc = ""
     goal_desc = ""
@@ -77,7 +88,14 @@ def _export_yaml(conn, project_id: str) -> str:
             for h in hints
         ]
 
-    data["facts"] = [{"id": f["id"], "description": f["description"]} for f in facts]
+    fact_list = []
+    for f in facts:
+        entry: dict = {"id": f["id"], "description": f["description"]}
+        for col in ("scope", "vuln_type", "severity", "parent_fact"):
+            if f[col]:
+                entry[col] = f[col]
+        fact_list.append(entry)
+    data["facts"] = fact_list
 
     intent_list = []
     for i in intents:
@@ -95,11 +113,23 @@ def _export_yaml(conn, project_id: str) -> str:
     if intent_list:
         data["intents"] = intent_list
 
+    if attack_paths:
+        data["attack_paths"] = [
+            {
+                "id": ap["id"],
+                "name": ap["name"],
+                "fact_chain": json.loads(ap["fact_chain"]),
+                "description": ap["description"],
+                "severity": ap["severity"],
+            }
+            for ap in attack_paths
+        ]
+
     return yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
 def _export_timeline(conn, project_id: str) -> str:
-    proj, facts, hints, intents, sources_by_intent = _load_project_data(conn, project_id)
+    proj, facts, hints, intents, sources_by_intent, _attack_paths = _load_project_data(conn, project_id)
 
     facts_by_id = {f["id"]: f["description"] for f in facts}
 

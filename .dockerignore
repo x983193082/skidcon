@@ -1,0 +1,13 @@
+skidc/.venv/
+skidc/__pycache__/
+skidc/src/__pycache__/
+skidc/src/skidc/__pycache__/
+skidc/src/skidc/server/__pycache__/
+skidc/src/skidc/dispatcher/__pycache__/
+skidc/tests/__pycache__/
+.git/
+.idea/
+datas/
+*.pyc
+*.pyo
+nul

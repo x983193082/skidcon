@@ -4,7 +4,11 @@ import logging
 import time
 
 from skidc.dispatcher.config import DispatchConfig, WorkerConfig
-from skidc.dispatcher.contracts import parse_json_output, validate_reason_payload
+from skidc.dispatcher.contracts import (
+    extract_reason_attack_paths,
+    parse_json_output,
+    validate_reason_payload,
+)
 from skidc.dispatcher.prompting import (
     format_fact_ids,
     format_open_intents,
@@ -127,6 +131,7 @@ def run_reason_task(
         if kind == "rejected":
             LOG.warning("reason rejected project=%s worker=%s execute_ms=%s stdout=%s", project.project.id, worker.name, execute_ms, preview(result.stdout))
             return "rejected"
+        _create_attack_paths(client, project.project.id, worker.name, extract_reason_attack_paths(payload))
         if kind == "complete":
             response = client.complete(project.project.id, data["from"], data["description"], worker.name)
             if response.status_code == 403:
@@ -162,3 +167,17 @@ def run_reason_task(
     finally:
         lease.stop()
         best_effort_release_reason(client, project.project.id, worker.name)
+
+
+def _create_attack_paths(client, project_id: str, worker_name: str, paths: list[dict]) -> None:
+    """Best-effort: persist any attack paths the reasoner identified. A bad fact ref
+    (404) or an inactive project (403) skips that path without failing the reason task —
+    attack paths are an annotation layer, never a gate on graph progress."""
+    for path in paths:
+        response = client.create_attack_path(
+            project_id, path["name"], path["fact_chain"], path["description"], path["severity"],
+        )
+        if response.ok:
+            LOG.info("reason created attack_path project=%s worker=%s name=%s chain=%s", project_id, worker_name, path["name"], path["fact_chain"])
+        else:
+            LOG.info("reason attack_path skipped project=%s worker=%s name=%s status=%s", project_id, worker_name, path["name"], response.status_code)

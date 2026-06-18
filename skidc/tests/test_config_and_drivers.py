@@ -4,6 +4,7 @@ import pytest
 
 from skidc.dispatcher.config import DispatchConfig, WorkerConfig
 from skidc.dispatcher.contracts import (
+    extract_reason_attack_paths,
     parse_json_output,
     validate_bootstrap_execute_payload,
     validate_explore_payload,
@@ -132,8 +133,22 @@ def test_parse_json_from_fenced_block():
 
 
 def test_validate_explore_accepts_wrapped_and_bare():
-    assert validate_explore_payload({"accepted": True, "data": {"description": "found it"}}) == ("fact", "found it")
-    assert validate_explore_payload({"description": "bare"}) == ("fact", "bare")
+    assert validate_explore_payload({"accepted": True, "data": {"description": "found it"}}) == ("fact", {"description": "found it"})
+    assert validate_explore_payload({"description": "bare"}) == ("fact", {"description": "bare"})
+
+
+def test_validate_explore_carries_structured_fields():
+    kind, data = validate_explore_payload(
+        {"accepted": True, "data": {
+            "description": "IDOR on /admin", "scope": "api.example.com/admin",
+            "vuln_type": "IDOR", "severity": "high", "parent_fact": "f002",
+        }}
+    )
+    assert kind == "fact"
+    assert data == {
+        "description": "IDOR on /admin", "scope": "api.example.com/admin",
+        "vuln_type": "IDOR", "severity": "high", "parent_fact": "f002",
+    }
 
 
 def test_validate_explore_rejection():
@@ -156,6 +171,39 @@ def test_validate_reason_complete_and_intents():
 def test_validate_reason_requires_intent_when_no_open_intents():
     with pytest.raises(ValueError):
         validate_reason_payload({"accepted": True, "data": {}}, open_intents_empty=True, max_intents=3)
+
+
+def test_reason_intents_with_attack_paths_still_valid():
+    # intents + attack_paths coexisting must still parse as "intents"
+    kind, data = validate_reason_payload(
+        {"accepted": True, "data": {
+            "intents": [{"from": ["f001"], "description": "a"}],
+            "attack_paths": [{"name": "chain", "fact_chain": ["f001", "f002"], "description": "d", "severity": "high"}],
+        }},
+        open_intents_empty=True, max_intents=3,
+    )
+    assert kind == "intents" and len(data) == 1
+
+
+def test_extract_reason_attack_paths():
+    payload = {"accepted": True, "data": {
+        "intents": [],
+        "attack_paths": [
+            {"name": "auth->idor->dump", "fact_chain": ["f001", "f003"], "description": "full chain", "severity": "critical"},
+            {"name": "no chain", "fact_chain": [], "description": "x"},          # dropped: empty chain
+            {"fact_chain": ["f001"], "description": "x"},                          # dropped: no name
+            {"name": "default sev", "fact_chain": ["f002"], "description": "d"},   # severity defaults to medium
+        ],
+    }}
+    paths = extract_reason_attack_paths(payload)
+    assert len(paths) == 2
+    assert paths[0] == {"name": "auth->idor->dump", "fact_chain": ["f001", "f003"], "description": "full chain", "severity": "critical"}
+    assert paths[1]["severity"] == "medium"
+
+
+def test_extract_reason_attack_paths_absent():
+    assert extract_reason_attack_paths({"accepted": True, "data": {"intents": []}}) == []
+    assert extract_reason_attack_paths({"accepted": False, "reason": "no"}) == []
 
 
 def test_validate_bootstrap_requires_fact_and_complete():

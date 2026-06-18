@@ -66,10 +66,23 @@ class InProcessClient:
     def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
         return self._post(f"/projects/{project_id}/intents/{intent_id}/release", {"worker": worker})
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
+    def conclude(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        description: str,
+        fact_fields: dict[str, str] | None = None,
+    ) -> ApiResult:
+        body = {"worker": worker, "description": description}
+        if fact_fields:
+            for key in ("scope", "vuln_type", "severity", "parent_fact"):
+                value = fact_fields.get(key)
+                if value:
+                    body[key] = value
         return self._post(
             f"/projects/{project_id}/intents/{intent_id}/conclude",
-            {"worker": worker, "description": description},
+            body,
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
@@ -82,6 +95,14 @@ class InProcessClient:
         return self._post(
             f"/projects/{project_id}/intents",
             {"from": from_ids, "description": description, "creator": creator, "worker": None},
+        )
+
+    def create_attack_path(
+        self, project_id: str, name: str, fact_chain: list[str], description: str, severity: str = "medium",
+    ) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/attack-paths",
+            {"name": name, "fact_chain": fact_chain, "description": description, "severity": severity},
         )
 
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:

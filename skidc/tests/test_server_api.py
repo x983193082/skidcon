@@ -78,3 +78,82 @@ def test_export_yaml_and_timeline(http_client: TestClient) -> None:
     pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     assert "project:" in http_client.get(f"/projects/{pid}/export?format=yaml").text
     assert "PROJECT CREATED" in http_client.get(f"/projects/{pid}/export?format=timeline").text
+
+
+def test_conclude_persists_structured_fields(http_client: TestClient) -> None:
+    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    iid = http_client.post(
+        f"/projects/{pid}/intents",
+        json={"from": ["origin"], "description": "probe admin", "creator": "r", "worker": None},
+    ).json()["id"]
+    http_client.post(f"/projects/{pid}/intents/{iid}/heartbeat", json={"worker": "w1"})
+    r = http_client.post(
+        f"/projects/{pid}/intents/{iid}/conclude",
+        json={
+            "worker": "w1", "description": "IDOR confirmed on /admin",
+            "scope": "api.example.com/admin", "vuln_type": "IDOR",
+            "severity": "high", "parent_fact": "origin",
+        },
+    )
+    assert r.status_code == 200
+    fact = r.json()["fact"]
+    assert fact["scope"] == "api.example.com/admin"
+    assert fact["vuln_type"] == "IDOR"
+    assert fact["severity"] == "high"
+    assert fact["parent_fact"] == "origin"
+    # round-trips through get_project and export
+    detail_fact = next(f for f in http_client.get(f"/projects/{pid}").json()["facts"] if f["id"] == fact["id"])
+    assert detail_fact["severity"] == "high"
+    yaml_text = http_client.get(f"/projects/{pid}/export?format=yaml").text
+    assert "IDOR" in yaml_text
+
+
+def _seed_fact(http_client: TestClient, pid: str, description: str) -> str:
+    iid = http_client.post(
+        f"/projects/{pid}/intents",
+        json={"from": ["origin"], "description": "probe", "creator": "r", "worker": None},
+    ).json()["id"]
+    http_client.post(f"/projects/{pid}/intents/{iid}/heartbeat", json={"worker": "w1"})
+    return http_client.post(
+        f"/projects/{pid}/intents/{iid}/conclude",
+        json={"worker": "w1", "description": description},
+    ).json()["fact"]["id"]
+
+
+def test_attack_path_create_list_delete(http_client: TestClient) -> None:
+    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    f1 = _seed_fact(http_client, pid, "auth bypass")
+    f2 = _seed_fact(http_client, pid, "idor dump")
+
+    r = http_client.post(
+        f"/projects/{pid}/attack-paths",
+        json={"name": "auth->idor", "fact_chain": [f1, f2], "description": "chain", "severity": "high"},
+    )
+    assert r.status_code == 201
+    ap = r.json()
+    assert ap["id"] == "ap001"
+    assert ap["fact_chain"] == [f1, f2]
+    assert ap["severity"] == "high"
+
+    listed = http_client.get(f"/projects/{pid}/attack-paths").json()
+    assert len(listed) == 1 and listed[0]["name"] == "auth->idor"
+
+    # get_project (dashboard data source) must also surface attack paths
+    detail = http_client.get(f"/projects/{pid}").json()
+    assert len(detail["attack_paths"]) == 1
+    assert detail["attack_paths"][0]["fact_chain"] == [f1, f2]
+
+    yaml_text = http_client.get(f"/projects/{pid}/export?format=yaml").text
+    assert "attack_paths" in yaml_text and "auth->idor" in yaml_text
+
+    assert http_client.delete(f"/projects/{pid}/attack-paths/{ap['id']}").status_code == 204
+    assert http_client.get(f"/projects/{pid}/attack-paths").json() == []
+
+
+def test_attack_path_rejects_unknown_fact(http_client: TestClient) -> None:
+    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    r = http_client.post(
+        f"/projects/{pid}/attack-paths",
+        json={"name": "bad", "fact_chain": ["f999"], "description": "no such fact"},
+    )
+    assert r.status_code == 404

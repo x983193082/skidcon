@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from skidc import __version__
 from skidc.server import db
-from skidc.server.routers import export, hints, intents, projects, settings
+from skidc.server.routers import attack_paths, export, hints, intents, projects, settings
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -29,6 +29,7 @@ app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(hints.router)
 app.include_router(intents.router)
+app.include_router(attack_paths.router)
 app.include_router(export.router)
 
 

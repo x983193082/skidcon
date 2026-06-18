@@ -68,33 +68,30 @@ across tasks. (Started via `chrome-start`; details below.)
 
 > Use `--help` on any tool to see its usage. Do not guess flags.
 
-## Knowledge bases (offline reference — grep before you test)
+## Knowledge bases (offline reference)
 
-Reference corpora are cloned under `/home/kali/knowledges/`. They are **offline** — read
-them with `rg`/`ls`/`cat`, no network needed. Before testing an unfamiliar surface, grep the
-relevant repo for technique and payload ideas; cite what you used in your `description`.
+Reference corpora are cloned under `/home/kali/knowledges/` and are **offline** (no
+network needed). Use `ripgrep` (`rg`) to search across them; cite what you used in your
+`description`.
 
-**General web / pentest methodology + payloads:**
-- `/home/kali/knowledges/PayloadsAllTheThings/` — payloads + bypasses per vuln class
-  (has a `Business Logic Errors/` folder and a `Methodology and Resources/` folder)
-- `/home/kali/knowledges/hacktricks/` — pentest methodology encyclopedia (see
-  `src/pentesting-web/` for web topics)
-- `/home/kali/knowledges/Awesome-POC/` — CVE exploitation notes; search by CVE id for the
-  HTTP request + reproduction steps
-- `/home/kali/knowledges/InternalAllTheThings/` — Active Directory + internal/lateral movement
+```bash
+rg -i "SQL injection bypass WAF" /home/kali/knowledges/PayloadsAllTheThings/
+rg -i "JWT alg:none" /home/kali/knowledges/hacktricks/
+rg -i "deserialization" /home/kali/knowledges/             # search all repos
+fd -e md "sqli" /home/kali/knowledges/                     # find files by name
+```
 
-**Business-logic / logic-flaw focused (this worker's specialty):**
-- `/home/kali/knowledges/wooyun-legacy/` — large archive of real-world business-logic cases;
-  top-level `knowledge/`, `categories/`, `examples/`. Grep here for how a given logic flaw
-  manifested in a real target.
-- `/home/kali/knowledges/owasp-bla-top10/` — OWASP Top 10 for Business Logic Abuse (see
-  `docs/` and `tab_top10.md`)
-- `/home/kali/knowledges/vulnerability-Checklist/` — per-class test checklists (Business
-  Logic, IDOR, Authentication, API authorization, …) — use as a coverage list
-- `/home/kali/knowledges/hack-skills/` — agent-oriented pentest skill library; start at the
-  top-level `skills/` index and follow the relevant `SKILL.md`
+The corpora (search across them with `rg`, or browse with `ls`/`cat`):
+- `PayloadsAllTheThings/` — payloads + bypasses per vuln class (incl. `Business Logic Errors/`)
+- `hacktricks/` — pentest methodology encyclopedia (`src/pentesting-web/` for web)
+- `Awesome-POC/` — CVE exploitation notes (search by CVE id)
+- `InternalAllTheThings/` — Active Directory + internal/lateral movement
+- `wooyun-legacy/` — real-world business-logic case archive (`knowledge/`, `categories/`, `examples/`)
+- `owasp-bla-top10/` — OWASP Top 10 for Business Logic Abuse (`docs/`, `tab_top10.md`)
+- `vulnerability-Checklist/` — per-class test checklists (use as a coverage list)
+- `hack-skills/` — agent-oriented pentest skill library (`skills/` index → relevant `SKILL.md`)
 
-> Discover structure with `ls`/`rg` rather than assuming exact sub-paths — these repos evolve.
+> Always adapt retrieved techniques to the target — never copy a payload blindly.
 
 ## Logic / business-logic vulnerability testing (priority focus)
 

@@ -297,12 +297,15 @@ RUN chmod +x /usr/local/bin/chrome-start
 
 # ------------------------------------------------------------------
 # 6. Non-root user + ownership. Claude Code refuses --dangerously-skip-permissions
-#    as root. Everything under /home/kali was written as root above, so chown it.
+#    as root. The home directory itself must be owned by kali so the CLI can create
+#    ~/.claude/ (session state, debug logs). chown /home/kali directly instead of
+#    recursive chown on the whole tree — knowledge bases and tools stay root-owned
+#    (755 = readable) and don't get duplicated into a new layer.
 # ------------------------------------------------------------------
 RUN useradd -m -s /bin/bash kali \
     && echo "kali ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
-    && mkdir -p /home/kali/workspace /home/kali/chrome-profile \
-    && chown -R kali:kali /home/kali
+    && mkdir -p /home/kali/workspace /home/kali/chrome-profile /home/kali/.claude \
+    && chown kali:kali /home/kali /home/kali/workspace /home/kali/chrome-profile /home/kali/.claude /home/kali/.config /home/kali/.local
 
 USER kali
 WORKDIR /home/kali/workspace

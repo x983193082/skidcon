@@ -98,7 +98,7 @@ def run_explore_task(
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 payload = parse_json_output(model_output)
-                kind, description = validate_explore_payload(payload)
+                kind, data = validate_explore_payload(payload)
             except Exception as exc:
                 LOG.warning("explore parse failed project=%s intent=%s worker=%s error=%s execute_ms=%s stdout=%s stderr=%s", project.project.id, intent.id, worker.name, exc, execute_ms, preview(first.stdout), preview(first.stderr))
                 return _try_conclude_fallback(config, client, container_manager, container_name, worker, driver, project.project.id, intent, export_yaml, session, lease, cancellation)
@@ -107,8 +107,9 @@ def run_explore_task(
                 best_effort_release(client, project.project.id, intent.id, worker.name)
                 return "rejected"
             return write_conclude_result(
-                client, project.project.id, intent.id, worker.name, description,
+                client, project.project.id, intent.id, worker.name, data["description"],
                 source="explore_execute", phase_ms=execute_ms, total_ms=int((time.perf_counter() - task_started) * 1000),
+                fact_fields=data,
             )
         if did_timeout(first):
             LOG.warning("explore timed out project=%s intent=%s worker=%s execute_ms=%s stdout=%s stderr=%s", project.project.id, intent.id, worker.name, execute_ms, preview(first.stdout), preview(first.stderr))
@@ -190,7 +191,7 @@ def _try_conclude_fallback(
     try:
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
-        kind, description = validate_explore_payload(payload)
+        kind, data = validate_explore_payload(payload)
     except Exception as exc:
         LOG.warning("conclude parse failed project=%s intent=%s worker=%s error=%s conclude_ms=%s stdout=%s stderr=%s", project_id, intent.id, worker.name, exc, conclude_ms, preview(result.stdout), preview(result.stderr))
         best_effort_release(client, project_id, intent.id, worker.name)
@@ -200,6 +201,7 @@ def _try_conclude_fallback(
         best_effort_release(client, project_id, intent.id, worker.name)
         return "rejected"
     return write_conclude_result(
-        client, project_id, intent.id, worker.name, description,
+        client, project_id, intent.id, worker.name, data["description"],
         source="explore_conclude", phase_ms=conclude_ms,
+        fact_fields=data,
     )

@@ -13,6 +13,10 @@ class Settings(BaseModel):
 class Fact(BaseModel):
     id: str
     description: str
+    scope: str | None = None
+    vuln_type: str | None = None
+    severity: str | None = None
+    parent_fact: str | None = None
 
 
 class Intent(BaseModel):
@@ -34,6 +38,41 @@ class Hint(BaseModel):
     content: str
     creator: str
     created_at: str
+
+
+class AttackPath(BaseModel):
+    id: str
+    name: str
+    fact_chain: list[str]
+    description: str
+    severity: str
+    created_at: str
+
+
+class CreateAttackPathRequest(BaseModel):
+    name: str
+    fact_chain: list[str] = Field(min_length=1)
+    description: str
+    severity: str = "medium"
+
+    @field_validator("name", "description")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+    @field_validator("fact_chain")
+    @classmethod
+    def validate_fact_chain(cls, value: list[str]) -> list[str]:
+        cleaned = []
+        for item in value:
+            text = item.strip()
+            if not text:
+                raise ValueError("fact ids must not be empty")
+            cleaned.append(text)
+        return cleaned
 
 
 class ProjectReason(BaseModel):
@@ -65,6 +104,7 @@ class ProjectDetail(BaseModel):
     facts: list[Fact]
     intents: list[Intent]
     hints: list[Hint]
+    attack_paths: list[AttackPath] = []
 
 
 class CreateHintInline(BaseModel):
@@ -167,6 +207,10 @@ class ReasonClaimRequest(BaseModel):
 class ConcludeRequest(BaseModel):
     worker: str
     description: str
+    scope: str | None = None
+    vuln_type: str | None = None
+    severity: str | None = None
+    parent_fact: str | None = None
 
     @field_validator("worker", "description")
     @classmethod

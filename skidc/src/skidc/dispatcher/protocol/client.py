@@ -107,11 +107,24 @@ class SkidcClient:
             json={"worker": worker},
         )
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
+    def conclude(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        description: str,
+        fact_fields: dict[str, str] | None = None,
+    ) -> ApiResult:
+        body: dict[str, Any] = {"worker": worker, "description": description}
+        if fact_fields:
+            for key in ("scope", "vuln_type", "severity", "parent_fact"):
+                value = fact_fields.get(key)
+                if value:
+                    body[key] = value
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents/{intent_id}/conclude",
-            json={"worker": worker, "description": description},
+            json=body,
         )
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
@@ -126,6 +139,15 @@ class SkidcClient:
             "POST",
             f"/projects/{project_id}/intents",
             json={"from": from_ids, "description": description, "creator": creator, "worker": None},
+        )
+
+    def create_attack_path(
+        self, project_id: str, name: str, fact_chain: list[str], description: str, severity: str = "medium",
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/attack-paths",
+            json={"name": name, "fact_chain": fact_chain, "description": description, "severity": severity},
         )
 
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:

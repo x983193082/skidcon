@@ -1,7 +1,10 @@
 from fastapi import APIRouter, HTTPException
 
+import json
+
 from skidc.server.db import get_conn
 from skidc.server.models import (
+    AttackPath,
     CompleteRequest,
     CreateProjectRequest,
     Fact,
@@ -135,12 +138,27 @@ def get_project(project_id: str):
             "SELECT * FROM hints WHERE project_id = ? ORDER BY created_at",
             (project_id,),
         ).fetchall()
+        attack_path_rows = conn.execute(
+            "SELECT * FROM attack_paths WHERE project_id = ? ORDER BY created_at",
+            (project_id,),
+        ).fetchall()
 
         return ProjectDetail(
             project=project_meta_from_row(row),
             facts=[Fact(**dict(f)) for f in facts],
             intents=build_intents(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            attack_paths=[
+                AttackPath(
+                    id=r["id"],
+                    name=r["name"],
+                    fact_chain=json.loads(r["fact_chain"]),
+                    description=r["description"],
+                    severity=r["severity"],
+                    created_at=r["created_at"],
+                )
+                for r in attack_path_rows
+            ],
         )
 
 

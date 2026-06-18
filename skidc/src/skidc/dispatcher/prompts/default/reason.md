@@ -35,8 +35,6 @@ If Goal is not satisfied and no new intent should be proposed now:
 - First decide whether facts satisfy Goal. If so, `data.complete.from` must come from `Valid facts`, and `data.complete.description` must justify why the confirmed results prove Goal is achieved.
 - If Goal is not satisfied, reflect on why, whether the search has drifted, and whether a corrective intent is needed.
 - Look at `Open Intents` (declared but not yet concluded). If open intents already cover the known clues, you may decline to add more.
-- Before proposing an intent, check it against every entry in `Open Intents` and every concluded path in the graph: if it overlaps in target+technique with one already present, do NOT propose it again. Prefer returning `data: {}` over re-proposing near-duplicate or already-explored directions.
-- Only propose a new intent when it opens a genuinely new dimension (new target surface, new technique, or a corrective pivot after a dead end) AND is grounded in a confirmed fact — not speculation.
 - If `Open Intents` is empty, you MUST propose at least one new intent.
 - Propose at most {max_intents} high-value, non-overlapping directions. Each intent should be an independent, parallelizable exploration path — a clear core insight, not an over-detailed script.
 - An intent may originate from multiple facts. Different intents should cover different dimensions.
