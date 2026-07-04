@@ -18,6 +18,7 @@ datas/
 dispatch.yaml
 *.db
 *.db-wal
+*.db-journal
 *.db-shm
 
 # IDE / OS

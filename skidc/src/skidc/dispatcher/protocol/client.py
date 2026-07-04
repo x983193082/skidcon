@@ -117,13 +117,31 @@ class SkidcClient:
     ) -> ApiResult:
         body: dict[str, Any] = {"worker": worker, "description": description}
         if fact_fields:
-            for key in ("scope", "vuln_type", "severity", "parent_fact"):
+            for key in ("scope", "vuln_type", "severity", "parent_fact", "goal_type", "status"):
                 value = fact_fields.get(key)
                 if value:
                     body[key] = value
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents/{intent_id}/conclude",
+            json=body,
+        )
+
+    def create_fact_direct(
+        self,
+        project_id: str,
+        description: str,
+        goal_type: str | None = None,
+        status: str | None = None,
+    ) -> ApiResult:
+        body: dict[str, Any] = {"description": description}
+        if goal_type:
+            body["goal_type"] = goal_type
+        if status:
+            body["status"] = status
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/facts",
             json=body,
         )
 

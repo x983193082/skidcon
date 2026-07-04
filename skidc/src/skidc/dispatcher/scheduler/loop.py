@@ -11,6 +11,7 @@ import requests
 from skidc.dispatcher.config import DispatchConfig, WorkerConfig
 from skidc.dispatcher.models import ReasonCheckpoint, RunningTask
 from skidc.dispatcher.protocol.client import SkidcClient
+from skidc.dispatcher.recon_extractor import check_recon_status, extract_potential_targets
 from skidc.dispatcher.runtime.cancellation import TaskCancellation
 from skidc.dispatcher.runtime.containers import ContainerManager
 from skidc.dispatcher.runtime.startup_healthcheck import format_failure_summary, run_startup_healthchecks
@@ -60,6 +61,7 @@ class DispatcherLoop:
         self.project_cursor = 0
         self._settings_checked = False
         self._startup_healthchecks_checked = False
+        self._recon_extracted: set[str] = set()
 
     def close(self) -> None:
         if self.futures:
@@ -186,6 +188,8 @@ class DispatcherLoop:
         if project.project.reason is None:
             reason_trigger = self._reason_trigger(project)
             if reason_trigger is not None:
+                if not project.project.bootstrap_enabled and not self._recon_gate_check(project):
+                    return False
                 export_yaml = self.client.export_project(summary.id)
                 return self._dispatch_reason(project, export_yaml, reason_trigger)
         running_intent_ids = self._project_running_explore_intents(summary.id)
@@ -411,6 +415,48 @@ class DispatcherLoop:
         intent = Intent.model_validate(response.data)
         LOG.info("created bootstrap intent project=%s intent=%s", project_id, intent.id)
         return intent
+
+    # ---- RECON gate (real-website mode) -----------------------------------------
+
+    def _recon_gate_check(self, project: ProjectDetail) -> bool:
+        if project.project.bootstrap_enabled:
+            return True
+        checklist = check_recon_status(project.facts)
+        if not checklist.complete:
+            self._log_changed(
+                f"project:{project.project.id}:recon-gate",
+                logging.INFO,
+                "RECON gate not passed project=%s missing=%s",
+                project.project.id,
+                checklist.missing,
+            )
+            return False
+        self._clear_log_state(f"project:{project.project.id}:recon-gate")
+        self._try_extract_potential_targets(project)
+        return True
+
+    def _try_extract_potential_targets(self, project: ProjectDetail) -> None:
+        pid = project.project.id
+        if pid in self._recon_extracted:
+            return
+        targets = extract_potential_targets(project.facts)
+        if not targets:
+            return
+        written = 0
+        for target in targets:
+            result = self.client.create_fact_direct(
+                pid,
+                description=target.description,
+                goal_type="potential_target",
+                status="pending",
+            )
+            if result.ok:
+                written += 1
+            else:
+                LOG.warning("failed to write potential target fact project=%s status=%s", pid, result.status_code)
+        if written:
+            self._recon_extracted.add(pid)
+            LOG.info("extracted %d potential targets project=%s", written, pid)
 
     # ---- reason re-trigger (stigmergy checkpoint) -------------------------------
 
