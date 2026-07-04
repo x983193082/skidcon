@@ -17,6 +17,43 @@ Kali-based. Workspace: `/home/kali/workspace`. Save scan output, logs, payloads 
 - **AD/cloud:** `bloodyAD`, `coercer`, `enum4linux-ng`, `netexec`, `kerbrute`, `cloudfox`, `adb`
 - **Other:** `tmux`, `jq`, `yq`, `curl`, `wget`, `sshpass`, `sudo` (passwordless)
 
+## Android MCP Bridge
+
+When the target is an Android app, control the emulator/device via HTTP Bridge. Bridge URL is set by env var `ANDROID_MCP_URL` (default `http://127.0.0.1:8765`).
+
+The container has `adb` preinstalled for direct device operations:
+
+```bash
+# List connected devices
+adb devices
+# Install APK
+adb install -r /path/to/app.apk
+# Launch app
+adb shell monkey -p com.example.app -c android.intent.category.LAUNCHER 1
+# Screenshot
+adb exec-out screencap -p > screenshot.png
+# Dump UI tree
+adb shell uiautomator dump /sdcard/ui.xml && adb pull /sdcard/ui.xml
+```
+
+Bridge API endpoints (curl from inside container):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Device status |
+| `GET /devices` | Connected devices |
+| `POST /app/install` | Install APK |
+| `POST /app/start` | Launch app |
+| `POST /app/stop` | Stop app |
+| `POST /input/tap` | Tap coordinates |
+| `POST /input/text` | Input text |
+| `POST /input/swipe` | Swipe gesture |
+| `POST /input/back` | Back key |
+| `GET /observe/ui` | UI widget tree |
+| `GET /observe/screenshot` | Screenshot (base64) |
+| `GET /observe/activity` | Current Activity |
+| `POST /observe/logcat` | System logs |
+
 ## Knowledge bases (offline)
 
 Reference corpora at `/home/kali/knowledges/`. Search with `rg`:
