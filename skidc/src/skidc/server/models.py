@@ -89,6 +89,7 @@ class ProjectMeta(BaseModel):
     title: str
     status: Literal["active", "stopped", "completed"]
     bootstrap_enabled: bool
+    phase: Literal["recon", "explore"] = "explore"
     created_at: str
     reason: ProjectReason | None = None
 
@@ -259,6 +260,10 @@ class ConcludeResponse(BaseModel):
 
 class UpdateProjectStatusRequest(BaseModel):
     status: Literal["active", "stopped"]
+
+
+class UpdateProjectPhaseRequest(BaseModel):
+    phase: Literal["recon", "explore"]
 
 
 class UpdateProjectTitleRequest(BaseModel):

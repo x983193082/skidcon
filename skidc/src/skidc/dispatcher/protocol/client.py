@@ -168,6 +168,13 @@ class SkidcClient:
             json={"name": name, "fact_chain": fact_chain, "description": description, "severity": severity},
         )
 
+    def update_phase(self, project_id: str, phase: str) -> ApiResult:
+        return self._request_json(
+            "PUT",
+            f"/projects/{project_id}/phase",
+            json={"phase": phase},
+        )
+
     def _request_json(self, method: str, path: str, json: dict[str, Any]) -> ApiResult:
         try:
             response = self._session().request(

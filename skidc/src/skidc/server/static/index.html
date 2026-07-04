@@ -101,6 +101,8 @@
   .badge.status-stopped { color: #94a3b8; background: rgba(148, 163, 184, 0.1); border-color: rgba(148, 163, 184, 0.3); }
   .badge.status-completed { color: #3b82f6; background: rgba(59, 130, 246, 0.1); border-color: rgba(59, 130, 246, 0.3); }
   .badge.status-failed { color: #ef4444; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); }
+  .badge.phase-recon { color: #ffa940; background: rgba(255, 169, 64, 0.1); border-color: rgba(255, 169, 64, 0.3); }
+  .badge.phase-explore { color: #4ea1ff; background: rgba(78, 161, 255, 0.1); border-color: rgba(78, 161, 255, 0.3); }
 
   /* ---- main content ---- */
   .main-content { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; background: var(--bg-canvas); }
@@ -221,6 +223,22 @@
   .hint-card .hi-id { font-weight: 700; color: var(--color-origin); }
   .hint-card .hi-by { color: var(--text-muted); font-size: 12px; }
   .hint-card .hi-content { margin-top: 2px; }
+
+  /* ---- sub-goals (potential targets) ---- */
+  .subgoal-card {
+    border-left: 3px solid #ffa940; padding: 10px 14px; margin-bottom: 4px;
+    background: var(--panel-bg); border-radius: 0 6px 6px 0; font-size: 13px;
+    cursor: pointer; transition: 0.1s;
+  }
+  .subgoal-card:hover { background: var(--panel-bg-hover); }
+  .subgoal-card.completed { border-left-color: #10b981; opacity: 0.7; }
+  .subgoal-card .sg-head { display: flex; gap: 8px; align-items: center; }
+  .subgoal-card .sg-id { font-weight: 700; color: #ffa940; }
+  .subgoal-card.completed .sg-id { color: #10b981; }
+  .subgoal-card .sg-status { font-size: 11px; padding: 1px 8px; border-radius: 4px; font-weight: 600; }
+  .subgoal-card .sg-status.pending { color: #ffa940; border: 1px solid rgba(255, 169, 64, 0.4); }
+  .subgoal-card .sg-status.completed { color: #10b981; border: 1px solid rgba(16, 185, 129, 0.4); }
+  .subgoal-card .sg-desc { margin-top: 4px; color: var(--text-muted); }
 
   /* ---- fact cards (Facts tab) ---- */
   .filter-bar { display: flex; gap: 6px; align-items: center; padding: 10px 0; flex-wrap: wrap; }
@@ -375,6 +393,7 @@
         <div class="proj-title">{{ p.title }}</div>
         <div class="proj-meta">
           <span class="badge" :class="'status-' + statusClass(p.status)">{{ statusLabel(p.status) }}</span>
+          <span v-if="p.phase" class="badge" :class="'phase-' + p.phase">{{ p.phase === 'recon' ? '侦察' : '探索' }}</span>
           <span class="badge">{{ p.fact_count }} 事实</span>
           <span class="badge">{{ p.intent_count }} 意图</span>
           <span v-if="p.reason" class="badge">推理中</span>
@@ -404,6 +423,11 @@
       <!-- project loaded -->
       <template v-if="selectedProjId && proj">
         <nav class="tabs-header">
+          <div class="tab active" style="pointer-events:none;display:flex;align-items:center;gap:8px">
+            <span v-if="proj.project?.phase" class="badge" :class="'phase-' + proj.project.phase" style="font-size:11px;padding:2px 8px">
+              {{ proj.project.phase === 'recon' ? '侦察阶段' : '探索阶段' }}
+            </span>
+          </div>
           <div v-for="t in tabs" :key="t.id"
                class="tab" :class="{active: currentTab === t.id}"
                @click="switchTab(t.id)">
@@ -545,6 +569,21 @@
                 <div v-for="h in proj.hints" :key="h.id" class="hint-card">
                   <div class="hi-head"><span class="hi-id">{{ h.id }}</span><span class="hi-by">by {{ h.creator }}</span></div>
                   <div class="hi-content">{{ h.content }}</div>
+                </div>
+              </div>
+            </div>
+            <!-- sub-goals (potential targets) -->
+            <div v-if="subGoals.length" style="flex-shrink:0;max-height:200px;overflow-y:auto;border-top:1px solid var(--border-color);padding:10px 14px">
+              <div class="sec" style="margin-top:0">
+                <h2>子目标 ({{ subGoals.length }})</h2>
+                <div v-for="sg in subGoals" :key="sg.id"
+                     class="subgoal-card" :class="sg.status || 'pending'"
+                     @click="openFact(sg.id)">
+                  <div class="sg-head">
+                    <span class="sg-id">{{ sg.id }}</span>
+                    <span class="sg-status" :class="sg.status || 'pending'">{{ sg.status === 'completed' ? '已完成' : '待探索' }}</span>
+                  </div>
+                  <div class="sg-desc">{{ sg.description }}</div>
                 </div>
               </div>
             </div>
@@ -970,6 +1009,10 @@ createApp({
     const originFact = computed(() => factMap.value["origin"] || null);
     const goalFact = computed(() => factMap.value["goal"] || null);
 
+    const subGoals = computed(() => {
+      return (proj.value?.facts || []).filter(f => f.goal_type === "potential_target");
+    });
+
     const orphanFacts = computed(() => {
       if (!proj.value?.facts) return [];
       const reachable = new Set();
@@ -1299,7 +1342,7 @@ createApp({
       panelWidth, isResizing, pan,
       graphNodes, graphEdges, svgSize,
       allFacts, allTypes, filteredFacts, groupedFilteredFacts,
-      reversedIntents, sortedTimelineFacts, originFact, goalFact, orphanFacts,
+      reversedIntents, sortedTimelineFacts, originFact, goalFact, orphanFacts, subGoals,
       detailFact, detailIntent,
       loadProjects, selectProject, refresh, createProject, addHint, stopProject,
       switchTab, applyFilters,

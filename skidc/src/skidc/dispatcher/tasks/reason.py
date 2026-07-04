@@ -79,9 +79,18 @@ def run_reason_task(
             if intent.to is None
         ]
         allowed_fact_ids = [fact.id for fact in project.facts if fact.id != "goal"]
+        current_phase = project.project.phase
+        sub_goals = [
+            f"- {fact.id}: {fact.description} (status: {fact.status or 'pending'})"
+            for fact in project.facts
+            if fact.goal_type == "potential_target"
+        ]
+        sub_goals_text = "\n".join(sub_goals) if sub_goals else "(none)"
         prompt = render_prompt(
             load_prompt(config.runtime.prompt_group, "reason.md"),
             {
+                "current_phase": current_phase,
+                "sub_goals": sub_goals_text,
                 "graph_yaml": write_graph_snapshot_reference(
                     container_manager, container_name, export_yaml.strip(), phase="reason_execute",
                 ),

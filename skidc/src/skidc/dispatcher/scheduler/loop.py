@@ -188,7 +188,7 @@ class DispatcherLoop:
         if project.project.reason is None:
             reason_trigger = self._reason_trigger(project)
             if reason_trigger is not None:
-                if not project.project.bootstrap_enabled and not self._recon_gate_check(project):
+                if project.project.phase == "recon" and not self._recon_gate_check(project):
                     return False
                 export_yaml = self.client.export_project(summary.id)
                 return self._dispatch_reason(project, export_yaml, reason_trigger)
@@ -419,7 +419,7 @@ class DispatcherLoop:
     # ---- RECON gate (real-website mode) -----------------------------------------
 
     def _recon_gate_check(self, project: ProjectDetail) -> bool:
-        if project.project.bootstrap_enabled:
+        if project.project.phase != "recon":
             return True
         checklist = check_recon_status(project.facts)
         if not checklist.complete:
@@ -433,6 +433,8 @@ class DispatcherLoop:
             return False
         self._clear_log_state(f"project:{project.project.id}:recon-gate")
         self._try_extract_potential_targets(project)
+        self.client.update_phase(project.project.id, "explore")
+        LOG.info("phase transition project=%s from=recon to=explore", project.project.id)
         return True
 
     def _try_extract_potential_targets(self, project: ProjectDetail) -> None:

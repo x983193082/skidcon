@@ -194,11 +194,13 @@ def project_reason_from_row(row: sqlite3.Row) -> ProjectReason | None:
 
 
 def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
+    phase = row["phase"] if "phase" in row.keys() else "explore"
     return ProjectMeta(
         id=row["id"],
         title=row["title"],
         status=row["status"],
         bootstrap_enabled=bool(row["bootstrap_enabled"]),
+        phase=phase,
         created_at=row["created_at"],
         reason=project_reason_from_row(row),
     )

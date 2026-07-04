@@ -20,6 +20,7 @@ from skidc.server.models import (
     ReasonClaimRequest,
     UpdateProjectTitleRequest,
     UpdateProjectStatusRequest,
+    UpdateProjectPhaseRequest,
 )
 from skidc.server.services import (
     build_intents,
@@ -66,6 +67,7 @@ def list_projects():
                 title=row["title"],
                 status=row["status"],
                 bootstrap_enabled=bool(row["bootstrap_enabled"]),
+                phase=row["phase"] if "phase" in row.keys() else "explore",
                 created_at=row["created_at"],
                 reason=project_reason_from_row(row),
                 fact_count=row["fact_count"],
@@ -84,9 +86,10 @@ def create_project(body: CreateProjectRequest):
         pid = next_project_id(conn)
         now = utcnow()
 
+        phase = "explore" if body.bootstrap_enabled else "recon"
         conn.execute(
-            "INSERT INTO projects (id, title, status, bootstrap_enabled, created_at) VALUES (?, ?, 'active', ?, ?)",
-            (pid, body.title, body.bootstrap_enabled, now),
+            "INSERT INTO projects (id, title, status, bootstrap_enabled, phase, created_at) VALUES (?, ?, 'active', ?, ?, ?)",
+            (pid, body.title, body.bootstrap_enabled, phase, now),
         )
         conn.execute(
             "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
@@ -113,6 +116,7 @@ def create_project(body: CreateProjectRequest):
                 title=body.title,
                 status="active",
                 bootstrap_enabled=body.bootstrap_enabled,
+                phase=phase,
                 created_at=now,
                 reason=None,
             ),
@@ -203,6 +207,18 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
                 (project_id,),
             )
             clear_project_reason(conn, project_id)
+        updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        return project_meta_from_row(updated)
+
+
+@router.put("/projects/{project_id}/phase", response_model=ProjectMeta)
+def update_project_phase(project_id: str, body: UpdateProjectPhaseRequest):
+    with get_conn() as conn:
+        get_project_or_404(conn, project_id)
+        conn.execute(
+            "UPDATE projects SET phase = ? WHERE id = ?",
+            (body.phase, project_id),
+        )
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return project_meta_from_row(updated)
 

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS projects (
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     bootstrap_enabled INTEGER NOT NULL DEFAULT 1,
+    phase TEXT NOT NULL DEFAULT 'explore',
     created_at TEXT NOT NULL,
     reason_worker TEXT,
     reason_trigger TEXT,
@@ -121,12 +122,21 @@ _FACT_ADDED_COLUMNS = {
     "status": "TEXT",
 }
 
+_PROJECT_ADDED_COLUMNS = {
+    "phase": "TEXT NOT NULL DEFAULT 'explore'",
+}
+
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(facts)")}
+    existing_facts = {row["name"] for row in conn.execute("PRAGMA table_info(facts)")}
     for column, decl in _FACT_ADDED_COLUMNS.items():
-        if column not in existing:
+        if column not in existing_facts:
             conn.execute(f"ALTER TABLE facts ADD COLUMN {column} {decl}")
+
+    existing_projects = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
+    for column, decl in _PROJECT_ADDED_COLUMNS.items():
+        if column not in existing_projects:
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {decl}")
 
 
 @contextmanager
