@@ -17,6 +17,8 @@ class Fact(BaseModel):
     vuln_type: str | None = None
     severity: str | None = None
     parent_fact: str | None = None
+    goal_type: str | None = None
+    status: str | None = None
 
 
 class Intent(BaseModel):
@@ -211,6 +213,8 @@ class ConcludeRequest(BaseModel):
     vuln_type: str | None = None
     severity: str | None = None
     parent_fact: str | None = None
+    goal_type: str | None = None
+    status: str | None = None
 
     @field_validator("worker", "description")
     @classmethod
@@ -274,6 +278,24 @@ class ReopenRequest(BaseModel):
     creator: str
 
     @field_validator("description", "creator")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class CreateFactDirectRequest(BaseModel):
+    description: str
+    scope: str | None = None
+    vuln_type: str | None = None
+    severity: str | None = None
+    parent_fact: str | None = None
+    goal_type: str | None = None
+    status: str | None = None
+
+    @field_validator("description")
     @classmethod
     def validate_non_empty_text(cls, value: str) -> str:
         text = value.strip()

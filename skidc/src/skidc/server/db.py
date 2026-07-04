@@ -117,6 +117,8 @@ _FACT_ADDED_COLUMNS = {
     "vuln_type": "TEXT",
     "severity": "TEXT",
     "parent_fact": "TEXT",
+    "goal_type": "TEXT",
+    "status": "TEXT",
 }
 
 
