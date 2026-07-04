@@ -28,6 +28,24 @@ If Goal is not satisfied and no new intent should be proposed now:
 {"accepted": true, "data": {}}
 ```
 
+## Attack Paths (Optional)
+When facts reveal a viable exploitation chain, include `attack_paths` to document the full path with severity assessment:
+```json
+{"accepted": true, "data": {
+  "intents": [...],
+  "attack_paths": [
+    {
+      "name": "SQL Injection to Admin Takeover",
+      "fact_chain": ["f001", "f003", "f007"],
+      "description": "Login form vulnerable to SQL injection (f001), allows bypassing auth (f003), leading to admin session (f007)",
+      "severity": "critical"
+    }
+  ]
+}}
+```
+
+Severity levels: `critical` (full system compromise), `high` (significant data/access), `medium` (limited impact), `low` (minor/info).
+
 ## Rules
 - First decide whether facts satisfy Goal. If so, `data.complete.from` must come from `Valid facts`, and `data.complete.description` must justify why the confirmed results prove Goal is achieved.
 - If Goal is not satisfied, reflect on why, whether the search has drifted, and whether a corrective intent is needed.
@@ -36,8 +54,19 @@ If Goal is not satisfied and no new intent should be proposed now:
 - Propose at most {max_intents} high-value, non-overlapping directions. Each intent should be an independent, parallelizable exploration path — a clear core insight, not an over-detailed script.
 - An intent may originate from multiple facts. Different intents should cover different dimensions.
 - `intent.from` and `complete.from` may only use ids from `Valid facts`.
+- **Severity assessment**: When facts confirm a vulnerability or exploitation path, include `attack_paths` with appropriate severity (`critical`/`high`/`medium`/`low`). Base severity on actual impact: data exposure, privilege escalation, system compromise.
 
 ## Context
+### Current Phase
+```
+{current_phase}
+```
+
+### Sub-Goals (Potential Targets)
+```
+{sub_goals}
+```
+
 ### Graph
 ```
 {graph_yaml}

@@ -29,6 +29,24 @@ If Goal is not satisfied and no new intent should be proposed now:
 {"accepted": true, "data": {}}
 ```
 
+## Attack Paths (Optional)
+When facts reveal a viable exploitation chain, include `attack_paths` to document the full path with severity assessment:
+```json
+{"accepted": true, "data": {
+  "intents": [...],
+  "attack_paths": [
+    {
+      "name": "IDOR in Order Details",
+      "fact_chain": ["f001", "f003", "f005"],
+      "description": "Order detail API (f001) lacks ownership check (f003), allows viewing other users' orders (f005)",
+      "severity": "high"
+    }
+  ]
+}}
+```
+
+Severity levels: `critical` (full system compromise), `high` (significant data/access), `medium` (limited impact), `low` (minor/info).
+
 ## Rules
 - First decide whether facts satisfy Goal. If so, `data.complete.from` must come from `Valid facts`.
 - If Goal is not satisfied and `Open Intents` is empty, you MUST propose at least one new intent.
@@ -36,6 +54,7 @@ If Goal is not satisfied and no new intent should be proposed now:
 - For Android targets, good intents focus on one concrete step: observe app state, log in, navigate a business flow, capture the related API request, compare two accounts, verify authorization behavior, or record a negative result.
 - `intent.from` and `complete.from` may only use ids from `Valid facts`.
 - Keep intents clear enough that an explore worker can execute them using `$ANDROID_MCP_URL`, adb-backed UI controls, and network history.
+- **Severity assessment**: When facts confirm a vulnerability or exploitation path, include `attack_paths` with appropriate severity (`critical`/`high`/`medium`/`low`). Base severity on actual impact: data exposure, privilege escalation, business logic abuse.
 
 ## Context
 ### Graph
