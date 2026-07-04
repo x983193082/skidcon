@@ -128,8 +128,8 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         fid = next_fact_id(conn, project_id)
 
         conn.execute(
-            "INSERT INTO facts (id, project_id, description, scope, vuln_type, severity, parent_fact) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (fid, project_id, body.description, body.scope, body.vuln_type, body.severity, body.parent_fact),
+            "INSERT INTO facts (id, project_id, description, scope, vuln_type, severity, parent_fact, goal_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (fid, project_id, body.description, body.scope, body.vuln_type, body.severity, body.parent_fact, body.goal_type, body.status),
         )
         conn.execute(
             "UPDATE intents SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ? WHERE id = ? AND project_id = ?",
@@ -149,6 +149,8 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                 vuln_type=body.vuln_type,
                 severity=body.severity,
                 parent_fact=body.parent_fact,
+                goal_type=body.goal_type,
+                status=body.status,
             ),
             intent=intent_to_model(conn, updated, project_id),
         )

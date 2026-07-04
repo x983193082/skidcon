@@ -6,6 +6,7 @@ from skidc.server.db import get_conn
 from skidc.server.models import (
     AttackPath,
     CompleteRequest,
+    CreateFactDirectRequest,
     CreateProjectRequest,
     Fact,
     Hint,
@@ -373,4 +374,28 @@ def reopen_project(project_id: str, body: ReopenRequest):
             project=project_meta_from_row(updated_project),
             fact=Fact(id=fact_id, description=description),
             intent=intent_to_model(conn, updated_intent, project_id),
+        )
+
+
+@router.post("/projects/{project_id}/facts", response_model=Fact, status_code=201)
+def create_fact_direct(project_id: str, body: CreateFactDirectRequest):
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        get_project_or_404(conn, project_id)
+
+        fid = next_fact_id(conn, project_id)
+        conn.execute(
+            "INSERT INTO facts (id, project_id, description, scope, vuln_type, severity, parent_fact, goal_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (fid, project_id, body.description, body.scope, body.vuln_type, body.severity, body.parent_fact, body.goal_type, body.status),
+        )
+
+        return Fact(
+            id=fid,
+            description=body.description,
+            scope=body.scope,
+            vuln_type=body.vuln_type,
+            severity=body.severity,
+            parent_fact=body.parent_fact,
+            goal_type=body.goal_type,
+            status=body.status,
         )
