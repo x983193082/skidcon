@@ -30,3 +30,8 @@ Return only one raw JSON object. Output nothing else. The JSON must be valid.
 ```
 {hints}
 ```
+
+## Scope / Safety Constraints
+```json
+{scope_constraints}
+```

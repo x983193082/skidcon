@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import pytest
 
+from skidc.dispatcher.coverage_profile import (
+    build_web_coverage_profile,
+    normalize_surface_entry,
+)
 from skidc.dispatcher.config import DispatchConfig, WorkerConfig
 from skidc.dispatcher.contracts import (
     extract_reason_attack_paths,
+    extract_reason_handoff,
     parse_json_output,
     validate_bootstrap_execute_payload,
     validate_explore_payload,
@@ -142,12 +147,18 @@ def test_validate_explore_carries_structured_fields():
         {"accepted": True, "data": {
             "description": "IDOR on /admin", "scope": "api.example.com/admin",
             "vuln_type": "IDOR", "severity": "high", "parent_fact": "f002",
+            "verification_of": "f001", "goal_type": "potential_target", "status": "verified",
+            "recon_category": "port_scan", "recon_executed": True, "recon_found_results": False,
+            "recon_tool": "nmap", "recon_target": "api.example.com", "recon_evidence_ref": "log001",
         }}
     )
     assert kind == "fact"
     assert data == {
         "description": "IDOR on /admin", "scope": "api.example.com/admin",
         "vuln_type": "IDOR", "severity": "high", "parent_fact": "f002",
+        "verification_of": "f001", "goal_type": "potential_target", "status": "verified",
+        "recon_category": "port_scan", "recon_executed": True, "recon_found_results": False,
+        "recon_tool": "nmap", "recon_target": "api.example.com", "recon_evidence_ref": "log001",
     }
 
 
@@ -156,26 +167,43 @@ def test_validate_explore_rejection():
 
 
 def test_validate_reason_complete_and_intents():
-    kind, data = validate_reason_payload(
+    kind, data, recon_complete = validate_reason_payload(
         {"accepted": True, "data": {"complete": {"from": ["f001"], "description": "done"}}},
         open_intents_empty=True, max_intents=3,
     )
     assert kind == "complete"
-    kind, data = validate_reason_payload(
-        {"accepted": True, "data": {"intents": [{"from": ["f001"], "description": "a"}, {"from": ["f002"], "description": "b"}]}},
+    assert recon_complete is False
+    kind, data, recon_complete = validate_reason_payload(
+        {
+            "accepted": True,
+            "data": {
+                "intents": [
+                    {"from": ["f001"], "description": "a", "target": "example.test", "port": 443},
+                    {"from": ["f002"], "description": "b"},
+                ],
+                "recon_complete": True,
+            },
+        },
         open_intents_empty=True, max_intents=1,
     )
     assert kind == "intents" and len(data) == 1  # capped to max_intents
+    assert data[0]["target"] == "example.test"
+    assert data[0]["port"] == 443
+    assert recon_complete is True
 
 
-def test_validate_reason_requires_intent_when_no_open_intents():
-    with pytest.raises(ValueError):
-        validate_reason_payload({"accepted": True, "data": {}}, open_intents_empty=True, max_intents=3)
+def test_validate_reason_accepts_checkpointing_noop_when_graph_has_no_new_work():
+    kind, data, recon_complete = validate_reason_payload(
+        {"accepted": True, "data": {}},
+        open_intents_empty=True,
+        max_intents=3,
+    )
+    assert (kind, data, recon_complete) == ("noop", None, False)
 
 
 def test_reason_intents_with_attack_paths_still_valid():
     # intents + attack_paths coexisting must still parse as "intents"
-    kind, data = validate_reason_payload(
+    kind, data, _recon_complete = validate_reason_payload(
         {"accepted": True, "data": {
             "intents": [{"from": ["f001"], "description": "a"}],
             "attack_paths": [{"name": "chain", "fact_chain": ["f001", "f002"], "description": "d", "severity": "high"}],
@@ -183,6 +211,39 @@ def test_reason_intents_with_attack_paths_still_valid():
         open_intents_empty=True, max_intents=3,
     )
     assert kind == "intents" and len(data) == 1
+
+
+def test_validate_reason_accepts_attack_surface_handoff_seed_deck():
+    payload = {"accepted": True, "data": {
+        "recon_complete": True,
+        "attack_surface_map": {
+            "summary": "HTTPS app with API",
+            "surfaces": [{"name": "api", "target": "example.test", "port": 443, "evidence": ["f001"]}],
+        },
+        "explore_seed_deck": {
+            "seeds": [
+                {
+                    "from": ["f001"],
+                    "description": "Probe object authorization",
+                    "target": "example.test",
+                    "port": 443,
+                    "surface_type": "web",
+                    "action_kind": "authz_probe",
+                    "priority": 10,
+                    "suggested_tools": ["curl"],
+                }
+            ],
+        },
+    }}
+
+    kind, data, recon_complete = validate_reason_payload(payload, open_intents_empty=True, max_intents=3)
+    handoff = extract_reason_handoff(payload)
+
+    assert kind == "noop"
+    assert recon_complete is True
+    assert data is None
+    assert handoff["attack_surface_map"]["summary"] == "HTTPS app with API"
+    assert handoff["explore_seed_deck"][0]["action_kind"] == "authz_probe"
 
 
 def test_extract_reason_attack_paths():
@@ -197,8 +258,15 @@ def test_extract_reason_attack_paths():
     }}
     paths = extract_reason_attack_paths(payload)
     assert len(paths) == 2
-    assert paths[0] == {"name": "auth->idor->dump", "fact_chain": ["f001", "f003"], "description": "full chain", "severity": "critical"}
+    assert paths[0] == {
+        "name": "auth->idor->dump",
+        "fact_chain": ["f001", "f003"],
+        "description": "full chain",
+        "severity": "critical",
+        "status": "hypothesis",
+    }
     assert paths[1]["severity"] == "medium"
+    assert paths[1]["status"] == "hypothesis"
 
 
 def test_extract_reason_attack_paths_absent():
@@ -214,3 +282,58 @@ def test_validate_bootstrap_requires_fact_and_complete():
     assert data["fact_description"] == "flag{x}"
     with pytest.raises(ValueError):
         validate_bootstrap_execute_payload({"accepted": True, "data": {"fact": {"description": "only fact"}}})
+
+
+def test_public_upload_listing_does_not_create_authorization_coverage():
+    surface = normalize_surface_entry(
+        {
+            "target": "example.test",
+            "port": 80,
+            "path": "/uploads/",
+            "method": "GET",
+            "surface_type": "route",
+        }
+    )
+    assert surface is not None
+
+    families = {item["test_family"] for item in build_web_coverage_profile(surface)}
+
+    assert "file_path" in families
+    assert "authorization" not in families
+
+
+def test_admin_management_and_object_reference_create_authorization_coverage():
+    surface = normalize_surface_entry(
+        {
+            "target": "example.test",
+            "port": 443,
+            "path": "/admin/users",
+            "method": "POST",
+            "params": ["id"],
+            "surface_type": "form",
+            "auth_context": "admin",
+        }
+    )
+    assert surface is not None
+
+    families = {item["test_family"] for item in build_web_coverage_profile(surface)}
+
+    assert "authorization" in families
+
+
+def test_allowed_support_service_is_optional_and_separate():
+    surface = normalize_surface_entry(
+        {
+            "target": "example.test",
+            "port": 3306,
+            "surface_type": "service",
+        },
+        support_ports=[3306],
+    )
+    assert surface is not None
+
+    profile = build_web_coverage_profile(surface)
+
+    assert len(profile) == 1
+    assert profile[0]["test_family"] == "support_service"
+    assert profile[0]["required"] is False

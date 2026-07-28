@@ -1,83 +1,66 @@
 # Task
-You will receive a YAML snapshot of the task graph. Facts are confirmed objective findings; intents are declared exploration directions. The graph advances from one or more facts, through an intent, to a new fact. Interpret the graph, understand the overall situation and progress, then become an expert for this target.
+Read the Fact鈥揑ntent graph and make one decision:
+1. If existing terminal Facts sufficiently assess Goal, complete from those Facts.
+2. Otherwise, add only the smallest useful set of new Intents.
+3. If neither is justified, return empty data.
 
-Judge two things:
-1. Whether the current facts already satisfy Goal.
-2. If not, whether new intents should be proposed right now.
+Facts and concluded Intent edges are the only causal truth. Coverage, Surface, and
+Hypothesis records are planning/audit context; they are not proof and must not be
+turned into attack paths.
 
-# Output Requirements
-Return only one raw JSON object. Output nothing else. The JSON must be valid, with all quotes properly escaped.
+# Output
+Return one raw JSON object and nothing else.
 
-When rejecting (you must NOT reject):
-```json
-{"accepted": false, "reason": "..."}
-```
+Complete:
+{"accepted": true, "data": {"complete": {"from": ["f001"], "description": "Why these terminal Facts sufficiently assess Goal"}}}
 
-If Goal is satisfied:
-```json
-{"accepted": true, "data": {"complete": {"from": ["f001"], "description": "..."}}}
-```
+Create work:
+{"accepted": true, "data": {"intents": [{"from": ["f001"], "description": "Verify one concrete hypothesis", "target": "example.com", "port": 443, "path": "/admin", "surface_type": "web", "action_kind": "auth_probe", "test_variant": "auth_bypass", "coverage_refs": ["cov003"], "priority": 10, "suggested_tools": ["curl"]}]}}
 
-If Goal is not satisfied but new intents should be proposed:
-```json
-{"accepted": true, "data": {"intents": [{"from": ["f001"], "description": "..."}, {"from": ["f002", "f003"], "description": "..."}]}}
-```
-
-If Goal is not satisfied and no new intent should be proposed now:
-```json
+No justified graph change:
 {"accepted": true, "data": {}}
-```
 
-## Attack Paths (Optional)
-When facts reveal a viable exploitation chain, include `attack_paths` to document the full path with severity assessment:
-```json
-{"accepted": true, "data": {
-  "intents": [...],
-  "attack_paths": [
-    {
-      "name": "SQL Injection to Admin Takeover",
-      "fact_chain": ["f001", "f003", "f007"],
-      "description": "Login form vulnerable to SQL injection (f001), allows bypassing auth (f003), leading to admin session (f007)",
-      "severity": "critical"
-    }
-  ]
-}}
-```
+Recon may additionally set "recon_complete": true only when every required recon
+category is executed. A compact attack_surface_map or explore_seed_deck may be
+included for handoff, but they remain planning data.
 
-Severity levels: `critical` (full system compromise), `high` (significant data/access), `medium` (limited impact), `low` (minor/info).
+# Rules
+- Never output attack_paths, path names, path severity, or narrative chains.
+- Completion is one concluded Intent from terminal Facts to goal; the server
+  derives any attack-path view from that completed graph.
+- Use only ids listed in Valid Facts for every from.
+- Do not use origin, goal, pending planning Facts, Surface rows, Coverage rows,
+  or Hypotheses as real-website completion evidence.
+- Only confirmed or verified vulnerability Facts may become an attack path after
+  they are included in the completion edge.
+- Do not duplicate an Open Intent or recreate a terminal attempt under new wording.
+- New Intents must be evidence-backed, in scope, non-overlapping, and limited to
+  at most {max_intents}. One Intent tests one surface and one canonical variant.
+- In real-website mode, bind at most one coverage_refs id and include structured
+  target/action fields whenever known.
+- Open Intents may continue without new work. An empty Open Intent list does not
+  itself prove completion and does not force speculative work.
+- Failed, inconclusive, negative, excluded, deferred, and untested items remain
+  limitations; do not restate them as successful paths.
 
-## Rules
-- First decide whether facts satisfy Goal. If so, `data.complete.from` must come from `Valid facts`, and `data.complete.description` must justify why the confirmed results prove Goal is achieved.
-- If Goal is not satisfied, reflect on why, whether the search has drifted, and whether a corrective intent is needed.
-- Look at `Open Intents` (declared but not yet concluded). If open intents already cover the known clues, you may decline to add more.
-- If `Open Intents` is empty, you MUST propose at least one new intent.
-- Propose at most {max_intents} high-value, non-overlapping directions. Each intent should be an independent, parallelizable exploration path — a clear core insight, not an over-detailed script.
-- An intent may originate from multiple facts. Different intents should cover different dimensions.
-- `intent.from` and `complete.from` may only use ids from `Valid facts`.
-- **Severity assessment**: When facts confirm a vulnerability or exploitation path, include `attack_paths` with appropriate severity (`critical`/`high`/`medium`/`low`). Base severity on actual impact: data exposure, privilege escalation, system compromise.
-
-## Context
-### Current Phase
-```
+# Context
+## Current Phase
 {current_phase}
-```
 
-### Sub-Goals (Potential Targets)
-```
+## Scope / Safety Constraints
+{scope_constraints}
+
+## Recon Execution Status
+{recon_status}
+
+## Sub-Goals
 {sub_goals}
-```
 
-### Graph
-```
+## Graph
 {graph_yaml}
-```
 
-### Valid facts
-```
+## Valid Facts
 {fact_ids}
-```
 
-### Open Intents
-```
+## Open Intents
 {open_intents}
-```

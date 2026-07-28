@@ -4,7 +4,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
-from skidc.dispatcher.config import DispatchConfig, WorkerConfig
+from skidc.dispatcher.config import DispatchConfig, TaskType, WorkerConfig
 from skidc.dispatcher.runtime.containers import ContainerManager
 from skidc.dispatcher.tasks.common import run_healthcheck
 from skidc.dispatcher.workers.registry import get_driver
@@ -23,6 +23,20 @@ class StartupHealthcheckResult:
     response_preview: str
     stderr_preview: str
     command: str
+
+
+def missing_healthy_task_types(
+    config: DispatchConfig,
+    results: list[StartupHealthcheckResult],
+) -> list[TaskType]:
+    ok_by_worker = {result.worker_name: result.ok for result in results}
+    enabled: set[TaskType] = set()
+    covered: set[TaskType] = set()
+    for worker in config.workers:
+        enabled.update(worker.task_types)
+        if ok_by_worker.get(worker.name, False):
+            covered.update(worker.task_types)
+    return sorted(enabled - covered)
 
 
 def run_startup_healthchecks(
@@ -74,17 +88,24 @@ def run_startup_healthchecks(
     return results
 
 
-def format_failure_summary(results: list[StartupHealthcheckResult]) -> str:
+def format_failure_summary(
+    results: list[StartupHealthcheckResult],
+    config: DispatchConfig | None = None,
+) -> str:
     failed = [result for result in results if not result.ok]
+    missing = missing_healthy_task_types(config, results) if config is not None else []
+    prefix = "startup healthchecks failed"
+    if missing:
+        prefix += f"; no healthy worker for task types: {', '.join(missing)}"
     if not failed:
-        return "startup healthchecks failed for all workers"
+        return prefix
     details = []
     for result in failed:
         preview = result.response_preview or result.stderr_preview or "-"
         details.append(
             f"{result.worker_name}(http={result.http_status or '-'}, code={result.returncode}, preview={preview})"
         )
-    return f"startup healthchecks failed for all workers: {', '.join(details)}"
+    return f"{prefix}: {', '.join(details)}"
 
 
 def _run_worker_healthcheck(

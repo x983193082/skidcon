@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import shlex
 import time
 import uuid
 from dataclasses import dataclass
@@ -16,6 +18,9 @@ HEALTHCHECK_COMMUNICATE_GRACE_SECONDS = 10
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
 GRAPH_SNAPSHOT_ROOT = "/tmp/skidc-prompts"
+ARGV_ARG_PREVIEW_LIMIT = 160
+OPERATION_FIELD_PREVIEW_LIMIT = 500
+GRAPH_SNAPSHOT_RE = re.compile(r"(/tmp/skidc-prompts/[^\s]+/graph\.yaml)")
 LOG = logging.getLogger(__name__)
 
 
@@ -76,6 +81,83 @@ def write_graph_snapshot_reference(
         "Before using the graph, read the entire file and treat its contents as the YAML snapshot "
         "for this Graph section."
     )
+
+
+def format_worker_input(
+    prompt: str,
+    argv: list[str],
+    *,
+    task_type: str,
+    phase: str,
+    worker_name: str,
+    operation: str,
+    project_id: str | None = None,
+    intent_id: str | None = None,
+    intent_description: str | None = None,
+    target: str | None = None,
+    port: int | None = None,
+    surface_type: str | None = None,
+    action_kind: str | None = None,
+    priority: int | None = None,
+    suggested_tools: list[str] | None = None,
+    timeout_seconds: int | None = None,
+) -> str:
+    """Summarize the operation sent to a worker without storing the full prompt.
+
+    The full prompt can be thousands of characters and often repeats the graph.
+    Logs should make the attempted action clear, while keeping prompt text out of
+    persisted task logs and reports.
+    """
+    lines = [
+        f"task_type: {task_type}",
+        f"phase: {phase}",
+        f"operation: {_compact_field(operation)}",
+        f"worker: {worker_name}",
+    ]
+    if project_id:
+        lines.append(f"project_id: {project_id}")
+    if intent_id:
+        lines.append(f"intent_id: {intent_id}")
+    if intent_description:
+        lines.append(f"intent_description: {_compact_field(intent_description)}")
+    for label, value in (
+        ("target", target),
+        ("port", port),
+        ("surface_type", surface_type),
+        ("action_kind", action_kind),
+        ("priority", priority),
+    ):
+        if value is not None:
+            lines.append(f"{label}: {value}")
+    if suggested_tools:
+        lines.append(f"suggested_tools: {', '.join(suggested_tools)}")
+    if timeout_seconds is not None:
+        lines.append(f"timeout_seconds: {timeout_seconds}")
+    lines.append(f"graph_snapshot: {_extract_graph_snapshot_path(prompt) or '(none)'}")
+    lines.append(f"argv_summary: {_summarize_argv(argv)}")
+    return "\n".join(lines)
+
+
+def _extract_graph_snapshot_path(prompt: str) -> str | None:
+    match = GRAPH_SNAPSHOT_RE.search(prompt)
+    return match.group(1) if match else None
+
+
+def _summarize_argv(argv: list[str]) -> str:
+    summarized = []
+    for arg in argv:
+        if "\n" in arg or len(arg) > ARGV_ARG_PREVIEW_LIMIT:
+            summarized.append(f"<omitted long argument chars={len(arg)}>")
+        else:
+            summarized.append(arg)
+    return shlex.join(summarized)
+
+
+def _compact_field(value: str) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= OPERATION_FIELD_PREVIEW_LIMIT:
+        return compact
+    return compact[:OPERATION_FIELD_PREVIEW_LIMIT] + "..."
 
 
 def run_healthcheck(
@@ -177,7 +259,7 @@ def write_conclude_result(
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
-    fact_fields: dict[str, str] | None = None,
+    fact_fields: dict[str, object] | None = None,
 ) -> str:
     return write_conclude_result_with_fact_id(
         client, project_id, intent_id, worker_name, description,
@@ -195,7 +277,7 @@ def write_conclude_result_with_fact_id(
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
-    fact_fields: dict[str, str] | None = None,
+    fact_fields: dict[str, object] | None = None,
 ) -> ConcludeWriteResult:
     response = client.conclude(project_id, intent_id, worker_name, description, fact_fields)
     if response.ok:
@@ -245,3 +327,41 @@ def best_effort_release(client: SkidcClient, project_id: str, intent_id: str, wo
             "release skipped project=%s intent=%s worker=%s status=%s",
             project_id, intent_id, worker_name, response.status_code,
         )
+
+
+def save_task_log(
+    client: SkidcClient,
+    project_id: str,
+    task_type: str,
+    worker_name: str,
+    phase: str,
+    result: ProcessResult,
+    duration_ms: int,
+    intent_id: str | None = None,
+    stdin: str | None = None,
+) -> str | None:
+    """Best-effort: save execution log to server. Failures only log WARNING, never block the main flow."""
+    try:
+        response = client.create_task_log(
+            project_id=project_id,
+            task_type=task_type,
+            intent_id=intent_id,
+            worker_name=worker_name,
+            phase=phase,
+            stdin=stdin,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            return_code=result.returncode,
+            timed_out=result.timed_out,
+            duration_ms=duration_ms,
+        )
+        if response.ok and isinstance(response.data, dict):
+            value = response.data.get("id")
+            return str(value) if value else None
+        LOG.warning(
+            "failed to save task log project=%s phase=%s status=%s",
+            project_id, phase, response.status_code,
+        )
+    except Exception:
+        LOG.warning("failed to save task log project=%s phase=%s", project_id, phase, exc_info=True)
+    return None

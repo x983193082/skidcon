@@ -9,7 +9,7 @@ from skidc.dispatcher.contracts import (
     validate_bootstrap_conclude_payload,
     validate_bootstrap_execute_payload,
 )
-from skidc.dispatcher.prompting import format_hints, load_prompt, render_prompt
+from skidc.dispatcher.prompting import format_hints, format_scope_constraints, load_prompt, render_prompt
 from skidc.dispatcher.protocol.client import SkidcClient
 from skidc.dispatcher.runtime.cancellation import TaskCancellation
 from skidc.dispatcher.runtime.containers import ContainerManager
@@ -18,10 +18,12 @@ from skidc.dispatcher.tasks.common import (
     best_effort_release,
     cancel_reason,
     did_timeout,
+    format_worker_input,
     project_allows_conclude_fallback,
     preview,
     run_healthcheck,
     run_worker_process,
+    save_task_log,
     task_healthcheck_enabled,
     write_conclude_result,
     write_conclude_result_with_fact_id,
@@ -81,6 +83,28 @@ def run_bootstrap_task(
             lease=lease, cancellation=cancellation,
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
+        save_task_log(
+            client, project.project.id, "bootstrap", worker.name, "bootstrap",
+            first, execute_ms, intent_id=intent.id,
+            stdin=format_worker_input(
+                prompt,
+                execute.argv,
+                task_type="bootstrap",
+                phase="bootstrap",
+                worker_name=worker.name,
+                operation="bootstrap initial project exploration",
+                project_id=project.project.id,
+                intent_id=intent.id,
+                intent_description=intent.description,
+                target=intent.target,
+                port=intent.port,
+                surface_type=intent.surface_type,
+                action_kind=intent.action_kind,
+                priority=intent.priority,
+                suggested_tools=intent.suggested_tools,
+                timeout_seconds=config.tasks.bootstrap.timeout,
+            ),
+        )
         session = driver.extract_session(session, first.stdout, first.stderr)
         cancelled = cancel_reason(first, cancellation)
         if cancelled is not None:
@@ -163,6 +187,28 @@ def _try_conclude_fallback(
         lease=lease, cancellation=cancellation,
     )
     conclude_ms = int((time.perf_counter() - conclude_started) * 1000)
+    save_task_log(
+        client, project.project.id, "bootstrap", worker.name, "bootstrap_conclude",
+        result, conclude_ms, intent_id=intent.id,
+        stdin=format_worker_input(
+            prompt,
+            conclude_argv,
+            task_type="bootstrap",
+            phase="bootstrap_conclude",
+            worker_name=worker.name,
+            operation="summarize bootstrap result after execute fallback",
+            project_id=project.project.id,
+            intent_id=intent.id,
+            intent_description=intent.description,
+            target=intent.target,
+            port=intent.port,
+            surface_type=intent.surface_type,
+            action_kind=intent.action_kind,
+            priority=intent.priority,
+            suggested_tools=intent.suggested_tools,
+            timeout_seconds=config.tasks.bootstrap.conclude_timeout,
+        ),
+    )
     cancelled = cancel_reason(result, cancellation)
     if cancelled is not None:
         best_effort_release(client, project.project.id, intent.id, worker.name)
@@ -202,6 +248,7 @@ def _bootstrap_prompt_replacements(project: ProjectDetail) -> dict[str, str]:
         "origin": facts.get("origin", ""),
         "goal": facts.get("goal", ""),
         "hints": format_hints(hints),
+        "scope_constraints": format_scope_constraints(project),
     }
 
 

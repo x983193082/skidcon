@@ -32,11 +32,11 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 }
 
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
-    "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}"),
-    "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
-    "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+    "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}", "{scope_constraints}"),
+    "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{scope_constraints}"),
+    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{scope_constraints}"),
+    "bootstrap.md": ("{origin}", "{goal}", "{hints}", "{scope_constraints}"),
+    "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}", "{scope_constraints}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
@@ -136,6 +136,9 @@ class RuntimeConfig(BaseModel):
     healthcheck_timeout: int = Field(gt=0)
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
     prompt_group: str = Field(min_length=1)
+    server_timeout: float = Field(default=15.0, gt=0)
+    project_detail_timeout: float = Field(default=60.0, gt=0)
+    dispatch_view_timeout: float = Field(default=15.0, gt=0)
 
 
 class WorkerConfig(BaseModel):

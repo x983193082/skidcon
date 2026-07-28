@@ -101,8 +101,23 @@
   .badge.status-stopped { color: #94a3b8; background: rgba(148, 163, 184, 0.1); border-color: rgba(148, 163, 184, 0.3); }
   .badge.status-completed { color: #3b82f6; background: rgba(59, 130, 246, 0.1); border-color: rgba(59, 130, 246, 0.3); }
   .badge.status-failed { color: #ef4444; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); }
+  .badge.status-waiting_retry { color: #f3b34a; background: rgba(243, 179, 74, 0.1); border-color: rgba(243, 179, 74, 0.35); }
+  .badge.status-completion_blocked { color: #ff8f3d; background: rgba(255, 143, 61, 0.1); border-color: rgba(255, 143, 61, 0.4); }
+  .badge.status-stalled { color: #ef4444; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.35); }
+  .blocker-link { cursor: pointer; color: #ff8f3d; }
+  .blocker-link:hover { border-color: rgba(255, 143, 61, 0.75); background: rgba(255, 143, 61, 0.16); }
   .badge.phase-recon { color: #ffa940; background: rgba(255, 169, 64, 0.1); border-color: rgba(255, 169, 64, 0.3); }
   .badge.phase-explore { color: #4ea1ff; background: rgba(78, 161, 255, 0.1); border-color: rgba(78, 161, 255, 0.3); }
+  .badge.mode-ctf { color: #10b981; background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4); }
+  .badge.mode-real { color: #f59e0b; background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.4); }
+  .badge.surface-web { color: #4ea1ff; border-color: rgba(78, 161, 255, 0.45); }
+  .badge.surface-api { color: #22d3ee; border-color: rgba(34, 211, 238, 0.45); }
+  .badge.surface-support_service { color: #f3b34a; border-color: rgba(243, 179, 74, 0.45); }
+  .badge.surface-unclassified { color: #94a3b8; }
+  .badge.result-confirmed { color: #10b981; border-color: rgba(16, 185, 129, 0.45); }
+  .badge.result-limited { color: #f3b34a; border-color: rgba(243, 179, 74, 0.45); }
+  .badge.result-refuted { color: #94a3b8; border-color: rgba(148, 163, 184, 0.45); }
+  .badge.result-informational { color: #a78bfa; border-color: rgba(167, 139, 250, 0.45); }
 
   /* ---- main content ---- */
   .main-content { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; background: var(--bg-canvas); }
@@ -132,6 +147,74 @@
     background-size: 30px 30px;
   }
   .graph-svg { display: block; }
+  .graph-summary {
+    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+    padding: 6px 12px;
+    background: rgba(15, 18, 26, 0.72);
+    border-bottom: 1px solid var(--border-color);
+  }
+  .graph-summary-item {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 10px;
+    border: 1px solid var(--border-color);
+    border-left-width: 4px;
+    border-radius: 6px;
+    background: rgba(20, 24, 34, 0.78);
+    cursor: pointer;
+  }
+  .graph-summary-item:hover { border-color: var(--border-focus); }
+  .graph-summary-item.origin { border-left-color: var(--color-origin); }
+  .graph-summary-item.goal { border-left-color: var(--color-goal); }
+  .graph-summary-id {
+    flex-shrink: 0;
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1;
+  }
+  .graph-summary-item.origin .graph-summary-id { color: var(--color-origin); }
+  .graph-summary-item.goal .graph-summary-id { color: var(--color-goal); }
+  .graph-summary-desc {
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .graph-bottom-panel {
+    flex-shrink: 0;
+    overflow-y: auto;
+    border-top: 1px solid var(--border-color);
+    padding: 8px 12px;
+    position: relative;
+    background: rgba(15, 18, 26, 0.74);
+  }
+  .graph-bottom-resize {
+    height: 8px;
+    margin: -8px -12px 6px;
+    cursor: row-resize;
+    border-bottom: 1px solid rgba(56, 68, 97, 0.55);
+    background: linear-gradient(180deg, rgba(78, 161, 255, 0.16), transparent);
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+  .graph-bottom-resize::after {
+    content: "";
+    display: block;
+    width: 56px;
+    height: 3px;
+    border-radius: 999px;
+    margin: 2px auto 0;
+    background: rgba(150, 165, 190, 0.55);
+  }
   .node-rect {
     rx: 10; ry: 10; cursor: pointer;
     transition: all 0.2s ease;
@@ -198,12 +281,13 @@
 
   /* ---- attack path cards ---- */
   .ap-card {
-    background: rgba(30, 38, 56, 0.6); border-radius: 8px; padding: 16px 20px; margin-bottom: 10px;
+    background: rgba(30, 38, 56, 0.6); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px;
     border: 1px solid rgba(56, 68, 97, 0.4);
   }
   .ap-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   .ap-name { font-weight: 700; font-size: 14px; color: #fff; }
   .ap-desc { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+  .ap-status-reason { font-size: 11px; color: var(--text-muted); margin: -2px 0 8px; }
   .ap-chain {
     color: #4ea1ff; font-family: ui-monospace, monospace; font-size: 11px;
     background: rgba(15, 18, 26, 0.6); padding: 8px 12px; border-radius: 6px;
@@ -211,6 +295,7 @@
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   }
   .ap-arrow { color: var(--text-muted); font-weight: bold; }
+  .ap-step-state { font-size: 10px; color: var(--text-muted); text-transform: uppercase; }
   .link-tag { color: #4ea1ff; cursor: pointer; text-decoration: none; border-bottom: 1px dashed rgba(78, 161, 255, 0.5); transition: 0.2s; padding: 1px 3px; font-weight: 600; }
   .link-tag:hover { color: #79c0ff; border-bottom-style: solid; background: rgba(78, 161, 255, 0.1); }
 
@@ -223,6 +308,23 @@
   .hint-card .hi-id { font-weight: 700; color: var(--color-origin); }
   .hint-card .hi-by { color: var(--text-muted); font-size: 12px; }
   .hint-card .hi-content { margin-top: 2px; }
+  .graph-bottom-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 320px); gap: 12px; align-items: start; }
+  .graph-bottom-layout .sec { margin-top: 0; margin-bottom: 8px; }
+  .graph-aux-panel { border-left: 1px solid var(--border-color); padding-left: 12px; min-height: 100%; }
+  .aux-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .aux-chip {
+    max-width: 100%;
+    border: 1px solid rgba(56, 68, 97, 0.75);
+    border-radius: 6px;
+    padding: 4px 8px;
+    background: rgba(30, 38, 56, 0.45);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .aux-chip:hover { border-color: var(--border-focus); color: var(--text-main); }
+  .aux-chip .aux-id { font-weight: 800; margin-right: 4px; }
+  .aux-chip .aux-kind { color: var(--text-dim); }
 
   /* ---- sub-goals (potential targets) ---- */
   .subgoal-card {
@@ -313,6 +415,121 @@
   .tl-card .tl-desc { color: var(--text-muted); font-size: 13px; margin-top: 2px; }
   .tl-card .tl-time { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
 
+  /* ---- logs tab ---- */
+  .log-filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .log-filters select {
+    background: var(--panel-bg); color: var(--text); border: 1px solid var(--border-color);
+    border-radius: 4px; padding: 4px 8px; font-size: 13px;
+  }
+
+  /* ---- completion blockers ---- */
+  .blocker-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+  .blocker-summary-time { color: var(--text-muted); font-size: 12px; }
+  .blocker-summary-actions { display: flex; gap: 8px; margin-left: auto; }
+  .blocker-action {
+    border: 1px solid var(--border-color); border-radius: 5px; padding: 5px 10px;
+    background: var(--panel-bg-hover); color: var(--text-main); cursor: pointer; font-size: 12px;
+  }
+  .blocker-action:hover { border-color: var(--border-focus); }
+  .blocker-action.danger { color: #ff7b72; border-color: rgba(248,81,73,.45); }
+  .blocker-action.exclude { margin-left: auto; color: #f3b34a; }
+  .blocker-variants {
+    display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; color: var(--text-muted); font-size: 12px;
+  }
+  .blocker-variant { border: 1px solid var(--border-color); border-radius: 4px; padding: 2px 6px; }
+  .blocker-group { margin-bottom: 22px; }
+  .blocker-group-title {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+    color: var(--text-main); font-size: 14px; font-weight: 600;
+  }
+  .blocker-card {
+    padding: 12px 14px; margin-bottom: 6px; background: var(--panel-bg);
+    border-left: 3px solid #ff8f3d; border-radius: 0 6px 6px 0;
+  }
+  .blocker-card.kind-reason { border-left-color: #ef4444; }
+  .blocker-card.kind-fact { border-left-color: var(--color-critical); }
+  .blocker-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .blocker-ref { color: var(--border-focus); font-family: var(--font-mono); font-weight: 700; }
+  .blocker-priority { color: var(--text-muted); font-size: 12px; }
+  .blocker-desc { margin-top: 6px; color: var(--text-main); }
+  .blocker-reason { margin-top: 5px; color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+  .blocker-meta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; color: var(--text-muted); font-size: 12px; }
+  .blocker-ref-link { color: var(--border-focus); cursor: pointer; }
+  .blocker-ref-link:hover { text-decoration: underline; }
+  .log-list { display: flex; flex-direction: column; gap: 8px; }
+  .log-item {
+    background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 6px;
+    padding: 10px 14px; cursor: pointer; transition: background .1s, border-color .15s;
+  }
+  .log-item:hover { background: var(--panel-bg-hover); border-color: var(--border-focus); }
+  .log-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .log-id { font-weight: 800; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+  .log-badge {
+    font-size: 11px; padding: 1px 7px; border-radius: 4px; font-weight: 600; color: #fff;
+  }
+  .log-badge.type-bootstrap { background: #8b5cf6; }
+  .log-badge.type-explore { background: #3b82f6; }
+  .log-badge.type-reason { background: #f59e0b; }
+  .log-badge.type-hypothesis { background: #64748b; }
+  .log-badge.type-confirmed { background: #16865f; }
+  .log-badge.type-inconclusive { background: #b26a00; }
+  .log-badge.type-refuted { background: #b93838; }
+  .log-intent-ref { color: #58a6ff; cursor: pointer; text-decoration: underline; font-size: 12px; }
+  .log-worker { color: var(--text-muted); font-size: 12px; }
+  .log-phase { color: var(--text-muted); font-size: 12px; }
+  .log-meta { display: flex; gap: 10px; font-size: 12px; margin-top: 4px; }
+  .log-status-ok { color: #41d39a; font-weight: 600; }
+  .log-status-fail { color: #f85149; font-weight: 600; }
+  .log-status-timeout { color: #f3b34a; font-weight: 600; }
+  .log-duration { color: var(--text-muted); }
+  .log-time { color: var(--text-muted); }
+  .log-preview {
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--text-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px;
+    max-width: 100%;
+  }
+  .log-empty { color: var(--text-muted); text-align: center; padding: 40px 0; }
+
+  /* log detail modal */
+  .log-modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.65); display: flex;
+    align-items: center; justify-content: center; z-index: 1000;
+  }
+  .log-modal {
+    background: var(--bg); border: 1px solid var(--border-color); border-radius: 10px;
+    width: 92%; max-width: 920px; max-height: 88vh; display: flex; flex-direction: column;
+    overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .log-modal-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 20px; border-bottom: 1px solid var(--border-color);
+  }
+  .log-modal-header h3 { margin: 0; font-size: 16px; }
+  .log-modal-meta {
+    padding: 12px 20px; border-bottom: 1px solid var(--border-color);
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px;
+    font-size: 13px;
+  }
+  .log-modal-meta strong { color: var(--text-muted); margin-right: 4px; }
+  .log-modal-body { flex: 1; overflow-y: auto; padding: 0; }
+  .log-modal-section { padding: 12px 20px; }
+  .log-modal-section h4 { margin: 0 0 6px 0; font-size: 13px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .log-output {
+    background: #0d1117; color: #c9d1d9; border: 1px solid var(--border-color); border-radius: 6px;
+    padding: 12px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px;
+    overflow: auto; white-space: pre-wrap; word-break: break-all; max-height: 280px;
+    line-height: 1.5;
+  }
+  .log-modal-actions {
+    padding: 12px 20px; border-top: 1px solid var(--border-color);
+    display: flex; gap: 8px; justify-content: flex-end;
+  }
+  .log-modal-actions button {
+    padding: 6px 14px; border: 1px solid var(--border-color); border-radius: 5px;
+    background: var(--panel-bg); color: var(--text); cursor: pointer; font-size: 13px;
+  }
+  .log-modal-actions button:hover { background: var(--panel-bg-hover); }
+
   /* ---- detail panel ---- */
   .detail-panel {
     position: relative; background: var(--panel-bg); backdrop-filter: blur(10px);
@@ -355,14 +572,46 @@
   }
   .new-form label { font-size: 13px; color: var(--text-muted); display: block; margin-bottom: 5px; margin-top: 14px; font-weight: 600; }
   .new-form label:first-child { margin-top: 0; }
-  .new-form input, .new-form textarea {
+  .new-form input, .new-form textarea, .new-form select {
     width: 100%; background: var(--bg-canvas); color: var(--text-main); border: 1px solid var(--border-color);
     border-radius: 6px; padding: 10px; font: inherit; font-size: 14px;
   }
-  .new-form input:focus, .new-form textarea:focus { outline: none; border-color: var(--border-focus); }
+  .new-form input:focus, .new-form textarea:focus, .new-form select:focus { outline: none; border-color: var(--border-focus); }
   .new-form textarea { resize: vertical; min-height: 56px; }
   .new-form .form-actions { display: flex; gap: 8px; margin-top: 18px; }
   .new-form .form-actions button { flex: 1; }
+
+  .mode-selector { display: flex; gap: 8px; }
+  .mode-option {
+    flex: 1; display: flex; flex-direction: column; gap: 2px;
+    padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 6px;
+    cursor: pointer; transition: all .15s; background: var(--panel-bg);
+  }
+  .mode-option:hover { border-color: var(--border-focus); }
+  .mode-option.active { border-color: var(--accent); background: rgba(88, 166, 255, 0.08); }
+  .mode-option input[type="radio"] { display: none; }
+  .mode-label { font-size: 13px; font-weight: 600; color: var(--text); }
+  .mode-desc { font-size: 11px; color: var(--text-muted); }
+  .form-section {
+    margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(56, 68, 97, 0.45);
+  }
+  .form-section-title {
+    color: var(--text-muted); font-size: 12px; font-weight: 800; letter-spacing: 0;
+    margin-bottom: 8px;
+  }
+  .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+  .check-row {
+    display: flex; align-items: center; gap: 8px; margin-top: 10px;
+    color: var(--text-muted); font-size: 13px; font-weight: 600;
+  }
+  .check-row input { width: auto; }
+  .recon-toggles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 10px; margin-top: 6px; }
+  @media (max-width: 720px) {
+    .new-form { margin: 18px auto; max-width: 100%; }
+    .form-grid, .recon-toggles { grid-template-columns: 1fr; }
+    .graph-bottom-layout { grid-template-columns: 1fr; }
+    .graph-aux-panel { border-left: 0; border-top: 1px solid var(--border-color); padding-left: 0; padding-top: 8px; }
+  }
 
   .bottom-bar {
     padding: 10px 18px; border-top: 1px solid var(--border-color);
@@ -392,13 +641,19 @@
            @click="selectProject(p.id)">
         <div class="proj-title">{{ p.title }}</div>
         <div class="proj-meta">
-          <span class="badge" :class="'status-' + statusClass(p.status)">{{ statusLabel(p.status) }}</span>
+          <span class="badge" :class="'status-' + statusClass(p.run_state || p.status)">{{ statusLabel(p.run_state || p.status) }}</span>
+          <span class="badge" :class="p.bootstrap_enabled ? 'mode-ctf' : 'mode-real'">{{ p.bootstrap_enabled ? 'CTF' : '真实' }}</span>
           <span v-if="p.phase" class="badge" :class="'phase-' + p.phase">{{ p.phase === 'recon' ? '侦察' : '探索' }}</span>
           <span class="badge">{{ p.fact_count }} 事实</span>
           <span class="badge">{{ p.intent_count }} 意图</span>
           <span v-if="p.reason" class="badge">推理中</span>
+          <button v-if="p.completion_blockers?.length"
+                  class="badge blocker-link"
+                  @click.stop="openBlockers(p.id)">
+            阻塞 {{ p.completion_blockers.length }}
+          </button>
+          </div>
         </div>
-      </div>
     </aside>
 
     <!-- ---- main content ---- -->
@@ -412,6 +667,92 @@
           <textarea v-model="newOrigin" rows="2" placeholder="目标 IP、系统、已知状态"></textarea>
           <label>目标（成功条件）</label>
           <textarea v-model="newGoal" rows="2" placeholder="获取 Shell、捕获 Flag、证明 X"></textarea>
+          <label>模式</label>
+          <div class="mode-selector">
+            <label class="mode-option" :class="{active: newMode === 'ctf'}">
+              <input type="radio" v-model="newMode" value="ctf"/>
+              <span class="mode-label">CTF 模式</span>
+              <span class="mode-desc">智能体自由探索，直接解决目标</span>
+            </label>
+            <label class="mode-option" :class="{active: newMode === 'real'}">
+              <input type="radio" v-model="newMode" value="real"/>
+              <span class="mode-label">真实网站模式</span>
+              <span class="mode-desc">先侦察后探索，需通过 RECON 门控</span>
+            </label>
+          </div>
+          <div v-if="newMode === 'real'" class="form-section">
+            <div class="form-section-title">安全边界</div>
+            <div class="form-grid">
+              <div>
+                <label>允许目标</label>
+                <input v-model="newAllowedTargets" placeholder="127.0.0.1, example.com"/>
+              </div>
+              <div>
+                <label>禁止目标</label>
+                <input v-model="newBlockedTargets" placeholder="admin.other.test"/>
+              </div>
+              <div>
+                <label>允许端口</label>
+                <input v-model="newAllowedPorts" placeholder="8080, 8443"/>
+              </div>
+              <div>
+                <label>禁止端口</label>
+                <input v-model="newBlockedPorts" placeholder="3306, 6379, 9222"/>
+              </div>
+              <div>
+                <label>允许路径</label>
+                <input v-model="newAllowedPaths" placeholder="/xhcms/"/>
+              </div>
+              <div>
+                <label>禁止路径</label>
+                <input v-model="newBlockedPaths" placeholder="/private/, /backup/"/>
+              </div>
+              <div>
+                <label>支撑服务端口</label>
+                <input v-model="newSupportPorts" placeholder="3306"/>
+              </div>
+            </div>
+            <label class="check-row">
+              <input type="checkbox" v-model="newAllowSubdomains"/>
+              <span>允许子域名匹配</span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="newAllowDomainScan"/>
+              <span>允许域名 / 子域名发现</span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" v-model="newPassiveOnly"/>
+              <span>仅被动探测</span>
+            </label>
+
+            <div class="form-section-title" style="margin-top:16px">侦察配置</div>
+            <label>目标类型</label>
+            <select v-model="newTargetType">
+              <option value="domain">域名 / Web</option>
+              <option value="ip">单 IP / 指定主机</option>
+              <option value="api">API</option>
+              <option value="android">Android</option>
+              <option value="mixed">混合目标</option>
+            </select>
+            <div v-if="newTargetType !== 'android'" class="recon-toggles">
+              <label class="check-row">
+                <input type="checkbox" v-model="newReconPortScan" :disabled="newPassiveOnly"/>
+                <span>端口服务探测</span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" v-model="newReconSubdomain" :disabled="newPassiveOnly || !newAllowDomainScan || !newAllowSubdomains || !['domain', 'mixed'].includes(newTargetType)"/>
+                <span>子域名发现</span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" v-model="newReconDirectory" :disabled="newPassiveOnly"/>
+                <span>目录 / API 路径</span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" v-model="newReconAsset" :disabled="newPassiveOnly"/>
+                <span>页面 / JS 资产</span>
+              </label>
+            </div>
+          </div>
           <div class="form-actions">
             <button class="primary" @click="createProject">创建</button>
             <button @click="showNew = false">取消</button>
@@ -424,6 +765,12 @@
       <template v-if="selectedProjId && proj">
         <nav class="tabs-header">
           <div class="tab active" style="pointer-events:none;display:flex;align-items:center;gap:8px">
+            <span class="badge" :class="'status-' + statusClass(proj.project?.run_state || proj.project?.status)" style="font-size:11px;padding:2px 8px">
+              {{ statusLabel(proj.project?.run_state || proj.project?.status) }}
+            </span>
+            <span class="badge" :class="proj.project?.bootstrap_enabled ? 'mode-ctf' : 'mode-real'" style="font-size:11px;padding:2px 8px">
+              {{ proj.project?.bootstrap_enabled ? 'CTF模式' : '真实网站模式' }}
+            </span>
             <span v-if="proj.project?.phase" class="badge" :class="'phase-' + proj.project.phase" style="font-size:11px;padding:2px 8px">
               {{ proj.project.phase === 'recon' ? '侦察阶段' : '探索阶段' }}
             </span>
@@ -438,15 +785,15 @@
         <div class="tab-body">
           <!-- === GRAPH TAB === -->
           <div v-show="currentTab === 'graph'" style="display:flex;flex-direction:column;height:100%">
-            <!-- origin / goal cards -->
-            <div v-if="originFact || goalFact" style="padding:8px 14px;flex-shrink:0;display:flex;gap:12px;background:rgba(15,18,26,0.6);border-bottom:1px solid var(--border-color)">
-              <div v-if="originFact" class="og-card origin" style="flex:1;margin:0" @click="openFact('origin')">
-                <div class="og-id">origin</div>
-                <div class="og-desc">{{ originFact.description }}</div>
+            <!-- compact origin / goal summary -->
+            <div v-if="originFact || goalFact" class="graph-summary">
+              <div v-if="originFact" class="graph-summary-item origin" @click="openFact('origin')" :title="originFact.description">
+                <span class="graph-summary-id">origin</span>
+                <span class="graph-summary-desc">{{ originFact.description }}</span>
               </div>
-              <div v-if="goalFact" class="og-card goal" style="flex:1;margin:0" @click="openFact('goal')">
-                <div class="og-id">goal</div>
-                <div class="og-desc">{{ goalFact.description }}</div>
+              <div v-if="goalFact" class="graph-summary-item goal" @click="openFact('goal')" :title="goalFact.description">
+                <span class="graph-summary-id">goal</span>
+                <span class="graph-summary-desc">{{ goalFact.description }}</span>
               </div>
             </div>
             <!-- graph -->
@@ -470,7 +817,7 @@
                     <rect :x="n.x - n.width/2" :y="n.y - n.height/2" :width="n.width" :height="n.height" rx="8" ry="8"/>
                   </clipPath>
                 </defs>
-                <g :style="{transform: `translate(${pan.x}px, ${pan.y}px) scale(${pan.scale})`}">
+                <g :transform="`translate(${pan.x}, ${pan.y}) scale(${pan.scale})`">
                   <!-- edges -->
                   <path v-for="e in graphEdges" :key="e.id"
                         :d="e.d" class="edge-path" :class="e.status"
@@ -534,56 +881,67 @@
                 </g>
               </svg>
             </div>
-            <!-- orphans -->
-            <div v-if="orphanFacts.length" style="padding:8px 14px;flex-shrink:0;border-top:1px solid var(--border-color);background:rgba(15,18,26,0.6)">
-              <div class="orphans-title">未连接的事实</div>
-              <div class="orphans-list">
-                <div v-for="of in orphanFacts" :key="of.id"
-                     class="orphan-node" :class="{selected: selectedItemId === of.id && selectedItemType === 'fact'}"
-                     @click="openFact(of.id)">
-                  <span :style="{fontWeight:'700',color:sevColor(of.severity)}">{{ of.id }}</span>
-                  <span v-if="of.severity" class="badge" style="margin-left:4px" :style="{color:sevColor(of.severity),borderColor:sevColor(of.severity)}">{{ of.severity }}</span>
-                </div>
-              </div>
-            </div>
             <!-- attack paths + hints below graph -->
-             <div v-if="proj.attack_paths?.length || proj.hints?.length" style="flex-shrink:0;max-height:220px;overflow-y:auto;border-top:1px solid var(--border-color);padding:10px 14px">
-              <div v-if="proj.attack_paths?.length" class="sec">
-                <h2>攻击路径 ({{ proj.attack_paths.length }})</h2>
-                <div v-for="ap in proj.attack_paths" :key="ap.id" class="ap-card">
-                  <div class="ap-header">
-                    <span class="ap-name">{{ ap.id }} — {{ ap.name }}</span>
-                    <span class="severity-tag" :style="{color:sevColor(ap.severity), borderColor:sevColor(ap.severity), border:'1px solid '+sevColor(ap.severity)}">{{ ap.severity }}</span>
+             <div v-if="proj.project || proj.attack_paths?.length || proj.hints?.length || auxiliaryFacts.length"
+                  class="graph-bottom-panel"
+                  :style="{height: attackPanelHeight + 'px'}">
+              <div class="graph-bottom-resize"
+                   title="拖动调整攻击路径区域高度"
+                   @mousedown.stop.prevent="attackPanelResizeStart"></div>
+              <div class="graph-bottom-layout">
+                <div>
+                  <div v-if="proj.attack_paths?.length" class="sec">
+                    <h2>已完成的因果攻击路径 ({{ proj.attack_paths.length }})</h2>
+                    <div class="ap-status-reason">
+                      只从已结束的 Fact–Intent 图反向派生；已验证 Fact 经完成 Intent 连到 goal 后才显示。
+                    </div>
+                    <div v-for="ap in proj.attack_paths" :key="ap.id" class="ap-card">
+                      <div class="ap-header">
+                        <span class="ap-name">{{ ap.id }} — {{ ap.name }}</span>
+                        <span class="log-badge" :class="'type-' + (ap.status || 'hypothesis')">{{ ap.status || 'hypothesis' }}</span>
+                        <span class="severity-tag" :style="{color:sevColor(ap.severity), borderColor:sevColor(ap.severity), border:'1px solid '+sevColor(ap.severity)}">{{ ap.severity }}</span>
+                      </div>
+                      <div class="ap-desc">{{ ap.description }}</div>
+                      <div v-if="ap.status_reason" class="ap-status-reason">{{ ap.status_reason }}</div>
+                      <div v-if="ap.intent_refs?.length" class="ap-status-reason">
+                        因果 Intent：{{ ap.intent_refs.join(' → ') }}
+                      </div>
+                      <div class="ap-chain">
+                        <template v-for="(step, idx) in (ap.steps || [])" :key="step.fact_id">
+                          <span class="link-tag" :title="step.reason" @click="openFact(step.fact_id)">{{ step.fact_id }}</span>
+                          <span class="ap-step-state">{{ step.required ? step.derived_status : 'context' }}</span>
+                          <span v-if="idx < (ap.steps || []).length - 1" class="ap-arrow">→</span>
+                        </template>
+                      </div>
+                      <div v-if="ap.task_log_refs?.length" class="ap-chain">
+                        <span>执行日志:</span>
+                        <span v-for="logId in ap.task_log_refs" :key="logId"
+                              class="link-tag" @click="loadLogDetail(logId)">{{ logId }}</span>
+                      </div>
+                    </div>
                   </div>
-                  <div class="ap-desc">{{ ap.description }}</div>
-                  <div class="ap-chain">
-                    <template v-for="(f, idx) in (ap.fact_chain || [])" :key="f">
-                      <span class="link-tag" @click="openFact(f)">{{ f }}</span>
-                      <span v-if="idx < (ap.fact_chain || []).length - 1" class="ap-arrow">→</span>
-                    </template>
-                  </div>
+                  <div v-else class="empty-state">暂无攻击路径</div>
                 </div>
-              </div>
-              <div v-if="proj.hints?.length" class="sec">
-                <h2>提示</h2>
-                <div v-for="h in proj.hints" :key="h.id" class="hint-card">
-                  <div class="hi-head"><span class="hi-id">{{ h.id }}</span><span class="hi-by">by {{ h.creator }}</span></div>
-                  <div class="hi-content">{{ h.content }}</div>
-                </div>
-              </div>
-            </div>
-            <!-- sub-goals (potential targets) -->
-            <div v-if="subGoals.length" style="flex-shrink:0;max-height:200px;overflow-y:auto;border-top:1px solid var(--border-color);padding:10px 14px">
-              <div class="sec" style="margin-top:0">
-                <h2>子目标 ({{ subGoals.length }})</h2>
-                <div v-for="sg in subGoals" :key="sg.id"
-                     class="subgoal-card" :class="sg.status || 'pending'"
-                     @click="openFact(sg.id)">
-                  <div class="sg-head">
-                    <span class="sg-id">{{ sg.id }}</span>
-                    <span class="sg-status" :class="sg.status || 'pending'">{{ sg.status === 'completed' ? '已完成' : '待探索' }}</span>
+                <div v-if="proj.hints?.length || auxiliaryFacts.length" class="graph-aux-panel">
+                  <div v-if="proj.hints?.length" class="sec">
+                    <h2>提示</h2>
+                    <div v-for="h in proj.hints" :key="h.id" class="hint-card">
+                      <div class="hi-head"><span class="hi-id">{{ h.id }}</span><span class="hi-by">by {{ h.creator }}</span></div>
+                      <div class="hi-content">{{ h.content }}</div>
+                    </div>
                   </div>
-                  <div class="sg-desc">{{ sg.description }}</div>
+                  <div v-if="auxiliaryFacts.length" class="sec">
+                    <h2>辅助事实 ({{ auxiliaryFacts.length }})</h2>
+                    <div class="aux-list">
+                      <button v-for="af in auxiliaryFacts" :key="af.id"
+                              class="aux-chip"
+                              :class="{selected: selectedItemId === af.id && selectedItemType === 'fact'}"
+                              @click="openFact(af.id)">
+                        <span class="aux-id" :style="{color:sevColor(af.severity)}">{{ af.id }}</span>
+                        <span class="aux-kind">{{ af.goal_type === 'potential_target' ? '候选目标' : '未连接' }}</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -603,6 +961,14 @@
               <button v-for="t in allTypes" :key="t"
                       class="filter-btn" :class="{active: filterType === t}"
                       @click="filterType = t; applyFilters()">{{ t }}</button>
+              <span class="flt-label">范围:</span>
+              <button v-for="surface in surfaceFilters" :key="surface"
+                      class="filter-btn" :class="{active: filterSurface === surface}"
+                      @click="filterSurface = surface; applyFilters()">{{ surfaceClassLabel(surface) }}</button>
+              <span class="flt-label">结论:</span>
+              <button v-for="result in resultFilters" :key="result"
+                      class="filter-btn" :class="{active: filterResult === result}"
+                      @click="filterResult = result; applyFilters()">{{ resultClassLabel(result) }}</button>
             </div>
             <div class="filter-results" v-if="filteredFacts.length !== allFacts.length">显示 {{ filteredFacts.length }}/{{ allFacts.length }} 事实</div>
             <div v-for="(items, type) in groupedFilteredFacts" :key="type" class="fact-group">
@@ -619,6 +985,8 @@
                   <div class="fc-row">
                     <span class="fc-id" :style="{color: sevColor(f.severity)}">{{ f.id }}</span>
                     <span class="badge" v-if="f.severity" :style="{color:sevColor(f.severity),borderColor:sevColor(f.severity)}">{{ f.severity }}</span>
+                    <span class="badge" :class="'surface-' + (f.surface_class || 'unclassified')">{{ surfaceClassLabel(f.surface_class) }}</span>
+                    <span class="badge" :class="'result-' + (f.result_class || 'informational')">{{ resultClassLabel(f.result_class) }}</span>
                     <span class="badge" v-if="f.scope">{{ f.scope }}</span>
                   </div>
                   <div class="fc-desc">{{ f.description }}</div>
@@ -672,12 +1040,110 @@
               </div>
             </div>
           </div>
+
+          <!-- === COMPLETION BLOCKERS TAB === -->
+          <div v-show="currentTab === 'blockers'" class="content-scroll">
+            <div class="blocker-summary">
+              <span class="badge" :class="'status-' + statusClass(proj.project?.run_state || proj.project?.status)">
+                {{ statusLabel(proj.project?.run_state || proj.project?.status) }}
+              </span>
+              <span>{{ proj.project?.completion_blockers?.length || 0 }} 个未解决阻塞项</span>
+              <span v-if="proj.project?.last_progress_at" class="blocker-summary-time">
+                最近进展 {{ proj.project.last_progress_at }}
+              </span>
+              <div v-if="proj.project?.status === 'active'" class="blocker-summary-actions">
+                <button class="blocker-action" @click="continueBlockedProject">继续处理</button>
+                <button class="blocker-action danger" @click="stopProject">停止项目</button>
+              </div>
+            </div>
+            <div v-if="!proj.project?.completion_blockers?.length" class="empty-state">当前没有完成阻塞项</div>
+            <section v-for="group in blockerGroups" :key="group.id" class="blocker-group">
+              <h2 class="blocker-group-title">{{ group.label }} <span class="count">({{ group.items.length }})</span></h2>
+              <article v-for="blocker in group.items" :key="blocker.kind + ':' + blocker.ref"
+                       class="blocker-card" :class="'kind-' + blocker.kind">
+                <div class="blocker-head">
+                  <span class="blocker-ref" @click="openBlockerRef(blocker.ref)">{{ blocker.ref }}</span>
+                  <span class="badge">{{ blocker.status }}</span>
+                  <span v-if="blocker.priority != null" class="blocker-priority">priority {{ blocker.priority }}</span>
+                  <button v-if="blocker.kind === 'coverage' && proj.project?.status === 'active'"
+                          class="blocker-action exclude" @click="excludeCoverage(blocker)">
+                    不属于测试范围
+                  </button>
+                </div>
+                <div v-if="blocker.description" class="blocker-desc">{{ blocker.description }}</div>
+                <div class="blocker-reason">{{ blocker.reason }}</div>
+                <div v-if="blocker.kind === 'coverage' && blockerCoverage(blocker)" class="blocker-variants">
+                  <span>{{ blockerCoverage(blocker).surface_group || '-' }}</span>
+                  <span>{{ blockerCoverage(blocker).test_family || '-' }}</span>
+                  <span v-for="variant in blockerCoverage(blocker).test_variants || []"
+                        :key="variant" class="blocker-variant">
+                    {{ variant }}: {{ coverageVariantStatus(blockerCoverage(blocker), variant) }}
+                  </span>
+                </div>
+                <div class="blocker-meta">
+                  <span v-if="blocker.suggested_action">建议：{{ blockerActionLabel(blocker.suggested_action) }}</span>
+                  <span v-if="blocker.evidence_ref">证据：{{ blocker.evidence_ref }}</span>
+                  <span v-if="blocker.updated_at">更新：{{ blocker.updated_at }}</span>
+                  <span v-for="refId in blocker.related_refs || []" :key="refId"
+                        class="blocker-ref-link" @click="openBlockerRef(refId)">{{ refId }}</span>
+                </div>
+                <div v-if="blocker.task_log_refs?.length" class="blocker-meta">
+                  <span>执行日志:</span>
+                  <span v-for="logId in blocker.task_log_refs" :key="logId"
+                        class="blocker-ref-link" @click="loadLogDetail(logId)">{{ logId }}</span>
+                </div>
+              </article>
+            </section>
+          </div>
+
+          <!-- === LOGS TAB === -->
+          <div v-show="currentTab === 'logs'" class="content-scroll">
+            <div class="log-filters">
+              <select v-model="logFilter.taskType" @change="loadTaskLogs">
+                <option value="all">全部任务类型</option>
+                <option value="bootstrap">bootstrap</option>
+                <option value="explore">explore</option>
+                <option value="reason">reason</option>
+              </select>
+              <select v-model="logFilter.intentId" @change="loadTaskLogs">
+                <option value="all">全部 intent</option>
+                <option v-for="i in proj?.intents || []" :key="i.id" :value="i.id">{{ i.id }}</option>
+              </select>
+            </div>
+            <div class="log-list">
+              <div v-if="!taskLogs.length" class="log-empty">暂无执行日志</div>
+              <div v-for="log in taskLogs" :key="log.id" class="log-item" @click="loadLogDetail(log.id)">
+                <div class="log-head">
+                  <span class="log-id">{{ log.id }}</span>
+                  <span class="log-badge" :class="'type-' + log.task_type">{{ log.task_type }}</span>
+                  <span v-if="log.intent_id" class="log-intent-ref" @click.stop="openIntent(log.intent_id)">{{ log.intent_id }}</span>
+                  <span class="log-worker">{{ log.worker_name }}</span>
+                  <span class="log-phase">{{ log.phase }}</span>
+                </div>
+                <div class="log-meta">
+                  <span :class="log.return_code === 0 ? 'log-status-ok' : 'log-status-fail'">
+                    {{ log.return_code === 0 ? '✓ 成功' : '✗ 失败' }}
+                  </span>
+                  <span v-if="log.timed_out" class="log-status-timeout">⏱ 超时</span>
+                  <span class="log-duration">{{ log.duration_ms ? (log.duration_ms / 1000).toFixed(1) + 's' : '-' }}</span>
+                  <span class="log-time">{{ log.created_at }}</span>
+                </div>
+                <div class="log-preview">{{ log.stdin_preview || log.stdout_preview || '(无输入/输出)' }}</div>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <!-- bottom bar for active project -->
-        <div v-if="proj.project?.status === 'active'" class="bottom-bar">
-          <button @click="addHint">+ 添加提示</button>
-          <button @click="stopProject">停止项目</button>
+        <!-- bottom bar for project actions -->
+        <div v-if="proj.project" class="bottom-bar">
+          <template v-if="proj.project?.status === 'active'">
+            <button @click="addHint">+ 添加提示</button>
+            <button @click="switchMode" :title="proj.project?.bootstrap_enabled ? '切换到真实网站模式' : '切换到CTF模式'">
+              {{ proj.project?.bootstrap_enabled ? '切换为真实网站模式' : '切换为CTF模式' }}
+            </button>
+            <button @click="stopProject">停止项目</button>
+          </template>
+          <button @click="downloadReport">导出报告</button>
         </div>
       </template>
     </main>
@@ -698,6 +1164,10 @@
             <div class="info-row"><span class="info-label">类型:</span><span class="info-value">{{ detailFact.vuln_type || 'N/A' }}</span></div>
             <div class="info-row"><span class="info-label">严重度:</span><span class="info-value" :style="{color: sevColor(detailFact.severity)}">{{ detailFact.severity || 'N/A' }}</span></div>
             <div class="info-row"><span class="info-label">范围:</span><span class="info-value">{{ detailFact.scope || 'N/A' }}</span></div>
+            <div class="info-row"><span class="info-label">归属:</span><span class="info-value">{{ surfaceClassLabel(detailFact.surface_class) }}</span></div>
+            <div class="info-row"><span class="info-label">结论:</span><span class="info-value">{{ resultClassLabel(detailFact.result_class) }}</span></div>
+            <div class="info-row"><span class="info-label">状态:</span><span class="info-value">{{ detailFact.status || 'N/A' }}</span></div>
+            <div v-if="detailFact.verification_of" class="info-row"><span class="info-label">复核:</span><span class="info-value"><span class="link-tag" @click="openFact(detailFact.verification_of)">{{ detailFact.verification_of }}</span></span></div>
           </div>
           <div class="info-group">
             <h4>描述</h4>
@@ -705,6 +1175,30 @@
           </div>
           <div class="info-group">
             <h4>关联</h4>
+            <div class="info-row">
+              <span class="info-label">Coverage:</span>
+              <span class="info-value">{{ detailFact.coverage_refs?.length ? detailFact.coverage_refs.join(', ') : '无' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">关联意图:</span>
+              <span class="info-value">
+                <template v-if="detailFact.intent_refs?.length">
+                  <span v-for="intentId in detailFact.intent_refs" :key="intentId"
+                        class="link-tag" @click="openIntent(intentId)">{{ intentId }}</span>
+                </template>
+                <span v-else style="color:var(--text-muted)">无</span>
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">执行日志:</span>
+              <span class="info-value">
+                <template v-if="detailFact.task_log_refs?.length">
+                  <span v-for="logId in detailFact.task_log_refs" :key="logId"
+                        class="link-tag" @click="loadLogDetail(logId)">{{ logId }}</span>
+                </template>
+                <span v-else style="color:var(--text-muted)">无</span>
+              </span>
+            </div>
             <div class="info-row">
               <span class="info-label">父节点:</span>
               <span class="info-value">
@@ -795,10 +1289,50 @@
       </div>
     </aside>
   </div>
+
+  <!-- log detail modal -->
+  <div v-if="selectedLog" class="log-modal-overlay" @click.self="closeLogDetail">
+    <div class="log-modal">
+      <div class="log-modal-header">
+        <h3>执行日志 {{ selectedLog.id }}</h3>
+        <button class="close-btn" @click="closeLogDetail">×</button>
+      </div>
+      <div class="log-modal-meta">
+        <div><strong>任务:</strong> {{ selectedLog.task_type }}</div>
+        <div v-if="selectedLog.intent_id"><strong>Intent:</strong> <span class="log-intent-ref" @click="openIntent(selectedLog.intent_id); closeLogDetail()">{{ selectedLog.intent_id }}</span></div>
+        <div><strong>Worker:</strong> {{ selectedLog.worker_name }}</div>
+        <div><strong>阶段:</strong> {{ selectedLog.phase }}</div>
+        <div><strong>耗时:</strong> {{ selectedLog.duration_ms ? (selectedLog.duration_ms / 1000).toFixed(1) + 's' : '-' }}</div>
+        <div><strong>状态:</strong> <span :class="selectedLog.return_code === 0 ? 'log-status-ok' : 'log-status-fail'">{{ selectedLog.return_code === 0 ? '✓ 成功' : '✗ 失败 (code=' + selectedLog.return_code + ')' }}</span></div>
+        <div v-if="selectedLog.timed_out"><strong>超时:</strong> <span class="log-status-timeout">是</span></div>
+        <div><strong>时间:</strong> {{ selectedLog.created_at }}</div>
+      </div>
+      <div class="log-modal-body">
+        <div class="log-modal-section">
+          <h4>operation input</h4>
+          <pre class="log-output">{{ selectedLog.stdin || '(空)' }}</pre>
+        </div>
+        <div class="log-modal-section">
+          <h4>stdout</h4>
+          <pre class="log-output">{{ selectedLog.stdout || '(空)' }}</pre>
+        </div>
+        <div class="log-modal-section">
+          <h4>stderr</h4>
+          <pre class="log-output">{{ selectedLog.stderr || '(空)' }}</pre>
+        </div>
+      </div>
+      <div class="log-modal-actions">
+        <button @click="copyText(selectedLog.stdin)">复制 input</button>
+        <button @click="copyText(selectedLog.stdout)">复制 stdout</button>
+        <button @click="copyText(selectedLog.stderr)">复制 stderr</button>
+        <button @click="closeLogDetail">关闭</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
-const { createApp, ref, computed, watch, onMounted, nextTick } = Vue;
+const { createApp, ref, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
 
 createApp({
   setup() {
@@ -810,6 +1344,22 @@ createApp({
     const newTitle = ref("");
     const newOrigin = ref("");
     const newGoal = ref("");
+    const newMode = ref("ctf");
+    const newAllowedTargets = ref("");
+    const newBlockedTargets = ref("");
+    const newAllowedPorts = ref("");
+    const newBlockedPorts = ref("");
+    const newAllowedPaths = ref("");
+    const newBlockedPaths = ref("");
+    const newSupportPorts = ref("");
+    const newAllowSubdomains = ref(true);
+    const newAllowDomainScan = ref(true);
+    const newPassiveOnly = ref(false);
+    const newTargetType = ref("domain");
+    const newReconPortScan = ref(true);
+    const newReconSubdomain = ref(true);
+    const newReconDirectory = ref(true);
+    const newReconAsset = ref(true);
     const clock = ref("");
     const currentTab = ref("graph");
     const selectedItemId = ref(null);
@@ -818,13 +1368,21 @@ createApp({
     const filterText = ref("");
     const filterSev = ref("all");
     const filterType = ref("all");
+    const filterSurface = ref("all");
+    const filterResult = ref("all");
     const collapsed = ref({});
+
+    // logs state
+    const taskLogs = ref([]);
+    const selectedLog = ref(null);
+    const logFilter = ref({ taskType: "all", intentId: "all" });
 
     // graph state
     const graphNodes = ref([]);
     const graphEdges = ref([]);
     const svgSize = ref({ w: 100, h: 100 });
     const pan = ref({ x: 60, y: 60, scale: 1 });
+    const graphBounds = ref({ w: 100, h: 100 });
     let isPanning = false, panSX = 0, panSY = 0;
     let graphDagreNodes = {}; // for edge point lookup
 
@@ -833,26 +1391,150 @@ createApp({
     const isResizing = ref(false);
     let resizeSX = 0, resizeSW = 0;
 
+    // attack path panel resize
+    const attackPanelHeight = ref(180);
+    const isAttackPanelResizing = ref(false);
+    let attackResizeSY = 0, attackResizeSH = 0;
+
     // ---- clock ----
     setInterval(() => { clock.value = new Date().toLocaleTimeString(); }, 1000);
     clock.value = new Date().toLocaleTimeString();
 
     // ---- constants ----
     const sevList = ["critical", "high", "medium", "low", "info"];
+    const surfaceFilters = ["all", "web", "api", "support_service", "unclassified"];
+    const resultFilters = ["all", "confirmed", "limited", "refuted", "informational"];
     const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4, null: 5 };
     const sevColorMap = {
       critical: "#ff4d4f", high: "#ffa940", medium: "#2f54eb", low: "#73d13d", info: "#13c2c2"
     };
 
+    watch(newTargetType, (targetType) => {
+      if (targetType === "ip" || targetType === "api") {
+        newReconPortScan.value = true;
+        newReconSubdomain.value = false;
+        newReconDirectory.value = true;
+        newReconAsset.value = true;
+      } else if (targetType === "android") {
+        newReconPortScan.value = false;
+        newReconSubdomain.value = false;
+        newReconDirectory.value = false;
+        newReconAsset.value = false;
+      } else {
+        newReconPortScan.value = true;
+        newReconSubdomain.value = true;
+        newReconDirectory.value = true;
+        newReconAsset.value = true;
+      }
+    });
+
     function sevColor(sev) { return sevColorMap[(sev || "").toLowerCase()] || "var(--text-muted)"; }
+
+    function surfaceClassLabel(value) {
+      return ({
+        all: "全部", web: "Web", api: "API", support_service: "支撑服务", unclassified: "未分类"
+      })[value || "unclassified"] || value;
+    }
+
+    function resultClassLabel(value) {
+      return ({
+        all: "全部", confirmed: "已确认", limited: "受限/未定论",
+        refuted: "已反驳", informational: "信息"
+      })[value || "informational"] || value;
+    }
 
     function sevSort(a, b) { return (SEV_ORDER[a.severity] ?? 5) - (SEV_ORDER[b.severity] ?? 5); }
 
-    const statusLabels = { active: "运行中", stopped: "已停止", completed: "已完成", failed: "已失败" };
+    const statusLabels = {
+      active: "运行中", running: "运行中", waiting_retry: "等待重试",
+      completion_blocked: "完成受阻", stalled: "已停滞",
+      stopped: "已停止", completed: "已完成", failed: "已失败"
+    };
     function statusLabel(s) { return statusLabels[(s || "").toLowerCase()] || s; }
     function statusClass(s) { return (s || "").toLowerCase(); }
 
     function truncate(s, len) { return (s && s.length > len) ? s.substring(0, len) + "…" : (s || ""); }
+
+    function parseTextList(value) {
+      return (value || "")
+        .split(/[\s,;\uFF0C\u3001\uFF1B]+/)
+        .map(v => v.trim())
+        .filter(Boolean);
+    }
+
+    function parsePortList(value) {
+      const ports = [];
+      for (const item of parseTextList(value)) {
+        if (/^\d+\-\d+$/.test(item)) {
+          const [start, end] = item.split("-").map(Number);
+          if (start > end) throw new Error(`端口范围无效: ${item}`);
+          for (let port = start; port <= end; port++) addPort(ports, port);
+        } else {
+          addPort(ports, Number(item));
+        }
+      }
+      return ports;
+    }
+
+    function addPort(ports, port) {
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error("端口必须在 1-65535 之间");
+      }
+      if (!ports.includes(port)) ports.push(port);
+    }
+
+    function buildReconProfile() {
+      if (newTargetType.value === "android") {
+        return {
+          target_type: "android",
+          required_categories: ["android_app", "android_ui", "mobile_api"],
+          optional_categories: ["android_storage"],
+          disabled_categories: ["port_scan", "subdomain", "directory", "asset"]
+        };
+      }
+
+      const required = [];
+      const disabled = [];
+      const activeAllowed = !newPassiveOnly.value;
+      const addCategory = (enabled, category) => {
+        if (enabled) required.push(category);
+        else disabled.push(category);
+      };
+      const domainDiscoveryAllowed = ['domain', 'mixed'].includes(newTargetType.value)
+        && newAllowDomainScan.value && newAllowSubdomains.value;
+      addCategory(activeAllowed && newReconPortScan.value, "port_scan");
+      addCategory(activeAllowed && domainDiscoveryAllowed && newReconSubdomain.value, "subdomain");
+      addCategory(activeAllowed && newReconDirectory.value, "directory");
+      addCategory(activeAllowed && newReconAsset.value, "asset");
+      return {
+        target_type: newTargetType.value,
+        required_categories: required,
+        optional_categories: [],
+        disabled_categories: disabled
+      };
+    }
+
+    function resetNewProjectForm() {
+      newTitle.value = "";
+      newOrigin.value = "";
+      newGoal.value = "";
+      newMode.value = "ctf";
+      newAllowedTargets.value = "";
+      newBlockedTargets.value = "";
+      newAllowedPorts.value = "";
+      newBlockedPorts.value = "";
+      newAllowedPaths.value = "";
+      newBlockedPaths.value = "";
+      newSupportPorts.value = "";
+      newAllowSubdomains.value = true;
+      newAllowDomainScan.value = true;
+      newPassiveOnly.value = false;
+      newTargetType.value = "domain";
+      newReconPortScan.value = true;
+      newReconSubdomain.value = true;
+      newReconDirectory.value = true;
+      newReconAsset.value = true;
+    }
 
     const tabs = computed(() => {
       const d = proj.value;
@@ -860,7 +1542,9 @@ createApp({
         { id: "graph", label: "拓扑图", count: null },
         { id: "facts", label: "事实", count: d ? d.facts.filter(f => f.id !== "origin" && f.id !== "goal").length : 0 },
         { id: "intents", label: "意图", count: d ? d.intents.length : 0 },
-        { id: "timeline", label: "时间线", count: null }
+        { id: "timeline", label: "时间线", count: null },
+        { id: "blockers", label: "阻塞项", count: d ? (d.project?.completion_blockers?.length || 0) : 0 },
+        { id: "logs", label: "执行日志", count: null }
       ];
     });
 
@@ -886,6 +1570,8 @@ createApp({
     }
 
     async function selectProject(id) {
+      const previousId = selectedProjId.value;
+      const previousProject = proj.value;
       selectedProjId.value = id;
       showNew.value = false;
       currentTab.value = "graph";
@@ -895,17 +1581,39 @@ createApp({
       filterText.value = "";
       filterSev.value = "all";
       filterType.value = "all";
+      filterSurface.value = "all";
+      filterResult.value = "all";
       try {
-        const d = await api(`/projects/${id}`);
-        proj.value = d;
+        const dispatchView = await api(`/projects/${id}?view=dispatch`);
+        if (selectedProjId.value !== id) return;
+        proj.value = dispatchView;
         factMap.value = {};
-        if (d.facts) d.facts.forEach(f => { factMap.value[f.id] = f; });
+        if (dispatchView.facts) dispatchView.facts.forEach(f => { factMap.value[f.id] = f; });
         await nextTick();
         computeGraph();
+        await loadTaskLogs();
+
+        // Full evidence and blockers are hydrated after the light planning view is visible.
+        try {
+          const fullView = await api(`/projects/${id}?view=full`);
+          if (selectedProjId.value !== id) return;
+          proj.value = fullView;
+          factMap.value = {};
+          if (fullView.facts) fullView.facts.forEach(f => { factMap.value[f.id] = f; });
+          await nextTick();
+          computeGraph();
+        } catch (detailError) {
+          // Keep the usable light view when the large detail request is temporarily unavailable.
+        }
       } catch (e) {
-        proj.value = null;
-        selectedProjId.value = null;
+        selectedProjId.value = previousId;
+        proj.value = previousProject;
       }
+    }
+
+    async function openBlockers(id) {
+      await selectProject(id);
+      if (selectedProjId.value === id && proj.value) currentTab.value = "blockers";
     }
 
     async function refresh() {
@@ -916,23 +1624,70 @@ createApp({
       }
     }
 
+    async function loadTaskLogs() {
+      if (!selectedProjId.value) return;
+      try {
+        const params = new URLSearchParams();
+        if (logFilter.value.taskType !== "all") params.set("task_type", logFilter.value.taskType);
+        if (logFilter.value.intentId !== "all") params.set("intent_id", logFilter.value.intentId);
+        params.set("limit", "100");
+        taskLogs.value = await api(`/projects/${selectedProjId.value}/logs?${params}`);
+      } catch (e) {
+        taskLogs.value = [];
+      }
+    }
+
+    async function loadLogDetail(logId) {
+      if (!selectedProjId.value) return;
+      try {
+        selectedLog.value = await api(`/projects/${selectedProjId.value}/logs/${logId}`);
+      } catch (e) {
+        selectedLog.value = null;
+      }
+    }
+
+    function closeLogDetail() {
+      selectedLog.value = null;
+    }
+
     async function createProject() {
-      const body = {
-        title: newTitle.value || "untitled",
-        origin: newOrigin.value || "unknown",
-        goal: newGoal.value || "unknown"
-      };
-      const d = await api("/projects", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body)
-      });
-      selectedProjId.value = d.project.id;
-      showNew.value = false;
-      newTitle.value = "";
-      newOrigin.value = "";
-      newGoal.value = "";
-      await refresh();
+      try {
+        const isCtf = newMode.value === "ctf";
+        const body = {
+          title: newTitle.value || "untitled",
+          origin: newOrigin.value || "unknown",
+          goal: newGoal.value || "unknown",
+          mode: isCtf ? "ctf" : "real_website",
+          bootstrap_enabled: isCtf
+        };
+        if (!isCtf) {
+          body.scope_policy = {
+            allowed_targets: parseTextList(newAllowedTargets.value),
+            blocked_targets: parseTextList(newBlockedTargets.value),
+            allowed_ports: parsePortList(newAllowedPorts.value),
+            blocked_ports: parsePortList(newBlockedPorts.value),
+            allowed_paths: parseTextList(newAllowedPaths.value),
+            blocked_paths: parseTextList(newBlockedPaths.value),
+            support_ports: parsePortList(newSupportPorts.value),
+            allow_subdomains: newAllowSubdomains.value,
+            allow_domain_scan: newAllowDomainScan.value,
+            rate_limits: {},
+            passive_only: newPassiveOnly.value
+          };
+          body.recon_profile = buildReconProfile();
+        }
+        const d = await api("/projects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        selectedProjId.value = d.project.id;
+        showNew.value = false;
+        resetNewProjectForm();
+        await refresh();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
     }
 
     async function addHint() {
@@ -946,13 +1701,78 @@ createApp({
       await refresh();
     }
 
+    async function continueBlockedProject() {
+      try {
+        await api("/projects/" + selectedProjId.value + "/blockers/continue", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            note: "Continue the highest-priority completion blocker with one precise alternate method.",
+            creator: "human"
+          })
+        });
+        await refresh();
+        currentTab.value = "blockers";
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    }
+
+    async function excludeCoverage(blocker) {
+      const coverageId = String(blocker.ref || "").split("/", 1)[0];
+      const reason = prompt("请输入不属于本次测试范围的原因:");
+      if (!coverageId || !reason?.trim()) return;
+      try {
+        await api("/projects/" + selectedProjId.value + "/coverage/" + coverageId + "/exclude", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reason: reason.trim(), creator: "human" })
+        });
+        await refresh();
+        currentTab.value = "blockers";
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    }
+
     async function stopProject() {
-      await api(`/projects/${selectedProjId.value}/status`, {
+      if (!confirm("确认停止项目？未解决项会保留在报告中。")) return;
+      try {
+        const updated = await api(`/projects/${selectedProjId.value}/status`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "stopped" })
+        });
+        if (proj.value?.project) {
+          proj.value.project = { ...proj.value.project, ...updated };
+        }
+        projects.value = projects.value.map(project =>
+          project.id === updated.id ? { ...project, ...updated } : project
+        );
+        await loadProjects();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    }
+
+    async function switchMode() {
+      const currentMode = proj.value?.project?.bootstrap_enabled ? "ctf" : "real_website";
+      const targetMode = currentMode === "ctf" ? "real_website" : "ctf";
+      const confirmMsg = targetMode === "real_website"
+        ? "切换到真实网站模式将启用RECON门控，智能体将先进行信息收集。确认切换？"
+        : "切换到CTF模式将禁用RECON门控，智能体将自由探索。确认切换？";
+      if (!confirm(confirmMsg)) return;
+      await api(`/projects/${selectedProjId.value}/mode`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status: "stopped" })
+        body: JSON.stringify({ mode: targetMode })
       });
       await refresh();
+    }
+
+    function downloadReport() {
+      if (!selectedProjId.value) return;
+      window.open(`/projects/${selectedProjId.value}/export?format=report`, "_blank");
     }
 
     // ---- tab switching ----
@@ -961,6 +1781,9 @@ createApp({
       if (filterText.value) filterText.value = "";
       filterSev.value = "all";
       filterType.value = "all";
+      filterSurface.value = "all";
+      filterResult.value = "all";
+      if (t === "logs") loadTaskLogs();
     }
 
     // ---- fact/index helpers ----
@@ -978,6 +1801,8 @@ createApp({
       let arr = allFacts.value;
       if (filterSev.value !== "all") arr = arr.filter(f => f.severity === filterSev.value);
       if (filterType.value !== "all") arr = arr.filter(f => (f.vuln_type || "未分类") === filterType.value);
+      if (filterSurface.value !== "all") arr = arr.filter(f => (f.surface_class || "unclassified") === filterSurface.value);
+      if (filterResult.value !== "all") arr = arr.filter(f => (f.result_class || "informational") === filterResult.value);
       if (filterText.value) {
         const q = filterText.value.toLowerCase();
         arr = arr.filter(f =>
@@ -1006,6 +1831,57 @@ createApp({
       return (proj.value?.intents || []).slice().reverse();
     });
 
+    const blockerGroups = computed(() => {
+      const labels = {
+        coverage: "Coverage",
+        intent: "Intent / 重试",
+        fact: "高危验证",
+        reason: "系统停滞"
+      };
+      const order = ["coverage", "intent", "fact", "reason"];
+      const groups = {};
+      for (const blocker of (proj.value?.project?.completion_blockers || [])) {
+        if (!groups[blocker.kind]) groups[blocker.kind] = [];
+        groups[blocker.kind].push(blocker);
+      }
+      return order.filter(kind => groups[kind]?.length).map(kind => ({
+        id: kind,
+        label: labels[kind],
+        items: groups[kind].slice().sort((a, b) => (b.priority || 0) - (a.priority || 0))
+      }));
+    });
+
+    function blockerCoverage(blocker) {
+      const coverageId = String(blocker?.ref || "").split("/", 1)[0];
+      return (proj.value?.coverage_items || []).find(item => item.id === coverageId) || null;
+    }
+
+    function coverageVariantStatus(coverage, variant) {
+      const result = (coverage?.variant_results || []).find(item => item.variant === variant);
+      return result?.status || "untested";
+    }
+
+    function blockerActionLabel(action) {
+      const labels = {
+        wait_for_worker: "等待当前任务完成",
+        schedule_intent: "调度该意图",
+        wait_for_retry: "等待自动重试",
+        retry_or_replace_intent: "重试或换方法",
+        reconcile_or_schedule: "对账已有事实或创建测试意图",
+        verify_high_risk_fact: "执行高危二次验证",
+        inspect_reason_log_and_retry: "检查 Reason 日志并恢复调度"
+      };
+      return labels[action] || action;
+    }
+
+    function openBlockerRef(refId) {
+      if (factMap.value[refId]) {
+        openFact(refId);
+        return;
+      }
+      if ((proj.value?.intents || []).some(intent => intent.id === refId)) openIntent(refId);
+    }
+
     const originFact = computed(() => factMap.value["origin"] || null);
     const goalFact = computed(() => factMap.value["goal"] || null);
 
@@ -1032,6 +1908,17 @@ createApp({
       }
       mark("origin");
       return proj.value.facts.filter(f => f.id !== "origin" && f.id !== "goal" && !reachable.has(f.id));
+    });
+
+    const auxiliaryFacts = computed(() => {
+      const seen = new Set();
+      const items = [];
+      for (const fact of [...subGoals.value, ...orphanFacts.value]) {
+        if (seen.has(fact.id)) continue;
+        seen.add(fact.id);
+        items.push(fact);
+      }
+      return items;
     });
 
     const sortedTimelineFacts = computed(() => {
@@ -1116,6 +2003,31 @@ createApp({
       document.removeEventListener("mouseup", resizeEnd);
     }
 
+    function attackPanelResizeStart(e) {
+      isAttackPanelResizing.value = true;
+      attackResizeSY = e.clientY;
+      attackResizeSH = attackPanelHeight.value;
+      document.body.style.cursor = "row-resize";
+      document.addEventListener("mousemove", attackPanelResizeMove);
+      document.addEventListener("mouseup", attackPanelResizeEnd);
+    }
+
+    function attackPanelResizeMove(e) {
+      if (!isAttackPanelResizing.value) return;
+      const container = document.querySelector('.tab-body');
+      const maxHeight = Math.max(140, Math.floor((container?.clientHeight || window.innerHeight) * 0.55));
+      attackPanelHeight.value = Math.max(96, Math.min(maxHeight, attackResizeSH + attackResizeSY - e.clientY));
+      requestAnimationFrame(fitGraphToViewport);
+    }
+
+    function attackPanelResizeEnd() {
+      isAttackPanelResizing.value = false;
+      document.body.style.cursor = "";
+      document.removeEventListener("mousemove", attackPanelResizeMove);
+      document.removeEventListener("mouseup", attackPanelResizeEnd);
+      requestAnimationFrame(fitGraphToViewport);
+    }
+
     // ---- graph layout ----
     const NODE_W = 300, NODE_H_BASE = 50, NODE_H_DESC = 68;
     const RANK_SEP = 60, NODE_SEP = 30, MARGIN = 36;
@@ -1125,6 +2037,7 @@ createApp({
       if (!d || !d.facts?.length) {
         graphNodes.value = [];
         graphEdges.value = [];
+        graphBounds.value = { w: 100, h: 100 };
         return;
       }
 
@@ -1227,7 +2140,8 @@ createApp({
         const n = g.node(nid);
         if (n) { sw = Math.max(sw, n.x + n.width / 2 + MARGIN); sh = Math.max(sh, n.y + n.height / 2 + MARGIN); }
       });
-      svgSize.value = { w: sw + 10, h: sh + 10 };
+      graphBounds.value = { w: Math.max(1, sw + 10), h: Math.max(1, sh + 10) };
+      fitGraphToViewport();
 
       // build graph nodes for Vue
       const nodes = [];
@@ -1281,21 +2195,23 @@ createApp({
       }
       graphEdges.value = edges;
 
-      // auto-fit: center graph in viewport
-      setTimeout(() => {
-        const container = document.querySelector('.graph-view');
-        if (container) {
-          const cw = container.clientWidth;
-          const ch = container.clientHeight;
-          const sw = svgSize.value.w, sh = svgSize.value.h;
-          const scale = Math.min(1, (cw - 40) / sw, (ch - 40) / sh);
-          pan.value = {
-            x: Math.max(20, (cw - sw * scale) / 2),
-            y: Math.max(20, (ch - sh * scale) / 2),
-            scale: scale
-          };
-        }
-      }, 50);
+      setTimeout(fitGraphToViewport, 50);
+    }
+
+    function fitGraphToViewport() {
+      const container = document.querySelector('.graph-view');
+      if (!container) return;
+      const cw = Math.max(1, container.clientWidth);
+      const ch = Math.max(1, container.clientHeight);
+      const bw = Math.max(1, graphBounds.value.w);
+      const bh = Math.max(1, graphBounds.value.h);
+      svgSize.value = { w: cw, h: ch };
+      const scale = Math.min(1.35, Math.max(0.15, (cw - 64) / bw), Math.max(0.15, (ch - 64) / bh));
+      pan.value = {
+        x: Math.max(16, (cw - bw * scale) / 2),
+        y: Math.max(16, (ch - bh * scale) / 2),
+        scale
+      };
     }
 
     // badge position helper for SVG
@@ -1333,23 +2249,40 @@ createApp({
     // ---- lifecycle ----
     onMounted(() => {
       loadProjects();
+      window.addEventListener("resize", fitGraphToViewport);
+    });
+    onUnmounted(() => {
+      window.removeEventListener("resize", fitGraphToViewport);
+      document.removeEventListener("mousemove", resizeMove);
+      document.removeEventListener("mouseup", resizeEnd);
+      document.removeEventListener("mousemove", attackPanelResizeMove);
+      document.removeEventListener("mouseup", attackPanelResizeEnd);
     });
 
     return {
-      projects, selectedProjId, proj, showNew, newTitle, newOrigin, newGoal, clock,
+      projects, selectedProjId, proj, showNew, newTitle, newOrigin, newGoal, newMode,
+      newAllowedTargets, newBlockedTargets, newAllowedPorts, newBlockedPorts,
+      newAllowedPaths, newBlockedPaths, newSupportPorts, newAllowSubdomains, newAllowDomainScan, newPassiveOnly,
+      newTargetType, newReconPortScan, newReconSubdomain, newReconDirectory, newReconAsset,
+      clock,
       currentTab, tabs, selectedItemId, selectedItemType, factMap,
-      filterText, filterSev, filterType, collapsed,
-      panelWidth, isResizing, pan,
+      filterText, filterSev, filterType, filterSurface, filterResult, collapsed,
+      surfaceFilters, resultFilters,
+      panelWidth, isResizing, pan, attackPanelHeight,
       graphNodes, graphEdges, svgSize,
       allFacts, allTypes, filteredFacts, groupedFilteredFacts,
-      reversedIntents, sortedTimelineFacts, originFact, goalFact, orphanFacts, subGoals,
+      reversedIntents, sortedTimelineFacts, originFact, goalFact, orphanFacts, subGoals, auxiliaryFacts,
+      blockerGroups,
       detailFact, detailIntent,
-      loadProjects, selectProject, refresh, createProject, addHint, stopProject,
+      taskLogs, selectedLog, logFilter,
+      loadProjects, selectProject, openBlockers, refresh, createProject, addHint, continueBlockedProject, excludeCoverage, stopProject, switchMode, downloadReport,
       switchTab, applyFilters,
+      loadTaskLogs, loadLogDetail, closeLogDetail,
       openFact, openIntent, closeDetail, copyText,
-      resizeStart,
+      resizeStart, attackPanelResizeStart,
       panStart, panMove, panEnd, doZoom,
-      sevColor, sevList, statusLabel, statusClass, truncate,
+      sevColor, sevList, statusLabel, statusClass, truncate, blockerActionLabel, blockerCoverage, coverageVariantStatus, openBlockerRef,
+      surfaceClassLabel, resultClassLabel,
       factChildren, intentsToFact, intentsFromFact,
       computeBadgeEnd
     };

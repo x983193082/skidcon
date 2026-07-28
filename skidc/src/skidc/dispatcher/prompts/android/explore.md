@@ -32,8 +32,14 @@ Normal return:
 - Use `vuln_type` only when meaningful, such as `idor`, `authz`, `info_disclosure`, `business_logic`, `session`, `client_side_validation`, or `negative_result`.
 - Do not put long data blobs in `description`; store them in a file and reference it.
 - If you later receive a conclude-phase instruction in the same session, stop exploring and return the summary JSON right away.
+- Stay within Scope / Safety Constraints. Do not intentionally access blocked targets or ports.
 
 # Context
+## Scope / Safety Constraints
+```json
+{scope_constraints}
+```
+
 ## Graph
 ```
 {graph_yaml}
@@ -48,4 +54,3 @@ Normal return:
 ```
 {intent_description}
 ```
-

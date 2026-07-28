@@ -12,9 +12,11 @@ class RunningTask:
     worker_name: str
     cancellation: TaskCancellation
     intent_id: str | None = None
+    attempt_count: int = 0
     fact_count: int | None = None
     hint_count: int | None = None
     open_intent_count: int | None = None
+    trigger: str | None = None
 
 
 @dataclass(slots=True)

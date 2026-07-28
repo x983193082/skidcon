@@ -7,7 +7,8 @@ from fastapi.staticfiles import StaticFiles
 
 from skidc import __version__
 from skidc.server import db
-from skidc.server.routers import attack_paths, export, hints, intents, projects, settings
+from skidc.server.routers import attack_paths, coverage, export, hints, hypotheses, intents, projects, settings, logs
+from skidc.server.services import reconcile_project_coverage
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -15,6 +16,10 @@ STATIC_DIR = Path(__file__).parent / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.configure(db.DEFAULT_DB)
+    with db.get_conn() as conn:
+        project_rows = conn.execute("SELECT id FROM projects").fetchall()
+        for project_row in project_rows:
+            reconcile_project_coverage(conn, project_row["id"])
     yield
 
 
@@ -30,8 +35,10 @@ app.include_router(projects.router)
 app.include_router(hints.router)
 app.include_router(intents.router)
 app.include_router(attack_paths.router)
+app.include_router(hypotheses.router)
+app.include_router(coverage.router)
 app.include_router(export.router)
-
+app.include_router(logs.router)
 
 @app.get("/", include_in_schema=False)
 def index():

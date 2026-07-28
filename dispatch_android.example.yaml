@@ -22,6 +22,9 @@ runtime:
   healthcheck_timeout: 20
   worker_healthcheck: "startup_only"
   prompt_group: "android"
+  server_timeout: 15
+  dispatch_view_timeout: 15
+  project_detail_timeout: 60
 
 tasks:
   bootstrap:
@@ -46,7 +49,6 @@ workers:
     max_running: 1
     priority: 0
     env:
-      CODEX_MODEL: "qwen3-max"
+      CODEX_MODEL: "qwen3.7-plus"
       CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      OPENAI_API_KEY: "sk-qwen-xxx"
-
+      OPENAI_API_KEY: "<YOUR_OPENAI_API_KEY>"

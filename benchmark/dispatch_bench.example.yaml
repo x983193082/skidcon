@@ -18,6 +18,9 @@ runtime:
   healthcheck_timeout: 20
   worker_healthcheck: "startup_only"
   prompt_group: "default"
+  server_timeout: 15
+  dispatch_view_timeout: 15
+  project_detail_timeout: 60
 
 tasks:
   bootstrap:
@@ -52,7 +55,7 @@ workers:
     env:
       ANTHROPIC_MODEL: "deepseek-v4-flash"
       ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-deepseek-REPLACE_ME"
+      ANTHROPIC_AUTH_TOKEN: "<YOUR_ANTHROPIC_AUTH_TOKEN>"
 
   - name: "deepseek_pro_brain"
     type: "claudecode"
@@ -62,4 +65,4 @@ workers:
     env:
       ANTHROPIC_MODEL: "deepseek-v4-pro"
       ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-deepseek-REPLACE_ME"
+      ANTHROPIC_AUTH_TOKEN: "<YOUR_ANTHROPIC_AUTH_TOKEN>"

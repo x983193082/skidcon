@@ -48,3 +48,9 @@ Only return the following once you have CONFIRMED that Goal has been satisfied:
 {hints}
 ```
 
+## Scope / Safety Constraints
+```json
+{scope_constraints}
+```
+
+Use only the authorized app/emulator, targets, and ports described above.

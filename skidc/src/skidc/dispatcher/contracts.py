@@ -29,14 +29,17 @@ def _looks_like_reason_data(payload: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
     keys = set(payload)
-    if keys == {"complete"}:
+    metadata_keys = {"attack_paths", "attack_surface_map", "explore_seed_deck", "recon_complete"}
+    if "complete" in keys and keys <= {"complete", *metadata_keys}:
         complete = payload["complete"]
         return isinstance(complete, dict) and "from" in complete and "description" in complete
-    if "intents" in keys and keys <= {"intents", "attack_paths"}:
+    if "intents" in keys and keys <= {"intents", *metadata_keys}:
         return isinstance(payload["intents"], list)
-    if keys == {"intent"}:
+    if "intent" in keys and keys <= {"intent", *metadata_keys}:
         intent = payload["intent"]
         return isinstance(intent, dict) and "from" in intent and "description" in intent
+    if keys and keys <= metadata_keys:
+        return "attack_surface_map" in keys or "explore_seed_deck" in keys
     return False
 
 
@@ -56,25 +59,42 @@ def _looks_like_bootstrap_conclude_data(payload: dict[str, Any]) -> bool:
 
 
 def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
-    # description is required; scope/vuln_type/severity/parent_fact are optional extras.
+    # description is required; the rest are optional fact metadata fields.
     return isinstance(payload, dict) and "description" in payload
 
 
-_EXPLORE_OPTIONAL_FIELDS = ("scope", "vuln_type", "severity", "parent_fact")
+_EXPLORE_STRING_FIELDS = (
+    "scope",
+    "vuln_type",
+    "severity",
+    "parent_fact",
+    "verification_of",
+    "goal_type",
+    "status",
+    "recon_category",
+    "recon_tool",
+    "recon_target",
+    "recon_evidence_ref",
+    "kind",
+    "summary",
+    "created_by",
+)
+_EXPLORE_BOOL_FIELDS = ("recon_executed", "recon_found_results")
 
 
 def validate_reason_payload(
     payload: dict[str, Any], open_intents_empty: bool, max_intents: int,
-) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None]:
+) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None, bool]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
-        return "rejected", None
+        return "rejected", None, False
     if accepted is None:
         if not _looks_like_reason_data(payload):
             raise ValueError("accepted must be true or false")
         data = payload
     if not isinstance(data, dict):
         raise ValueError("accepted must be true or false")
+    recon_complete = bool(data.pop("recon_complete", False))
     complete = data.get("complete")
     intents = data.get("intents")
     # backward compat: accept singular "intent" key from models
@@ -87,22 +107,59 @@ def validate_reason_payload(
             raise ValueError("complete and intents cannot coexist")
         if not isinstance(complete, dict) or "from" not in complete or "description" not in complete:
             raise ValueError("invalid complete payload")
-        return "complete", complete
+        return "complete", complete, recon_complete
     if intents is not None:
         if not isinstance(intents, list):
             raise ValueError("intents must be an array")
         for i, intent in enumerate(intents):
             if not isinstance(intent, dict) or "from" not in intent or "description" not in intent:
                 raise ValueError(f"invalid intent at index {i}")
-        if not intents and open_intents_empty:
-            raise ValueError("intents must not be empty when open_intents is empty")
         intents = intents[:max_intents]
         if not intents:
-            return "noop", None
-        return "intents", intents
-    if open_intents_empty:
-        raise ValueError("intents is required when open_intents is empty")
-    return "noop", None
+            return "noop", None, recon_complete
+        return "intents", intents, recon_complete
+    if any(key in data for key in ("attack_surface_map", "explore_seed_deck", "attack_paths")):
+        return "noop", None, recon_complete
+    return "noop", None, recon_complete
+
+
+def _normalize_explore_seed_deck(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        value = value.get("seeds")
+    if not isinstance(value, list):
+        return []
+    seeds: list[dict[str, Any]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        fact_ids = entry.get("from")
+        description = entry.get("description")
+        if not isinstance(fact_ids, list) or not fact_ids:
+            continue
+        if not all(isinstance(fact_id, str) and fact_id.strip() for fact_id in fact_ids):
+            continue
+        if not isinstance(description, str) or not description.strip():
+            continue
+        seed = dict(entry)
+        seed["from"] = [fact_id.strip() for fact_id in fact_ids]
+        seed["description"] = description.strip()
+        seeds.append(seed)
+    return seeds
+
+
+def extract_reason_handoff(payload: dict[str, Any]) -> dict[str, Any]:
+    accepted, data = _unwrap_wrapped_payload(payload)
+    if accepted is False:
+        return {"attack_surface_map": None, "explore_seed_deck": []}
+    if data is None:
+        data = payload if isinstance(payload, dict) else {}
+    attack_surface_map = data.get("attack_surface_map")
+    if not isinstance(attack_surface_map, dict):
+        attack_surface_map = None
+    return {
+        "attack_surface_map": attack_surface_map,
+        "explore_seed_deck": _normalize_explore_seed_deck(data.get("explore_seed_deck")),
+    }
 
 
 def extract_reason_attack_paths(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -131,11 +188,16 @@ def extract_reason_attack_paths(payload: dict[str, Any]) -> list[dict[str, Any]]
         if not isinstance(description, str) or not description.strip():
             continue
         severity = entry.get("severity")
+        status = entry.get("status")
+        normalized_status = status.strip() if isinstance(status, str) and status.strip() else "hypothesis"
+        if normalized_status not in ("hypothesis", "confirmed", "inconclusive", "refuted"):
+            normalized_status = "hypothesis"
         paths.append({
             "name": name.strip(),
             "fact_chain": [c.strip() for c in chain],
             "description": description.strip(),
             "severity": severity.strip() if isinstance(severity, str) and severity.strip() else "medium",
+            "status": normalized_status,
         })
     return paths
 
@@ -193,7 +255,7 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
     return "fact", fact_description.strip()
 
 
-def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, str] | None]:
+def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -206,9 +268,32 @@ def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, st
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description is required")
-    result: dict[str, str] = {"description": description.strip()}
-    for field in _EXPLORE_OPTIONAL_FIELDS:
+    result: dict[str, Any] = {"description": description.strip()}
+    for field in _EXPLORE_STRING_FIELDS:
         value = data.get(field)
         if isinstance(value, str) and value.strip():
             result[field] = value.strip()
+    for field in _EXPLORE_BOOL_FIELDS:
+        value = data.get(field)
+        if isinstance(value, bool):
+            result[field] = value
+    for field in ("subject", "data"):
+        value = data.get(field)
+        if isinstance(value, dict):
+            result[field] = dict(value)
+    for field in ("parent_fact_ids", "evidence_refs"):
+        value = data.get(field)
+        if isinstance(value, list):
+            result[field] = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    confidence = data.get("confidence")
+    if isinstance(confidence, (int, float)) and 0 <= float(confidence) <= 1:
+        result["confidence"] = float(confidence)
+    schema_version = data.get("schema_version")
+    if isinstance(schema_version, int) and schema_version >= 1:
+        result["schema_version"] = schema_version
+    observed_surfaces = data.get("observed_surfaces")
+    if isinstance(observed_surfaces, list):
+        result["observed_surfaces"] = [
+            dict(surface) for surface in observed_surfaces[:100] if isinstance(surface, dict)
+        ]
     return "fact", result

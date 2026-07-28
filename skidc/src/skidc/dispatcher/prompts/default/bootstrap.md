@@ -37,3 +37,10 @@ Only return the following once you have CONFIRMED that Goal has been satisfied:
 ```
 {hints}
 ```
+
+## Scope / Safety Constraints
+```json
+{scope_constraints}
+```
+
+Stay within the allowed targets and ports. Do not intentionally access blocked targets or ports.

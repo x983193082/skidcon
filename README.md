@@ -30,7 +30,7 @@ reasoning.
 
 | Capability | Description |
 |------------|-------------|
-| **Phased pentest with gate control** | RECON → Explore phase transition requires evidence across four categories (port scan, subdomain, directory, asset) before exploitation begins |
+| **Phased pentest with gate control** | RECON → Explore phase transition is driven by the project's `recon_profile`, so domain, IP, API, Android, and mixed targets can use different required evidence |
 | **Android MCP Bridge** | 18 HTTP endpoints for mobile app control — UI interaction, screenshot, network capture — seamlessly integrated into the pentest workflow |
 | **Fact–intent task graph** | Every confirmed finding (fact) and exploration direction (intent) is tracked, visualized, and used to drive the next reasoning cycle |
 | **Attack path annotation** | Exploitation chains are automatically identified with severity assessment (critical / high / medium / low) |
@@ -84,7 +84,7 @@ preserved instead of being thrown away.
 ### Phased pentest with RECON gate
 
 When a project starts in `recon` phase (real-website mode), the dispatcher enforces a
-**gate check** before allowing the reason cycle to proceed to exploitation:
+profile-aware **gate check** before allowing the workflow to proceed to exploitation:
 
 | RECON Category | Evidence Required |
 |----------------|-------------------|
@@ -93,9 +93,12 @@ When a project starts in `recon` phase (real-website mode), the dispatcher enfor
 | Directory | ffuf / gobuster / dirsearch path discovery |
 | Asset | katana / crawler results with URLs and JS files |
 
-All four categories must be covered before the system transitions from `recon` to `explore`
-phase. When the gate passes, potential sub-targets (subdomains, open services, interesting
-paths) are automatically extracted and written to the graph as new facts.
+Only the categories listed in the project's `recon_profile.required_categories` must be
+covered before the system transitions from `recon` to `explore`. For example, a single-IP
+assessment can disable subdomain enumeration, while an Android assessment can require
+`android_app`, `android_ui`, and `mobile_api` instead of web categories. When the gate
+passes, potential sub-targets (subdomains, open services, interesting paths) are extracted
+and written to the graph as new facts without duplicating them after dispatcher restarts.
 
 ---
 
@@ -115,17 +118,17 @@ A worker's **`type`** selects the *agent CLI loop*; the worker's **`env`** selec
 - name: "claudecode_deepseek"
   type: "claudecode"
   env:
-    ANTHROPIC_MODEL: "deepseek-chat"
+    ANTHROPIC_MODEL: "deepseek-v4-flash"
     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-    ANTHROPIC_AUTH_TOKEN: "sk-deepseek-xxx"
+    ANTHROPIC_AUTH_TOKEN: "<YOUR_ANTHROPIC_AUTH_TOKEN>"
 
 # Run Qwen through the Codex agent loop:
 - name: "codex_qwen"
   type: "codex"
   env:
-    CODEX_MODEL: "qwen3-max"
+    CODEX_MODEL: "qwen3.7-plus"
     CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    OPENAI_API_KEY: "sk-qwen-xxx"
+    OPENAI_API_KEY: "<YOUR_OPENAI_API_KEY>"
 ```
 
 Swapping models is a config edit. Adding a new backend is one new driver file in
@@ -252,6 +255,10 @@ notepad dispatch.yaml                  # fill in ANTHROPIC_AUTH_TOKEN / OPENAI_A
 docker compose up -d --build
 ```
 
+`dispatch.yaml` is ignored by git and is meant to stay local. If a real provider key was
+ever committed or shared, rotate it in the provider console; replacing it with a placeholder
+in this repository does not invalidate the old key.
+
 `docker compose up -d --build` will:
 - build `skidc-app` (the server + dispatcher image) from the root `Dockerfile`
 - start `skidc-server` (port 8000) and `skidc-dispatcher`
@@ -264,7 +271,7 @@ To verify:
 docker ps --filter "name=skidc" --format "table {{.Names}}\t{{.Status}}"
 # Expect: skidc-server (healthy), skidc-dispatcher (Up)
 
-curl http://127.0.0.1:8000/api/projects
+curl http://127.0.0.1:8000/projects
 # Expect: [] (empty project list)
 ```
 
@@ -313,6 +320,42 @@ using the `mock` worker.
    - **Hints** (optional): things you already know (open ports, banners, credentials)
 3. Submit. The dispatcher picks a worker, spawns a container, and starts the pentest loop.
 
+For real websites, define the safety boundary at project creation time. The UI exposes
+these fields, and the same structure can be sent to the API:
+
+```json
+{
+  "title": "authorized web assessment",
+  "origin": "https://app.example.test",
+  "goal": "find authorization flaws within the agreed scope",
+  "mode": "real_website",
+  "bootstrap_enabled": false,
+  "scope_policy": {
+    "allowed_targets": ["app.example.test", "api.example.test"],
+    "blocked_targets": ["admin.example.test"],
+    "allowed_ports": [80, 443],
+    "blocked_ports": [22],
+    "allowed_paths": ["/app/"],
+    "blocked_paths": ["/private/"],
+    "support_ports": [3306],
+    "allow_subdomains": false,
+    "allow_domain_scan": false,
+    "rate_limits": {},
+    "passive_only": false
+  },
+  "recon_profile": {
+    "target_type": "domain",
+    "required_categories": ["port_scan", "subdomain", "directory", "asset"],
+    "optional_categories": [],
+    "disabled_categories": []
+  }
+}
+```
+
+The dispatcher injects this policy into worker prompts and performs basic structured
+intent checks before dispatch, so obvious out-of-scope targets, blocked ports, and
+passive-only violations are skipped instead of being executed.
+
 ### Watch progress
 
 | What you want to see | Where to look |
@@ -353,7 +396,7 @@ The agent CLI loop and the LLM behind it are decoupled. To switch:
 |------|---------------|--------------|
 | DeepSeek (Claude Code loop) | `claudecode` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_AUTH_TOKEN` |
 | Qwen (Codex loop) | `codex` | `CODEX_BASE_URL`, `CODEX_MODEL`, `OPENAI_API_KEY` |
-| Anthropic Claude (real) | `claudecode` | `ANTHROPIC_BASE_URL=https://api.anthropic.com`, `ANTHROPIC_MODEL=claude-sonnet-4-5`, `ANTHROPIC_AUTH_TOKEN=sk-ant-...` |
+| Anthropic Claude (real) | `claudecode` | `ANTHROPIC_BASE_URL=https://api.anthropic.com`, `ANTHROPIC_MODEL=claude-sonnet-4-5`, `ANTHROPIC_AUTH_TOKEN=<YOUR_ANTHROPIC_AUTH_TOKEN>` |
 
 3. Restart the dispatcher — no rebuild required:
 

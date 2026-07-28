@@ -26,7 +26,7 @@ Skidc 是一个自动化渗透测试平台，利用多个大语言模型驱动�
 
 | 能力 | 说明 |
 |------------|-------------|
-| **分阶段渗透与门控** | RECON → Explore 阶段切换需满足四类证据（端口扫描、子域名、目录、资产）后才进入漏洞利用 |
+| **分阶段渗透与门控** | RECON → Explore 阶段切换由项目的 `recon_profile` 驱动，域名、IP、API、Android、混合目标可使用不同的必需证据 |
 | **Android MCP 桥接** | 18 个 HTTP 端点用于移动应用控制——UI 交互、截图、网络抓包——无缝集成到渗透测试流程 |
 | **事实-意图任务图谱** | 每条确认的发现（fact）和探索方向（intent）均被追踪、可视化，并驱动下一轮推理 |
 | **攻击路径标注** | 自动识别利用链并评估严重程度（严重 / 高 / 中 / 低） |
@@ -77,8 +77,8 @@ Skidc 是一个自动化渗透测试平台，利用多个大语言模型驱动�
 
 ### 分阶段渗透与 RECON 门控
 
-当项目以 `recon` 阶段启动（真实网站模式）时，调度器在允许推理循环进入漏洞利用前
-强制执行**门控检查**：
+当项目以 `recon` 阶段启动（真实网站模式）时，调度器在允许工作流进入漏洞利用前
+强制执行基于 profile 的**门控检查**：
 
 | RECON 类别 | 所需证据 |
 |----------------|-------------------|
@@ -87,8 +87,10 @@ Skidc 是一个自动化渗透测试平台，利用多个大语言模型驱动�
 | 目录 | ffuf / gobuster / dirsearch 路径发现 |
 | 资产 | katana / 爬虫结果，包含 URL 和 JS 文件 |
 
-四类全部覆盖后，系统才从 `recon` 阶段转入 `explore` 阶段。门控通过后，潜在子目标
-（子域名、开放服务、可疑路径）自动提取并作为新事实写入图谱。
+只有项目 `recon_profile.required_categories` 中列出的类别必须覆盖，系统才会从 `recon`
+阶段转入 `explore` 阶段。例如单 IP 评估可以禁用子域名枚举，Android 评估可以要求
+`android_app`、`android_ui`、`mobile_api`，而不是 Web 类别。门控通过后，潜在子目标
+（子域名、开放服务、可疑路径）会自动提取并作为新事实写入图谱，调度器重启后不会重复写入同一目标。
 
 ---
 
@@ -108,17 +110,17 @@ worker 的 **`type`** 选择*智能体 CLI 循环*；worker 的 **`env`** 选择
 - name: "claudecode_deepseek"
   type: "claudecode"
   env:
-    ANTHROPIC_MODEL: "deepseek-chat"
+    ANTHROPIC_MODEL: "deepseek-v4-flash"
     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-    ANTHROPIC_AUTH_TOKEN: "sk-deepseek-xxx"
+    ANTHROPIC_AUTH_TOKEN: "<YOUR_ANTHROPIC_AUTH_TOKEN>"
 
 # 通过 Codex 智能体循环运行 Qwen：
 - name: "codex_qwen"
   type: "codex"
   env:
-    CODEX_MODEL: "qwen3-max"
+    CODEX_MODEL: "qwen3.7-plus"
     CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    OPENAI_API_KEY: "sk-qwen-xxx"
+    OPENAI_API_KEY: "<YOUR_OPENAI_API_KEY>"
 ```
 
 切换模型只需编辑配置。添加新后端只需在 `workers/adapters/` 中新增一个驱动文件。
@@ -242,6 +244,9 @@ notepad dispatch.yaml                  # 填入 ANTHROPIC_AUTH_TOKEN / OPENAI_AP
 docker compose up -d --build
 ```
 
+`dispatch.yaml` 已被 git 忽略，应该只保留在本地。如果真实 provider key 曾经被提交或分享过，
+请在供应商后台轮换；把仓库里的内容替换成占位符并不会让旧 key 自动失效。
+
 `docker compose up -d --build` 将：
 - 从根目录 `Dockerfile` 构建 `skidc-app`（server + dispatcher 镜像）
 - 启动 `skidc-server`（端口 8000）和 `skidc-dispatcher`
@@ -254,7 +259,7 @@ docker compose up -d --build
 docker ps --filter "name=skidc" --format "table {{.Names}}\t{{.Status}}"
 # 期望: skidc-server (healthy), skidc-dispatcher (Up)
 
-curl http://127.0.0.1:8000/api/projects
+curl http://127.0.0.1:8000/projects
 # 期望: []（空项目列表）
 ```
 
@@ -302,6 +307,40 @@ uv run --group dev pytest
    - **Hints（提示）**（可选）：你已知的信息（开放端口、横幅、凭证）
 3. 提交。调度器选择 worker、生成容器并启动渗透测试循环。
 
+真实网站项目应在创建时定义安全边界。UI 已提供这些输入栏，同样的结构也可以直接发给 API：
+
+```json
+{
+  "title": "authorized web assessment",
+  "origin": "https://app.example.test",
+  "goal": "find authorization flaws within the agreed scope",
+  "mode": "real_website",
+  "bootstrap_enabled": false,
+  "scope_policy": {
+    "allowed_targets": ["app.example.test", "api.example.test"],
+    "blocked_targets": ["admin.example.test"],
+    "allowed_ports": [80, 443],
+    "blocked_ports": [22],
+    "allowed_paths": ["/app/"],
+    "blocked_paths": ["/private/"],
+    "support_ports": [3306],
+    "allow_subdomains": false,
+    "allow_domain_scan": false,
+    "rate_limits": {},
+    "passive_only": false
+  },
+  "recon_profile": {
+    "target_type": "domain",
+    "required_categories": ["port_scan", "subdomain", "directory", "asset"],
+    "optional_categories": [],
+    "disabled_categories": []
+  }
+}
+```
+
+调度器会把这些约束注入 worker prompt，并在派发前对结构化 intent 做基础检查；
+明显越界的目标、被阻塞的端口、以及违反 `passive_only` 的主动动作会被跳过。
+
 ### 查看进度
 
 | 想看的内容 | 查看位置 |
@@ -342,7 +381,7 @@ docker compose up -d
 |------|---------------|--------------|
 | DeepSeek（Claude Code 循环） | `claudecode` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_AUTH_TOKEN` |
 | Qwen（Codex 循环） | `codex` | `CODEX_BASE_URL`, `CODEX_MODEL`, `OPENAI_API_KEY` |
-| Anthropic Claude（官方） | `claudecode` | `ANTHROPIC_BASE_URL=https://api.anthropic.com`, `ANTHROPIC_MODEL=claude-sonnet-4-5`, `ANTHROPIC_AUTH_TOKEN=sk-ant-...` |
+| Anthropic Claude（官方） | `claudecode` | `ANTHROPIC_BASE_URL=https://api.anthropic.com`, `ANTHROPIC_MODEL=claude-sonnet-4-5`, `ANTHROPIC_AUTH_TOKEN=<YOUR_ANTHROPIC_AUTH_TOKEN>` |
 
 3. 重启 dispatcher——无需重新构建：
 

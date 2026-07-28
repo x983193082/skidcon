@@ -25,6 +25,11 @@ Normal return:
 - Do not put long data blobs in `description`; store them in a file and reference it.
 
 # Context
+## Scope / Safety Constraints
+```json
+{scope_constraints}
+```
+
 ## Graph
 ```
 {graph_yaml}
@@ -39,4 +44,3 @@ Normal return:
 ```
 {intent_description}
 ```
-

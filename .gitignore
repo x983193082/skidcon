@@ -16,6 +16,8 @@ venv/
 # Local runtime data + secrets
 datas/
 dispatch.yaml
+dispatch.local.yaml
+dispatch.*.local.yaml
 *.db
 *.db-wal
 *.db-journal
@@ -28,7 +30,20 @@ dispatch.yaml
 
 # pytest
 .pytest_cache/
+.pytest-*/
+.test-deps/
 
 # Claude Code
 CLAUDE.md
 .claude/
+
+# Local agent metadata and code indexes
+.agent/
+.agents/
+.codegraph/
+.codex/
+
+# Local implementation plans and remediation notes
+/plans/
+*_PLAN.md
+*_REMEDIATION.md

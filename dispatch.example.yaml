@@ -27,6 +27,9 @@ runtime:
   worker_healthcheck: "startup_only"
   # Prompt set loaded from skidc/dispatcher/prompts/<group>/.
   prompt_group: "default"
+  server_timeout: 15
+  dispatch_view_timeout: 15
+  project_detail_timeout: 60
 
 tasks:
   bootstrap:
@@ -72,7 +75,7 @@ workers:
     env:
       ANTHROPIC_MODEL: "deepseek-v4-flash"
       ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-deepseek-xxx"
+      ANTHROPIC_AUTH_TOKEN: "<YOUR_ANTHROPIC_AUTH_TOKEN>"
 
   # ---- Qwen, driven through the Codex CLI loop ----
   - name: "codex_qwen"
@@ -81,9 +84,9 @@ workers:
     max_running: 2
     priority: 1
     env:
-      CODEX_MODEL: "qwen3-max"
+      CODEX_MODEL: "qwen3.7-plus"
       CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      OPENAI_API_KEY: "sk-qwen-xxx"
+      OPENAI_API_KEY: "<YOUR_OPENAI_API_KEY>"
 
   # ---- A second DeepSeek worker on a different key = independent quota ----
   - name: "claudecode_deepseek_pro"
@@ -94,4 +97,4 @@ workers:
     env:
       ANTHROPIC_MODEL: "deepseek-v4-pro"
       ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-deepseek-yyy"
+      ANTHROPIC_AUTH_TOKEN: "<YOUR_SECOND_ANTHROPIC_AUTH_TOKEN>"
