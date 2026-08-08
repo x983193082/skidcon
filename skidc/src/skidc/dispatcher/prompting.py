@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from importlib import resources
 from typing import Any
 
-from skidc.planning import behavior_identity, cluster_behaviors
+from skidc.planning import behavior_identity, behavior_importance, cluster_behaviors
 from skidc.server.models import ProjectDetail
 
 
@@ -27,26 +28,77 @@ def format_open_intents(intents: list[dict[str, Any]]) -> str:
     return format_json_block(intents)
 
 
+def _fact_context_text(project: ProjectDetail, fact) -> str:
+    if project.project.mode == "real_website":
+        return fact.description
+    return fact.summary or fact.description[:320]
+
+
 def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -> str:
     """Build the bounded V3 reasoning view instead of replaying the full export."""
     context_limit = limit or project.project.recon_profile.reason_context_limit
     behavior_limit = max(12, min(50, context_limit // 2))
     hypothesis_limit = max(12, min(40, context_limit // 2))
     fact_order = {fact.id: index for index, fact in enumerate(project.facts)}
+
+    def has_execution_evidence(surface) -> bool:
+        evidence_ids = {
+            fact_id
+            for fact_id in [surface.source_fact_id, *surface.evidence_fact_ids]
+            if fact_id and fact_id not in {"origin", "goal"}
+        }
+        return bool(evidence_ids)
+
+    planning_surfaces = [
+        surface
+        for surface in project.surface_inventory
+        if not surface.id.startswith("legacy:")
+        and (
+            project.project.mode != "real_website"
+            or has_execution_evidence(surface)
+        )
+    ]
+    tested_surface_refs: set[str] = set()
+    facts_by_id = {fact.id: fact for fact in project.facts}
+    for intent in project.intents:
+        action_kind = str(intent.action_kind or "").strip().casefold().replace("-", "_")
+        if intent.status != "concluded" or not intent.to or action_kind != "security_test":
+            continue
+        fact = facts_by_id.get(intent.to)
+        raw_refs = fact.data.get("tested_surface_refs") if fact is not None else None
+        if isinstance(raw_refs, list):
+            tested_surface_refs.update(
+                str(surface_id) for surface_id in raw_refs
+                if isinstance(surface_id, str) and surface_id
+            )
+
     behavior_meta: dict[str, dict[str, Any]] = {}
-    for surface in project.surface_inventory:
+    for surface in planning_surfaces:
         behavior_key, _, _ = behavior_identity(surface)
         meta = behavior_meta.setdefault(
             behavior_key,
-            {"observation_count": 0, "planning_status": "assessed"},
+            {"observation_count": 0, "surface_refs": [], "tested_surface_refs": []},
         )
         meta["observation_count"] += 1
-        if surface.planning_status == "pending":
-            meta["planning_status"] = "pending"
-    behaviors = cluster_behaviors(project.surface_inventory)
-    behaviors.sort(
+        if surface.id not in meta["surface_refs"]:
+            meta["surface_refs"].append(surface.id)
+        if surface.id in tested_surface_refs:
+            meta["tested_surface_refs"].append(surface.id)
+    all_behaviors = cluster_behaviors(planning_surfaces)
+    importance_rank = {"critical": 2, "high": 1, "passive": 0}
+    for item in all_behaviors:
+        item["importance"] = behavior_importance(item)
+    important_behaviors = [
+        item for item in all_behaviors
+        if item["importance"] in {"critical", "high"}
+    ]
+    open_behaviors = [
+        item for item in important_behaviors
+        if not behavior_meta[item["behavior_key"]]["tested_surface_refs"]
+    ]
+    open_behaviors.sort(
         key=lambda item: (
-            behavior_meta[item["behavior_key"]]["planning_status"] == "pending",
+            importance_rank[item["importance"]],
             bool(item.get("auth_context") and item.get("auth_context") != "anonymous"),
             len(item.get("capabilities") or []),
             len(item.get("params") or []),
@@ -54,7 +106,11 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
         ),
         reverse=True,
     )
-    behaviors = behaviors[:behavior_limit]
+    behaviors = open_behaviors[:behavior_limit]
+    frontier_keys = [item["behavior_key"] for item in open_behaviors]
+    frontier_revision = hashlib.sha256(
+        json.dumps(frontier_keys, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
     referenced_fact_ids = {"origin", "goal"}
     for intent in project.intents:
         if intent.status == "open" and intent.to is None:
@@ -93,7 +149,7 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
         {
             "id": fact.id,
             "kind": fact.kind,
-            "summary": fact.summary or fact.description[:320],
+            "summary": _fact_context_text(project, fact),
             "subject": fact.subject,
             "data": fact.data,
             "parent_fact_ids": fact.parent_fact_ids,
@@ -113,6 +169,8 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
             "port": intent.port,
             "path": intent.path,
             "action_kind": intent.action_kind,
+            "surface_ref": intent.surface_ref,
+            "surface_refs": intent.surface_refs,
             "test_variant": intent.test_variant,
             "hypothesis_id": intent.hypothesis_id,
         }
@@ -144,9 +202,12 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
             "roles": item.get("roles") or [],
             "operation_type": item.get("operation_type"),
             "capabilities": item.get("capabilities") or [],
-            "planning_status": behavior_meta[item["behavior_key"]]["planning_status"],
+            "index_status": "indexed",
+            "coverage_status": "open",
+            "importance": item["importance"],
             "observation_count": behavior_meta[item["behavior_key"]]["observation_count"],
             "evidence_fact_ids": item.get("evidence_fact_ids") or [],
+            "surface_refs": behavior_meta[item["behavior_key"]]["surface_refs"],
         }
         for item in behaviors
     ]
@@ -161,6 +222,17 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
             "facts": facts,
             "open_intents": open_intents,
             "hypotheses": hypotheses,
+            "behavior_coverage": {
+                "indexed": len(all_behaviors),
+                "important_total": len(important_behaviors),
+                "closed": len(important_behaviors) - len(open_behaviors),
+                "security_tested": len(important_behaviors) - len(open_behaviors),
+                "open": len(open_behaviors),
+                "passive": len(all_behaviors) - len(important_behaviors),
+                "frontier_count": len(behaviors),
+                "frontier_limit": behavior_limit,
+                "frontier_revision": frontier_revision,
+            },
             "behaviors": behavior_view,
         }
     )

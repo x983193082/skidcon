@@ -188,10 +188,9 @@ def test_legacy_database_migrates_and_backfills_idempotently(tmp_path, monkeypat
         assert evidence["fact_id"] == "f001"
         assert evidence["relation"] == "supports"
 
-        surface = migrated.execute("SELECT * FROM surface_inventory").fetchone()
-        assert surface["surface_group"] == "support:legacy.test:3306"
-        assert json.loads(surface["traits"])["support_service"] is True
-        assert migrated.execute("SELECT COUNT(*) FROM surface_inventory").fetchone()[0] == 1
+        # Coverage metadata is preserved, but migrations no longer manufacture
+        # Surface rows from planning/audit Coverage records.
+        assert migrated.execute("SELECT COUNT(*) FROM surface_inventory").fetchone()[0] == 0
 
         path_row = migrated.execute("SELECT * FROM attack_paths WHERE id = 'ap001'").fetchone()
         assert path_row["suggested_status"] == "confirmed"
@@ -210,6 +209,7 @@ def test_legacy_database_migrates_and_backfills_idempotently(tmp_path, monkeypat
         }
         assert "verification_of" in fact_columns
         assert "test_variant" in intent_columns
+        assert "surface_ref" in intent_columns
 
 
 def test_pre_v2_surface_inventory_adds_behavior_column_before_index(tmp_path, monkeypatch) -> None:

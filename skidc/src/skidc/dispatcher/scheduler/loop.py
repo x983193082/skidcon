@@ -22,7 +22,8 @@ from skidc.dispatcher.runtime.startup_healthcheck import (
 from skidc.dispatcher.scheduler.worker_select import choose_worker
 from skidc.dispatcher.tasks.bootstrap import run_bootstrap_task
 from skidc.dispatcher.tasks.explore import run_explore_task
-from skidc.dispatcher.tasks.reason import ensure_coverage_work, run_reason_task
+from skidc.dispatcher.tasks.reason import run_reason_task
+from skidc.dispatcher.tasks.verify import is_verify_intent, run_verify_task
 from skidc.server.models import Intent, ProjectDetail, ProjectSummary
 from skidc.server.services import scope_violation_reason, utcnow
 
@@ -242,12 +243,10 @@ class DispatcherLoop:
         project = self.client.get_project(summary.id)
         if project.project.status != "active":
             return False
-        if project.project.mode == "real_website" and project.project.phase == "explore":
-            created = ensure_coverage_work(self.client, project, "dispatcher.coverage")
+        if project.project.mode == "real_website" and project.project.phase == "recon":
+            created = self._ensure_web_recon_work(project)
             if created:
-                LOG.info(
-                    "coverage planner created work project=%s intents=%s", project.project.id, created
-                )
+                LOG.info("created deterministic web recon work project=%s intents=%s", project.project.id, created)
                 return True
             project = self.client.get_project(summary.id)
         if self._is_initial_project(project):
@@ -257,6 +256,12 @@ class DispatcherLoop:
                 return self._dispatch_initial_project(project)
             export_yaml = self.client.export_project(summary.id)
             return self._dispatch_reason(project, export_yaml, "initial")
+
+        if project.project.mode == "real_website" and project.project.reason is None:
+            reason_trigger = self._reason_trigger(project)
+            if reason_trigger is not None:
+                export_yaml = self.client.export_project(summary.id)
+                return self._dispatch_reason(project, export_yaml, reason_trigger)
 
         running_intent_ids = self._project_running_explore_intents(summary.id)
         unclaimed_intents = self._scope_allowed_intents(
@@ -271,6 +276,14 @@ class DispatcherLoop:
                 and self._intent_is_dispatchable(intent)
             ],
         )
+        if project.project.mode == "real_website":
+            verify_intents = [
+                intent for intent in unclaimed_intents if is_verify_intent(intent)
+            ]
+            if verify_intents:
+                next_intent = self._select_next_intent(project, verify_intents)
+                export_yaml = self.client.export_project(summary.id)
+                return self._dispatch_verify(project, export_yaml, next_intent)
         if unclaimed_intents:
             next_intent = self._select_next_intent(project, unclaimed_intents)
             export_yaml = self.client.export_project(summary.id)
@@ -299,12 +312,9 @@ class DispatcherLoop:
                 )
                 return False
             self._clear_log_state(f"project:{project.project.id}:phase-transition")
-            refreshed = self.client.get_project(project.project.id)
-            created = ensure_coverage_work(self.client, refreshed, "dispatcher.coverage")
             LOG.info(
-                "deterministic recon transition completed project=%s baseline_intents=%s",
+                "deterministic recon transition completed project=%s",
                 project.project.id,
-                created,
             )
             return True
 
@@ -448,7 +458,11 @@ class DispatcherLoop:
         return True
 
     def _dispatch_explore(self, project: ProjectDetail, export_yaml: str, intent: Intent) -> bool:
-        selection = self._select_worker(project.project.id, "explore")
+        selection = self._select_worker(
+            project.project.id,
+            "explore",
+            avoid_worker=intent.last_worker if project.project.mode == "real_website" else None,
+        )
         worker = selection.worker
         if worker is None:
             self._log_changed(f"project:{project.project.id}:worker:explore", logging.INFO, "no worker available for explore project=%s intent=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s", project.project.id, intent.id, selection.blocked_busy, selection.blocked_unhealthy, selection.blocked_rejected)
@@ -476,9 +490,62 @@ class DispatcherLoop:
         LOG.info("dispatched explore project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
         return True
 
+    def _dispatch_verify(
+        self, project: ProjectDetail, export_yaml: str, intent: Intent,
+    ) -> bool:
+        selection = self._select_worker(project.project.id, "verify")
+        worker = selection.worker
+        if worker is None:
+            self._log_changed(
+                f"project:{project.project.id}:worker:verify",
+                logging.INFO,
+                "no worker available for verify project=%s intent=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
+                project.project.id,
+                intent.id,
+                selection.blocked_busy,
+                selection.blocked_unhealthy,
+                selection.blocked_rejected,
+            )
+            return False
+        self._clear_log_state(f"project:{project.project.id}:worker:verify")
+        claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
+        if claim.status_code in (403, 409) or not claim.ok:
+            LOG.log(
+                logging.INFO if claim.status_code == 403 else logging.WARNING,
+                "verify claim failed project=%s intent=%s worker=%s status=%s",
+                project.project.id, intent.id, worker.name, claim.status_code,
+            )
+            return False
+        try:
+            future = self.executor.submit(
+                run_verify_task, self.config, self.client, self.container_manager,
+                project, export_yaml, intent, worker,
+                cancellation := TaskCancellation(),
+            )
+        except Exception:
+            LOG.exception(
+                "failed to submit verify task project=%s intent=%s worker=%s",
+                project.project.id, intent.id, worker.name,
+            )
+            self._best_effort_release(project.project.id, intent.id, worker.name)
+            return False
+        self.futures[future] = RunningTask(
+            project.project.id, "verify", worker.name, cancellation,
+            intent_id=intent.id, attempt_count=intent.attempt_count,
+        )
+        self.runtime_project_ids.add(project.project.id)
+        self._clear_project_log_state(project.project.id)
+        LOG.info(
+            "dispatched verify project=%s intent=%s worker=%s",
+            project.project.id, intent.id, worker.name,
+        )
+        return True
+
     # ---- worker selection -------------------------------------------------------
 
-    def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
+    def _select_worker(
+        self, project_id: str, task_type: str, *, avoid_worker: str | None = None,
+    ) -> WorkerSelection:
         now = time.time()
         candidates: list[WorkerConfig] = []
         blocked_busy: list[str] = []
@@ -505,6 +572,8 @@ class DispatcherLoop:
                 continue
             candidates.append(worker)
         ordered = choose_worker(candidates, running_counts) if candidates else []
+        if avoid_worker and len(ordered) > 1:
+            ordered.sort(key=lambda worker: worker.name == avoid_worker)
         return WorkerSelection(
             worker=ordered[0] if ordered else None,
             blocked_busy=blocked_busy,
@@ -605,6 +674,47 @@ class DispatcherLoop:
         LOG.info("created bootstrap intent project=%s intent=%s", project_id, intent.id)
         return intent
 
+    def _ensure_web_recon_work(self, project: ProjectDetail) -> int:
+        """Seed required Web recon work before Reason is allowed to run."""
+        status = check_recon_executed(project.facts, profile=project.project.recon_profile)
+        existing = {
+            category
+            for intent in project.intents
+            if intent.status == "open"
+            if (category := _intent_recon_category(intent)) is not None
+        }
+        specifications = {
+            "port_scan": ("Run the scoped port and service check.", "port_scan", ["nmap"]),
+            "subdomain": ("Discover in-scope subdomains.", "subdomain_discovery", ["subfinder"]),
+            "directory": ("Discover in-scope Web paths and endpoints.", "directory_discovery", ["ffuf"]),
+            "asset": ("Crawl and inventory in-scope Web assets.", "asset_discovery", ["katana"]),
+        }
+        created = 0
+        for category in status.missing_executions:
+            if category in existing or category not in specifications:
+                continue
+            description, action_kind, tools = specifications[category]
+            response = self.client.create_intent(
+                project.project.id,
+                ["origin"],
+                description,
+                "dispatcher.recon",
+                surface_type="web",
+                action_kind=action_kind,
+                test_variant=category,
+                priority=10,
+                suggested_tools=tools,
+            )
+            if response.ok:
+                created += 1
+                existing.add(category)
+            elif response.status_code != 409:
+                LOG.warning(
+                    "failed to create deterministic recon intent project=%s category=%s status=%s body=%s",
+                    project.project.id, category, response.status_code, response.text,
+                )
+        return created
+
     # ---- RECON gate (real-website mode) -----------------------------------------
 
     def _recon_gate_check(self, project: ProjectDetail) -> bool:
@@ -625,7 +735,8 @@ class DispatcherLoop:
             return False
 
         self._clear_log_state(f"project:{project.project.id}:recon-gate")
-        self._try_extract_potential_targets(project)
+        if project.project.mode != "real_website":
+            self._try_extract_potential_targets(project)
         LOG.info(
             "RECON gate passed project=%s target_type=%s required_categories=%s",
             project.project.id,
@@ -667,13 +778,25 @@ class DispatcherLoop:
     # ---- reason re-trigger (stigmergy checkpoint) -------------------------------
 
     def _reason_trigger(self, project: ProjectDetail) -> str | None:
-        if project.project.reason_next_retry_at is not None and project.project.reason_next_retry_at > utcnow():
-            return None
         open_intent_count = self._project_open_intent_count(project)
+        if (
+            project.project.mode == "real_website"
+            and self._project_running_task_count(project.project.id) > 0
+        ):
+            return None
 
         checkpoint = self.reason_checkpoints.get(project.project.id)
         if checkpoint is None:
-            return "initial"
+            if (
+                project.project.reason_next_retry_at is not None
+                and project.project.reason_next_retry_at > utcnow()
+            ):
+                return None
+            return (
+                "retry:reason_failed"
+                if project.project.reason_last_outcome == "failed"
+                else "initial"
+            )
         changes: list[str] = []
         if len(project.facts) > checkpoint.fact_count:
             changes.append(f"facts:{checkpoint.fact_count}->{len(project.facts)}")
@@ -681,9 +804,19 @@ class DispatcherLoop:
             changes.append(f"hints:{checkpoint.hint_count}->{len(project.hints)}")
         if checkpoint.open_intent_count > 0 and open_intent_count == 0:
             changes.append(f"open_intents:{checkpoint.open_intent_count}->0")
-        if not changes:
+        # A semantic change must reach the claim endpoint even during an old
+        # retry delay: the server compares the new graph fingerprint and clears
+        # failure/backoff state before granting the lease.
+        if changes:
+            return ",".join(changes)
+        if (
+            project.project.reason_next_retry_at is not None
+            and project.project.reason_next_retry_at > utcnow()
+        ):
             return None
-        return ",".join(changes)
+        if project.project.reason_last_outcome == "failed":
+            return "retry:reason_failed"
+        return None
 
     # ---- future / cleanup reaping -----------------------------------------------
 
@@ -713,8 +846,22 @@ class DispatcherLoop:
                     LOG.info("worker marked rejected project=%s task=%s worker=%s retry_after=%.0fs", task.project_id, task.task_type, task.worker_name, REJECTED_RETRY_AFTER_SECONDS)
                 else:
                     self.worker_rejected_until.pop(rejection_key, None)
-                if outcome in ("success", "stalled", "completion_blocked") and task.task_type == "reason":
+                if outcome in ("success", "stalled") and task.task_type == "reason":
                     self._record_reason_success(task)
+                    refreshed = self.client.get_project(task.project_id)
+                    self.reason_checkpoints[task.project_id] = ReasonCheckpoint(
+                        fact_count=len(refreshed.facts),
+                        hint_count=len(refreshed.hints),
+                        open_intent_count=self._project_open_intent_count(refreshed),
+                    )
+                elif (
+                    task.task_type == "reason"
+                    and outcome in {"completion_blocked", *RETRYABLE_OUTCOMES}
+                ):
+                    # The attempt saw the current graph, but did not advance it.
+                    # Capture that checkpoint and retry the same fingerprint only
+                    # after bounded backoff; later graph changes still trigger at once.
+                    self._record_task_failure(task, outcome)
                     refreshed = self.client.get_project(task.project_id)
                     self.reason_checkpoints[task.project_id] = ReasonCheckpoint(
                         fact_count=len(refreshed.facts),

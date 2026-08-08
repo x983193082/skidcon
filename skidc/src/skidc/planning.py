@@ -35,6 +35,28 @@ _STATE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _ROUTE_SELECTOR_KEYS = ("r", "type", "action", "module", "controller", "do", "op")
 _STABLE_ROUTE_VALUE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$", re.I)
 
+_SURFACE_MAPPING_ACTION_MARKERS = (
+    "recon", "discover", "enumerat", "fingerprint", "crawl", "inventory",
+    "mapping", "asset", "directory", "port_scan", "subdomain",
+)
+_SURFACE_MAPPING_VARIANTS = {
+    "function_mapping", "crawl_and_fingerprint", "crawl_katana",
+    "common_wordlist", "medium_wordlist", "default_port_check",
+    "http_connectivity_check",
+}
+
+
+def is_surface_mapping_intent(
+    action_kind: str | None,
+    test_variant: str | None = None,
+) -> bool:
+    """Return whether an Intent may record newly observed Web Surfaces."""
+    action = str(action_kind or "").strip().casefold()
+    variant = str(test_variant or "").strip().casefold()
+    return variant in _SURFACE_MAPPING_VARIANTS or (
+        bool(action) and any(marker in action for marker in _SURFACE_MAPPING_ACTION_MARKERS)
+    )
+
 
 def _route_discriminators(raw_path: str, params: list[str], traits: dict[str, Any]) -> tuple[str, ...]:
     pairs: list[tuple[str, str]] = list(parse_qsl(urlsplit(raw_path).query, keep_blank_values=False))
@@ -130,6 +152,59 @@ def cluster_behaviors(surfaces: Iterable[Any]) -> list[dict[str, Any]]:
         if source and not current.get("source_fact_id"):
             current["source_fact_id"] = source
     return sorted(grouped.values(), key=lambda item: item["behavior_key"])
+
+
+def behavior_importance(behavior: Any) -> str:
+    """Classify whether one canonical Web behavior requires active testing.
+
+    This is intentionally deterministic and conservative.  It keeps passive,
+    parameterless reads out of the execution queue while treating observed
+    trust boundaries, inputs, files, authentication, and state changes as
+    important attack surface.
+    """
+    traits = _dict(_value(behavior, "traits"))
+    if traits.get("out_of_scope_support"):
+        return "passive"
+
+    _, operation, derived_capabilities = behavior_identity(behavior)
+    capabilities = {
+        str(value).strip().casefold()
+        for value in [
+            *derived_capabilities,
+            *(_value(behavior, "capabilities") or []),
+        ]
+        if str(value).strip()
+    }
+    auth = str(_value(behavior, "auth_context") or "anonymous").casefold()
+    method = str(_value(behavior, "method") or "GET").upper()
+    params = [str(value) for value in (_value(behavior, "params") or [])]
+    surface_type = str(_value(behavior, "surface_type") or "").casefold()
+
+    if (
+        surface_type in {"asset", "static", "static_file", "stylesheet", "image", "script"}
+        and method in {"GET", "HEAD"}
+        and not params
+    ):
+        return "passive"
+
+    if operation in {"login", "upload", "delete", "file_read"} or capabilities & {
+        "authentication", "file_input", "privileged_operation",
+    }:
+        return "critical"
+    if (
+        method not in {"GET", "HEAD", "OPTIONS"}
+        or params
+        or auth not in {"", "anonymous"}
+        or capabilities & {
+            "object_reference", "query_input", "rendered_text", "state_change", "url_input",
+        }
+    ):
+        return "high"
+    return "passive"
+
+
+def is_important_behavior(behavior: Any) -> bool:
+    return behavior_importance(behavior) in {"critical", "high"}
 
 
 def derive_candidates(

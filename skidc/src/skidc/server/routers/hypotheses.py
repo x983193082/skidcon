@@ -180,6 +180,10 @@ def materialize_hypothesis_work(
             if behavior_identity(surface_inventory_to_model(surface_row))[0] != hypothesis.behavior_key:
                 raise HTTPException(409, f"Surface {surface_id} does not belong to the Hypothesis Behavior")
             surface_rows.append(surface_row)
+        if intent.surface_ref and intent.surface_ref not in body.surface_ids:
+            raise HTTPException(
+                409, "Intent surface_ref must belong to the materialized Behavior"
+            )
 
         hypothesis_row = conn.execute(
             """SELECT * FROM hypotheses
@@ -345,9 +349,9 @@ def materialize_hypothesis_work(
                 """INSERT INTO intents (
                     id, project_id, to_fact_id, description, creator, worker,
                     last_heartbeat_at, created_at, concluded_at, target, port, path,
-                    surface_type, action_kind, test_variant, priority, suggested_tools,
+                    surface_type, surface_ref, action_kind, test_variant, priority, suggested_tools,
                     status, work_key, hypothesis_id
-                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?,
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                           'open', ?, ?)""",
                 (
                     intent_id,
@@ -361,6 +365,7 @@ def materialize_hypothesis_work(
                     intent.port,
                     intent.path,
                     intent.surface_type,
+                    intent.surface_ref,
                     intent.action_kind,
                     hypothesis.test_variant,
                     intent.priority,
@@ -383,9 +388,9 @@ def materialize_hypothesis_work(
         intent_id = intent_row["id"]
         bind_coverage_intent(conn, project_id, coverage_id, intent_id, created_at=now)
         conn.execute(
-            """UPDATE intents SET hypothesis_id = COALESCE(hypothesis_id, ?)
+            """UPDATE intents SET hypothesis_id = COALESCE(hypothesis_id, ?), surface_ref = COALESCE(surface_ref, ?)
                WHERE project_id = ? AND id = ?""",
-            (hypothesis_id, project_id, intent_id),
+            (hypothesis_id, intent.surface_ref, project_id, intent_id),
         )
         conn.execute(
             """UPDATE hypotheses

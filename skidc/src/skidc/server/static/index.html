@@ -114,6 +114,19 @@
   .badge.surface-api { color: #22d3ee; border-color: rgba(34, 211, 238, 0.45); }
   .badge.surface-support_service { color: #f3b34a; border-color: rgba(243, 179, 74, 0.45); }
   .badge.surface-unclassified { color: #94a3b8; }
+  .badge.web-reproduced { color: #ff7875; border-color: rgba(255, 120, 117, 0.55); }
+  .badge.web-not-reproduced { color: #73d13d; border-color: rgba(115, 209, 61, 0.45); }
+  .badge.web-mapping { color: #4ea1ff; border-color: rgba(78, 161, 255, 0.45); }
+  .badge.web-executed { color: #94a3b8; border-color: rgba(148, 163, 184, 0.45); }
+  .badge.web-mapped, .badge.web-security_tested { color: #4ea1ff; border-color: rgba(78, 161, 255, 0.45); }
+  .badge.web-discovered, .badge.web-not_tested { color: #94a3b8; border-color: rgba(148, 163, 184, 0.45); }
+  .badge.web-legacy { color: #64748b; border-color: rgba(100, 116, 139, 0.45); }
+
+  .surface-ledger { margin: 14px 18px 18px; }
+  .surface-ledger-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+  .surface-ledger-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-bg); }
+  .surface-ledger-card .surface-title { font-weight: 700; overflow-wrap: anywhere; }
+  .surface-ledger-card .surface-meta { margin-top: 5px; color: var(--text-muted); font-size: 12px; }
   .badge.result-confirmed { color: #10b981; border-color: rgba(16, 185, 129, 0.45); }
   .badge.result-limited { color: #f3b34a; border-color: rgba(243, 179, 74, 0.45); }
   .badge.result-refuted { color: #94a3b8; border-color: rgba(148, 163, 184, 0.45); }
@@ -893,13 +906,13 @@
                   <div v-if="proj.attack_paths?.length" class="sec">
                     <h2>已完成的因果攻击路径 ({{ proj.attack_paths.length }})</h2>
                     <div class="ap-status-reason">
-                      只从已结束的 Fact–Intent 图反向派生；已验证 Fact 经完成 Intent 连到 goal 后才显示。
+                      只从已结束的 Fact–Intent 图反向派生；执行得到的 Fact 经完成 Intent 连到 goal 后才显示。
                     </div>
                     <div v-for="ap in proj.attack_paths" :key="ap.id" class="ap-card">
                       <div class="ap-header">
                         <span class="ap-name">{{ ap.id }} — {{ ap.name }}</span>
-                        <span class="log-badge" :class="'type-' + (ap.status || 'hypothesis')">{{ ap.status || 'hypothesis' }}</span>
-                        <span class="severity-tag" :style="{color:sevColor(ap.severity), borderColor:sevColor(ap.severity), border:'1px solid '+sevColor(ap.severity)}">{{ ap.severity }}</span>
+                        <span class="log-badge" :class="'type-' + (ap.status || 'complete')">{{ attackPathStatusLabel(ap.status) }}</span>
+                        <span v-if="ap.severity && ap.severity !== 'unknown'" class="severity-tag" :style="{color:sevColor(ap.severity), borderColor:sevColor(ap.severity), border:'1px solid '+sevColor(ap.severity)}">{{ ap.severity }}</span>
                       </div>
                       <div class="ap-desc">{{ ap.description }}</div>
                       <div v-if="ap.status_reason" class="ap-status-reason">{{ ap.status_reason }}</div>
@@ -909,7 +922,7 @@
                       <div class="ap-chain">
                         <template v-for="(step, idx) in (ap.steps || [])" :key="step.fact_id">
                           <span class="link-tag" :title="step.reason" @click="openFact(step.fact_id)">{{ step.fact_id }}</span>
-                          <span class="ap-step-state">{{ step.required ? step.derived_status : 'context' }}</span>
+                          <span class="ap-step-state">{{ step.required ? attackPathStatusLabel(step.derived_status) : '上下文' }}</span>
                           <span v-if="idx < (ap.steps || []).length - 1" class="ap-arrow">→</span>
                         </template>
                       </div>
@@ -951,6 +964,29 @@
           <div v-show="currentTab === 'facts'" class="content-scroll">
             <div class="filter-bar">
               <input v-model="filterText" placeholder="搜索事实..." @input="applyFilters"/>
+            </div>
+            <div v-if="isWebProject" class="surface-ledger">
+              <div class="group-toggle">
+                <span class="gt-name">Surface &#22270;&#35206;&#30422;</span>
+                <span class="gt-count">{{ webSurfaceStates.length }}</span>
+              </div>
+              <div v-if="webSurfaceStates.length" class="surface-ledger-grid">
+                <div v-for="item in webSurfaceStates" :key="item.surface.id" class="surface-ledger-card">
+                  <div class="surface-title">
+                    {{ [item.surface.method, item.surface.path_template || item.surface.target || item.surface.surface_group].filter(Boolean).join(' ') }}
+                  </div>
+                  <div class="surface-meta">
+                    <span class="badge" :class="'web-' + item.discovery">{{ webSurfaceDiscoveryLabel(item.discovery) }}</span>
+                    <span class="badge" :class="'web-' + item.testing">{{ webSurfaceTestingLabel(item.testing) }}</span>
+                    <span v-if="item.factIds.length">&#35777;&#25454; Fact: {{ item.factIds.join(', ') }}</span>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="empty-state">&#26242;&#26080;&#30001; Fact &#35777;&#25454;&#24314;&#31435;&#30340; Surface</div>
+            </div>
+
+            <div class="filter-bar">
+              <template v-if="!isWebProject">
               <span class="flt-label">严重度:</span>
               <button class="filter-btn" :class="{active: filterSev === 'all'}" @click="filterSev = 'all'; applyFilters()">全部</button>
               <button v-for="s in sevList" :key="s"
@@ -969,6 +1005,7 @@
               <button v-for="result in resultFilters" :key="result"
                       class="filter-btn" :class="{active: filterResult === result}"
                       @click="filterResult = result; applyFilters()">{{ resultClassLabel(result) }}</button>
+              </template>
             </div>
             <div class="filter-results" v-if="filteredFacts.length !== allFacts.length">显示 {{ filteredFacts.length }}/{{ allFacts.length }} 事实</div>
             <div v-for="(items, type) in groupedFilteredFacts" :key="type" class="fact-group">
@@ -980,14 +1017,15 @@
               <div class="group-body" v-show="!collapsed[type]">
                 <div v-for="f in items" :key="f.id"
                      class="fact-card" :class="{selected: selectedItemId === f.id && selectedItemType === 'fact'}"
-                     :style="{borderLeftColor: sevColor(f.severity)}"
+                     :style="{borderLeftColor: isWebProject ? webFactCategoryColor(f) : sevColor(f.severity)}"
                      @click="openFact(f.id)">
                   <div class="fc-row">
-                    <span class="fc-id" :style="{color: sevColor(f.severity)}">{{ f.id }}</span>
-                    <span class="badge" v-if="f.severity" :style="{color:sevColor(f.severity),borderColor:sevColor(f.severity)}">{{ f.severity }}</span>
-                    <span class="badge" :class="'surface-' + (f.surface_class || 'unclassified')">{{ surfaceClassLabel(f.surface_class) }}</span>
-                    <span class="badge" :class="'result-' + (f.result_class || 'informational')">{{ resultClassLabel(f.result_class) }}</span>
-                    <span class="badge" v-if="f.scope">{{ f.scope }}</span>
+                    <span class="fc-id" :style="{color: isWebProject ? webFactCategoryColor(f) : sevColor(f.severity)}">{{ f.id }}</span>
+                    <span class="badge" v-if="!isWebProject && f.severity" :style="{color:sevColor(f.severity),borderColor:sevColor(f.severity)}">{{ f.severity }}</span>
+                    <span v-if="!isWebProject" class="badge" :class="'surface-' + (f.surface_class || 'unclassified')">{{ surfaceClassLabel(f.surface_class) }}</span>
+                    <span v-if="!isWebProject" class="badge" :class="'result-' + (f.result_class || 'informational')">{{ resultClassLabel(f.result_class) }}</span>
+                    <span class="badge" v-if="!isWebProject && f.scope">{{ f.scope }}</span>
+                    <span v-if="isWebProject" class="badge" :class="'web-' + webFactCategory(f)">{{ webFactCategoryLabel(webFactCategory(f)) }}</span>
                   </div>
                   <div class="fc-desc">{{ f.description }}</div>
                   <div class="fc-meta">
@@ -1161,15 +1199,21 @@
           <div class="info-group">
             <h4>基本信息</h4>
             <div class="info-row"><span class="info-label">ID:</span><span class="info-value">{{ detailFact.id }}</span></div>
+            <div class="info-row"><span class="info-label">状态:</span><span class="info-value">{{ detailFact.status || 'N/A' }}</span></div>
+            <template v-if="!isWebProject">
             <div class="info-row"><span class="info-label">类型:</span><span class="info-value">{{ detailFact.vuln_type || 'N/A' }}</span></div>
             <div class="info-row"><span class="info-label">严重度:</span><span class="info-value" :style="{color: sevColor(detailFact.severity)}">{{ detailFact.severity || 'N/A' }}</span></div>
             <div class="info-row"><span class="info-label">范围:</span><span class="info-value">{{ detailFact.scope || 'N/A' }}</span></div>
             <div class="info-row"><span class="info-label">归属:</span><span class="info-value">{{ surfaceClassLabel(detailFact.surface_class) }}</span></div>
             <div class="info-row"><span class="info-label">结论:</span><span class="info-value">{{ resultClassLabel(detailFact.result_class) }}</span></div>
-            <div class="info-row"><span class="info-label">状态:</span><span class="info-value">{{ detailFact.status || 'N/A' }}</span></div>
             <div v-if="detailFact.verification_of" class="info-row"><span class="info-label">复核:</span><span class="info-value"><span class="link-tag" @click="openFact(detailFact.verification_of)">{{ detailFact.verification_of }}</span></span></div>
-          </div>
+            </template>
+            <template v-if="isWebProject">
+              <div class="info-row"><span class="info-label">&#35760;&#24405;&#31867;&#22411;:</span><span class="info-value">{{ webFactCategoryLabel(webFactCategory(detailFact)) }}</span></div>
+              <div v-if="detailFact.verification_of" class="info-row"><span class="info-label">&#39564;&#35777;&#23545;&#35937;:</span><span class="info-value"><span class="link-tag" @click="openFact(detailFact.verification_of)">{{ detailFact.verification_of }}</span></span></div>
+            </template>
           <div class="info-group">
+          </div>
             <h4>描述</h4>
             <div class="desc-box">{{ detailFact.description }}</div>
           </div>
@@ -1188,6 +1232,10 @@
                 </template>
                 <span v-else style="color:var(--text-muted)">无</span>
               </span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">证据引用:</span>
+              <span class="info-value">{{ detailFact.evidence_refs?.length ? detailFact.evidence_refs.join(', ') : '无' }}</span>
             </div>
             <div class="info-row">
               <span class="info-label">执行日志:</span>
@@ -1443,11 +1491,18 @@ createApp({
       })[value || "informational"] || value;
     }
 
+    function attackPathStatusLabel(value) {
+      return ({
+        complete: "已完成", hypothesis: "假设", confirmed: "旧版已确认",
+        inconclusive: "未定论", refuted: "已反驳"
+      })[value || "complete"] || value;
+    }
+
     function sevSort(a, b) { return (SEV_ORDER[a.severity] ?? 5) - (SEV_ORDER[b.severity] ?? 5); }
 
     const statusLabels = {
       active: "运行中", running: "运行中", waiting_retry: "等待重试",
-      completion_blocked: "完成受阻", stalled: "已停滞",
+      completion_blocked: "完成受阻", needs_attention: "需要人工处理", stalled: "已停滞",
       stopped: "已停止", completed: "已完成", failed: "已失败"
     };
     function statusLabel(s) { return statusLabels[(s || "").toLowerCase()] || s; }
@@ -1624,6 +1679,47 @@ createApp({
       }
     }
 
+    let liveRefreshTimer = null;
+    let liveRefreshRunning = false;
+
+    async function reloadLiveData() {
+      if (liveRefreshRunning || document.hidden) return;
+      liveRefreshRunning = true;
+      const projectId = selectedProjId.value;
+      try {
+        const requests = [api("/projects")];
+        if (projectId) requests.push(api(`/projects/${projectId}?view=full`));
+        const results = await Promise.all(requests);
+        projects.value = results[0] || [];
+        if (!projectId || selectedProjId.value !== projectId) return;
+
+        const updated = results[1];
+        const previousPan = { ...pan.value };
+        proj.value = updated;
+        factMap.value = {};
+        if (updated.facts) updated.facts.forEach(f => { factMap.value[f.id] = f; });
+        await nextTick();
+        computeGraph();
+        pan.value = previousPan;
+        await loadTaskLogs();
+      } catch (e) {
+        // Keep the last coherent view. The next automatic tick retries.
+      } finally {
+        liveRefreshRunning = false;
+      }
+    }
+
+    function startLiveRefresh() {
+      if (liveRefreshTimer !== null) return;
+      liveRefreshTimer = window.setInterval(reloadLiveData, 2000);
+    }
+
+    function stopLiveRefresh() {
+      if (liveRefreshTimer === null) return;
+      window.clearInterval(liveRefreshTimer);
+      liveRefreshTimer = null;
+    }
+
     async function loadTaskLogs() {
       if (!selectedProjId.value) return;
       try {
@@ -1743,13 +1839,12 @@ createApp({
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ status: "stopped" })
         });
-        if (proj.value?.project) {
-          proj.value.project = { ...proj.value.project, ...updated };
-        }
-        projects.value = projects.value.map(project =>
-          project.id === updated.id ? { ...project, ...updated } : project
-        );
+        const previousTab = currentTab.value;
         await loadProjects();
+        // Status responses and sidebar summaries are intentionally light.
+        // Reload the full detail so blockers/evidence cannot disappear on stop.
+        await selectProject(updated.id);
+        currentTab.value = previousTab;
       } catch (e) {
         alert(e.message || String(e));
       }
@@ -1787,8 +1882,89 @@ createApp({
     }
 
     // ---- fact/index helpers ----
+    const isWebProject = computed(() => proj.value?.project?.mode === "real_website");
     const allFacts = computed(() => {
       return (proj.value?.facts || []).filter(f => f.id !== "origin" && f.id !== "goal").sort(sevSort);
+    });
+
+    const WEB_MAPPING_MARKERS = [
+      "recon", "discover", "enumerat", "fingerprint", "crawl", "inventory",
+      "mapping", "asset", "directory", "port_scan", "subdomain"
+    ];
+
+    function webActionIsMapping(value) {
+      const action = String(value || "").trim().toLowerCase();
+      return !!action && WEB_MAPPING_MARKERS.some(marker => action.includes(marker));
+    }
+
+    function webFactProducerIntents(factId) {
+      return (proj.value?.intents || []).filter(intent => intent.to === factId);
+    }
+
+    const webCompletionFactIds = computed(() => {
+      const ids = new Set();
+      for (const path of (proj.value?.attack_paths || [])) {
+        const terminal = (path.fact_chain || []).slice().reverse()
+          .find(factId => factId !== "origin" && factId !== "goal");
+        if (terminal) ids.add(terminal);
+      }
+      return ids;
+    });
+
+    function webFactCategory(fact) {
+      if (fact.kind === "verification_result"
+          && fact.status === "reproduced"
+          && fact.verification_of) return "reproduced";
+      if (fact.kind === "verification_result" && fact.status === "not_reproduced") {
+        return "not-reproduced";
+      }
+      if (fact.recon_category
+          || webFactProducerIntents(fact.id).some(intent => webActionIsMapping(intent.action_kind))) {
+        return "mapping";
+      }
+      return "executed";
+    }
+
+    function webFactCategoryLabel(value) {
+      return ({
+        reproduced: "\u5df2\u590d\u73b0",
+        "not-reproduced": "\u672a\u590d\u73b0",
+        mapping: "\u9875\u9762/\u4fa6\u5bdf\u6620\u5c04",
+        executed: "\u5df2\u6267\u884c\u89c2\u5bdf"
+      })[value] || value;
+    }
+
+    function webFactCategoryColor(fact) {
+      return ({
+        reproduced: "#ff7875",
+        "not-reproduced": "#73d13d",
+        mapping: "#4ea1ff",
+        executed: "#94a3b8"
+      })[webFactCategory(fact)];
+    }
+
+    function webSurfaceDiscoveryLabel(value) {
+      return ({ mapped: "\u5df2\u6620\u5c04", discovered: "\u5df2\u53d1\u73b0", legacy: "\u65e7\u6570\u636e/\u5df2\u5ffd\u7565" })[value] || value;
+    }
+
+    function webSurfaceTestingLabel(value) {
+      return ({ security_tested: "\u5df2\u5b89\u5168\u6d4b\u8bd5", not_tested: "\u672a\u5b89\u5168\u6d4b\u8bd5", legacy: "\u4e0d\u53c2\u4e0e\u5224\u5b9a" })[value] || value;
+    }
+
+    const webSurfaceStates = computed(() => {
+      return (proj.value?.surface_inventory || []).map(surface => {
+        const factIds = [...new Set([
+          surface.source_fact_id,
+          ...(surface.evidence_fact_ids || [])
+        ].filter(Boolean))];
+        const legacy = String(surface.id || "").startsWith("legacy:");
+        return {
+          surface,
+          discovery: surface.graph_discovery_status || (legacy ? "legacy" : "discovered"),
+          testing: surface.graph_testing_status || (legacy ? "legacy" : "not_tested"),
+          factIds
+        };
+      });
     });
 
     const allTypes = computed(() => {
@@ -1799,10 +1975,12 @@ createApp({
 
     const filteredFacts = computed(() => {
       let arr = allFacts.value;
-      if (filterSev.value !== "all") arr = arr.filter(f => f.severity === filterSev.value);
-      if (filterType.value !== "all") arr = arr.filter(f => (f.vuln_type || "未分类") === filterType.value);
-      if (filterSurface.value !== "all") arr = arr.filter(f => (f.surface_class || "unclassified") === filterSurface.value);
-      if (filterResult.value !== "all") arr = arr.filter(f => (f.result_class || "informational") === filterResult.value);
+      if (!isWebProject.value) {
+        if (filterSev.value !== "all") arr = arr.filter(f => f.severity === filterSev.value);
+        if (filterType.value !== "all") arr = arr.filter(f => (f.vuln_type || "未分类") === filterType.value);
+        if (filterSurface.value !== "all") arr = arr.filter(f => (f.surface_class || "unclassified") === filterSurface.value);
+        if (filterResult.value !== "all") arr = arr.filter(f => (f.result_class || "informational") === filterResult.value);
+      }
       if (filterText.value) {
         const q = filterText.value.toLowerCase();
         arr = arr.filter(f =>
@@ -1815,7 +1993,7 @@ createApp({
     const groupedFilteredFacts = computed(() => {
       const groups = {};
       filteredFacts.value.forEach(f => {
-        const key = f.vuln_type || "未分类";
+        const key = isWebProject.value ? webFactCategoryLabel(webFactCategory(f)) : (f.vuln_type || "\u672a\u5206\u7c7b");
         if (!groups[key]) groups[key] = [];
         groups[key].push(f);
       });
@@ -1834,11 +2012,12 @@ createApp({
     const blockerGroups = computed(() => {
       const labels = {
         coverage: "Coverage",
+        surface: "待评估页面/行为",
         intent: "Intent / 重试",
         fact: "高危验证",
         reason: "系统停滞"
       };
-      const order = ["coverage", "intent", "fact", "reason"];
+      const order = ["surface", "coverage", "intent", "fact", "reason"];
       const groups = {};
       for (const blocker of (proj.value?.project?.completion_blockers || [])) {
         if (!groups[blocker.kind]) groups[blocker.kind] = [];
@@ -1852,7 +2031,11 @@ createApp({
     });
 
     function blockerCoverage(blocker) {
-      const coverageId = String(blocker?.ref || "").split("/", 1)[0];
+      const directRef = String(blocker?.ref || "").split(":", 1)[0];
+      const coverageId = directRef.startsWith("cov")
+        ? directRef
+        : (blocker?.related_refs || []).find(ref => String(ref).startsWith("cov"));
+      if (!coverageId) return null;
       return (proj.value?.coverage_items || []).find(item => item.id === coverageId) || null;
     }
 
@@ -1869,7 +2052,18 @@ createApp({
         retry_or_replace_intent: "重试或换方法",
         reconcile_or_schedule: "对账已有事实或创建测试意图",
         verify_high_risk_fact: "执行高危二次验证",
-        inspect_reason_log_and_retry: "检查 Reason 日志并恢复调度"
+        inspect_reason_log_and_retry: "检查 Reason 日志并恢复调度",
+        finish_recon_then_plan_coverage: "完成侦察后规划验证",
+        wait_for_terminal_result: "等待当前验证得到终局结果",
+        assess_behavior_and_rank_hypotheses: "映射该行为并排序安全假设",
+        repair_or_schedule_selected_hypothesis: "修复或调度这个安全假设",
+        wait_for_hypothesis_intent: "等待安全验证任务开始",
+        wait_for_hypothesis_result: "等待安全验证结果",
+        review_or_retry_required_hypothesis: "复核或重试未定论验证",
+        review_required_hypothesis: "人工复核该安全假设",
+        bind_to_hypothesis_or_structurally_waive: "绑定安全假设，或说明原因后排除",
+        review_conflicting_evidence: "复核冲突证据并独立验证",
+        materialize_or_resume_exact_coverage_intent: "创建或恢复对应验证任务"
       };
       return labels[action] || action;
     }
@@ -2249,10 +2443,14 @@ createApp({
     // ---- lifecycle ----
     onMounted(() => {
       loadProjects();
+      startLiveRefresh();
       window.addEventListener("resize", fitGraphToViewport);
+      document.addEventListener("visibilitychange", reloadLiveData);
     });
     onUnmounted(() => {
+      stopLiveRefresh();
       window.removeEventListener("resize", fitGraphToViewport);
+      document.removeEventListener("visibilitychange", reloadLiveData);
       document.removeEventListener("mousemove", resizeMove);
       document.removeEventListener("mouseup", resizeEnd);
       document.removeEventListener("mousemove", attackPanelResizeMove);
@@ -2270,7 +2468,9 @@ createApp({
       surfaceFilters, resultFilters,
       panelWidth, isResizing, pan, attackPanelHeight,
       graphNodes, graphEdges, svgSize,
-      allFacts, allTypes, filteredFacts, groupedFilteredFacts,
+      webSurfaceStates, webSurfaceDiscoveryLabel, webSurfaceTestingLabel,
+      webFactCategory, webFactCategoryLabel, webFactCategoryColor,
+      isWebProject, allFacts, allTypes, filteredFacts, groupedFilteredFacts,
       reversedIntents, sortedTimelineFacts, originFact, goalFact, orphanFacts, subGoals, auxiliaryFacts,
       blockerGroups,
       detailFact, detailIntent,
@@ -2282,7 +2482,7 @@ createApp({
       resizeStart, attackPanelResizeStart,
       panStart, panMove, panEnd, doZoom,
       sevColor, sevList, statusLabel, statusClass, truncate, blockerActionLabel, blockerCoverage, coverageVariantStatus, openBlockerRef,
-      surfaceClassLabel, resultClassLabel,
+      surfaceClassLabel, resultClassLabel, attackPathStatusLabel,
       factChildren, intentsToFact, intentsFromFact,
       computeBadgeEnd
     };

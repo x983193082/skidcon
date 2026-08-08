@@ -81,6 +81,8 @@ class InProcessClient:
                 "scope", "vuln_type", "severity", "parent_fact", "verification_of", "goal_type", "status",
                 "recon_category", "recon_executed", "recon_found_results",
                 "recon_tool", "recon_target", "recon_evidence_ref", "coverage_refs", "observed_surfaces",
+                "schema_version", "kind", "summary", "subject", "data", "parent_fact_ids",
+                "evidence_refs", "confidence", "created_by",
             ):
                 value = fact_fields.get(key)
                 if value is not None:
@@ -183,6 +185,8 @@ class InProcessClient:
         port: int | None = None,
         path: str | None = None,
         surface_type: str | None = None,
+        surface_ref: str | None = None,
+        surface_refs: list[str] | None = None,
         action_kind: str | None = None,
         test_variant: str | None = None,
         priority: int | None = None,
@@ -201,6 +205,7 @@ class InProcessClient:
             ("port", port),
             ("path", path),
             ("surface_type", surface_type),
+            ("surface_ref", surface_ref),
             ("action_kind", action_kind),
             ("test_variant", test_variant),
             ("priority", priority),
@@ -209,6 +214,8 @@ class InProcessClient:
                 body[key] = value
         if suggested_tools is not None:
             body["suggested_tools"] = suggested_tools
+        if surface_refs is not None:
+            body["surface_refs"] = surface_refs
         if coverage_refs is not None:
             body["coverage_refs"] = coverage_refs
         if hypothesis_id is not None:
@@ -563,6 +570,7 @@ def mock_config(
     reason: str,
     explore: str,
     task_types: list[str] | None = None,
+    verify: str | None = None,
 ) -> DispatchConfig:
     return DispatchConfig.model_validate(
         {
@@ -579,13 +587,14 @@ def mock_config(
                 "bootstrap": {"timeout": 2, "conclude_timeout": 2},
                 "reason": {"timeout": 2, "max_intents": 1},
                 "explore": {"timeout": 2, "conclude_timeout": 2},
+                "verify": {"timeout": 2, "max_attempts": 3},
             },
             "container": {"image": "unused", "network_mode": "host", "completed_action": "stop"},
             "workers": [
                 {
                     "name": "mock-worker",
                     "type": "mock",
-                    "task_types": task_types or ["bootstrap", "reason", "explore"],
+                    "task_types": task_types or ["bootstrap", "reason", "verify", "explore"],
                     "max_running": 1,
                     "priority": 0,
                     "env": {
@@ -593,8 +602,11 @@ def mock_config(
                         "MOCK_BOOTSTRAP": _mock_phase_payload("bootstrap", bootstrap),
                         "MOCK_REASON": _mock_phase_payload("reason", reason),
                         "MOCK_EXPLORE_EXECUTE": _mock_phase_payload("explore_execute", explore),
+                        "MOCK_VERIFY_EXECUTE": _mock_phase_payload(
+                            "verify_execute", verify or phase("reproduced")
+                        ),
                     },
-                }
+                },
             ],
         }
     )

@@ -48,8 +48,8 @@ class Fact(BaseModel):
     recon_target: str | None = None
     recon_evidence_ref: str | None = None
     coverage_refs: list[str] = Field(default_factory=list)
-    surface_class: Literal["web", "api", "support_service", "unclassified"] = "unclassified"
-    result_class: Literal["confirmed", "limited", "refuted", "informational"] = "informational"
+    surface_class: Literal["web", "api", "support_service", "unclassified"] | None = None
+    result_class: Literal["confirmed", "limited", "refuted", "informational"] | None = None
     intent_refs: list[str] = Field(default_factory=list)
     task_log_refs: list[str] = Field(default_factory=list)
 
@@ -68,6 +68,8 @@ class Intent(BaseModel):
     port: int | None = None
     path: str | None = None
     surface_type: str | None = None
+    surface_ref: str | None = None
+    surface_refs: list[str] = Field(default_factory=list)
     action_kind: str | None = None
     test_variant: str | None = None
     priority: int | None = None
@@ -99,7 +101,7 @@ class Hint(BaseModel):
     created_at: str
 
 
-AttackPathStatus = Literal["hypothesis", "confirmed", "inconclusive", "refuted"]
+AttackPathStatus = Literal["hypothesis", "confirmed", "inconclusive", "refuted", "complete"]
 
 
 class AttackPathStep(BaseModel):
@@ -190,6 +192,13 @@ CoverageVariantStatus = Literal[
     "informational", "not_applicable",
 ]
 
+SurfaceTestStatus = Literal[
+    "unassessed", "untested", "testing", "partial", "completed", "blocked", "not_applicable",
+]
+
+WebSurfaceDiscoveryStatus = Literal['discovered', 'mapped', 'legacy']
+WebSurfaceTestingStatus = Literal['not_tested', 'security_tested', 'legacy']
+
 
 class CoverageVariantResult(BaseModel):
     variant: str
@@ -220,6 +229,11 @@ class SurfaceInventoryItem(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     evidence_fact_ids: list[str] = Field(default_factory=list)
     planning_status: Literal["pending", "assessed"] = "pending"
+    test_status: SurfaceTestStatus = "unassessed"
+    graph_discovery_status: WebSurfaceDiscoveryStatus | None = None
+    graph_testing_status: WebSurfaceTestingStatus | None = None
+    required_coverage_count: int = 0
+    completed_coverage_count: int = 0
     created_at: str
     updated_at: str
 
@@ -256,6 +270,37 @@ class UpsertSurfaceInventoryRequest(BaseModel):
     def normalize_string_lists(cls, value: list[str]) -> list[str]:
         return _clean_id_list(value, "values")
 
+class ObservedSurfaceRequest(BaseModel):
+    """Small model-facing Surface observation; identities are server-derived."""
+
+    method: str
+    path: str
+    params: list[str] = Field(default_factory=list)
+    auth_context: str = "anonymous"
+    surface_type: str = "route"
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("method")
+    @classmethod
+    def normalize_method(cls, value: str) -> str:
+        text = value.strip().upper()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+    @field_validator("path", "auth_context", "surface_type")
+    @classmethod
+    def normalize_required_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+    @field_validator("params")
+    @classmethod
+    def normalize_params(cls, value: list[str]) -> list[str]:
+        return _clean_id_list(value, "params")
 
 class CoverageItem(BaseModel):
     id: str
@@ -379,7 +424,7 @@ class BindCoverageIntentRequest(BaseModel):
 
 
 HypothesisStatus = Literal[
-    "candidate", "planned", "testing", "supported", "refuted",
+    "candidate", "planned", "testing", "concluded", "supported", "refuted",
     "inconclusive", "blocked_by_precondition", "waived",
 ]
 
@@ -494,7 +539,7 @@ ProjectRunState = Literal[
 
 
 class CompletionBlocker(BaseModel):
-    kind: Literal["intent", "coverage", "surface", "fact", "reason"]
+    kind: Literal["intent", "coverage", "surface", "behavior", "fact", "reason"]
     ref: str
     status: str
     reason: str
@@ -649,6 +694,8 @@ class CreateIntentRequest(BaseModel):
     port: int | None = None
     path: str | None = None
     surface_type: str | None = None
+    surface_ref: str | None = None
+    surface_refs: list[str] = Field(default_factory=list)
     action_kind: str | None = None
     test_variant: str | None = None
     priority: int | None = None
@@ -658,7 +705,10 @@ class CreateIntentRequest(BaseModel):
 
     model_config = {"populate_by_name": True}
 
-    @field_validator("description", "creator", "worker", "path", "test_variant", "hypothesis_id")
+    @field_validator(
+        "description", "creator", "worker", "path", "surface_ref",
+        "test_variant", "hypothesis_id",
+    )
     @classmethod
     def validate_non_empty_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -683,6 +733,11 @@ class CreateIntentRequest(BaseModel):
     @classmethod
     def validate_coverage_refs(cls, value: list[str]) -> list[str]:
         return _clean_id_list(value, "coverage ids")
+
+    @field_validator("surface_refs")
+    @classmethod
+    def validate_surface_refs(cls, value: list[str]) -> list[str]:
+        return _clean_id_list(value, "surface ids")
 
 
 class HeartbeatRequest(BaseModel):
@@ -742,7 +797,7 @@ class ConcludeRequest(BaseModel):
     recon_target: str | None = None
     recon_evidence_ref: str | None = None
     coverage_refs: list[str] = Field(default_factory=list)
-    observed_surfaces: list[UpsertSurfaceInventoryRequest] = Field(default_factory=list)
+    observed_surfaces: list[ObservedSurfaceRequest | UpsertSurfaceInventoryRequest] = Field(default_factory=list)
     schema_version: int = Field(default=1, ge=1)
     kind: str = "legacy_text"
     summary: str | None = None
@@ -787,7 +842,7 @@ class MaterializeHypothesisWorkResponse(BaseModel):
 
 
 class CompleteRequest(BaseModel):
-    from_: list[str] = Field(alias="from", min_length=1)
+    from_: list[str] = Field(alias="from")
     description: str
     worker: str
 

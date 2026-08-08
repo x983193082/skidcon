@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS intents (
     port INTEGER,
     path TEXT,
     surface_type TEXT,
+    surface_ref TEXT,
+    surface_refs TEXT NOT NULL DEFAULT '[]',
     action_kind TEXT,
     test_variant TEXT,
     priority INTEGER,
@@ -418,6 +420,8 @@ _INTENT_ADDED_COLUMNS = {
     "port": "INTEGER",
     "path": "TEXT",
     "surface_type": "TEXT",
+    "surface_ref": "TEXT",
+    "surface_refs": "TEXT NOT NULL DEFAULT '[]'",
     "action_kind": "TEXT",
     "test_variant": "TEXT",
     "priority": "INTEGER",
@@ -555,7 +559,7 @@ def _backfill_intent_statuses(conn: sqlite3.Connection) -> None:
     )
 
 
-def _backfill_legacy_coverage_surfaces(conn: sqlite3.Connection) -> None:
+def _backfill_legacy_coverage_metadata(conn: sqlite3.Connection) -> None:
     support_ports_by_project: dict[str, set[int]] = {}
     for project in conn.execute("SELECT id, scope_policy FROM projects").fetchall():
         try:
@@ -579,33 +583,6 @@ def _backfill_legacy_coverage_surfaces(conn: sqlite3.Connection) -> None:
         surface = _legacy_coverage_surface(
             row,
             support_ports=support_ports_by_project.get(row["project_id"], set()),
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO surface_inventory (
-                id, project_id, fingerprint, surface_group, target, port, method,
-                path_template, params, surface_type, auth_context, roles, traits,
-                source_fact_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"legacy:{row['id']}",
-                row["project_id"],
-                surface["fingerprint"],
-                surface["surface_group"],
-                surface["target"],
-                surface["port"],
-                surface["method"],
-                surface["path_template"],
-                json.dumps(surface["params"]),
-                surface["surface_type"],
-                surface["auth_context"],
-                "[]",
-                json.dumps(surface["traits"], sort_keys=True),
-                row["source_fact_id"],
-                row["created_at"],
-                row["updated_at"],
-            ),
         )
         conn.execute(
             """
@@ -764,6 +741,32 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for column, decl in _INTENT_ADDED_COLUMNS.items():
         if column not in existing_intents:
             conn.execute(f"ALTER TABLE intents ADD COLUMN {column} {decl}")
+    conn.execute(
+        """UPDATE intents
+           SET surface_refs = json_array(surface_ref)
+           WHERE surface_ref IS NOT NULL
+             AND COALESCE(surface_refs, '[]') = '[]'"""
+    )
+    # Recover already-successful Web mapping executions created before
+    # action_kind became mandatory. The stored structured artifact, not the
+    # prose description, is the evidence that this was mapping work.
+    conn.execute(
+        """UPDATE intents
+           SET action_kind = 'surface_mapping',
+               test_variant = COALESCE(test_variant, 'legacy_surface_mapping')
+           WHERE COALESCE(TRIM(action_kind), '') = ''
+             AND execution_status = 'succeeded'
+             AND execution_artifact_ref LIKE 'task_log:%'
+             AND project_id IN (
+                 SELECT id FROM projects WHERE mode = 'real_website'
+             )
+             AND EXISTS (
+                 SELECT 1 FROM task_logs
+                 WHERE task_logs.project_id = intents.project_id
+                   AND 'task_log:' || task_logs.id = intents.execution_artifact_ref
+                   AND task_logs.stdout LIKE '%\"surfaces\"%'
+             )"""
+    )
     _backfill_intent_statuses(conn)
     # Work identity prevents two workers from executing the same live job at
     # once. Terminal attempts must release that lock so bounded retries and
@@ -883,7 +886,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
            OR (execution_status = 'untested' AND status <> 'untested')
         """
     )
-    _backfill_legacy_coverage_surfaces(conn)
+    _backfill_legacy_coverage_metadata(conn)
 
     migration_time = "1970-01-01T00:00:00Z"
     conn.execute(

@@ -202,6 +202,8 @@ class SkidcClient:
         port: int | None = None,
         path: str | None = None,
         surface_type: str | None = None,
+        surface_ref: str | None = None,
+        surface_refs: list[str] | None = None,
         action_kind: str | None = None,
         test_variant: str | None = None,
         priority: int | None = None,
@@ -220,6 +222,7 @@ class SkidcClient:
             ("port", port),
             ("path", path),
             ("surface_type", surface_type),
+            ("surface_ref", surface_ref),
             ("action_kind", action_kind),
             ("test_variant", test_variant),
             ("priority", priority),
@@ -228,6 +231,8 @@ class SkidcClient:
                 body[key] = value
         if suggested_tools is not None:
             body["suggested_tools"] = suggested_tools
+        if surface_refs is not None:
+            body["surface_refs"] = surface_refs
         if coverage_refs is not None:
             body["coverage_refs"] = coverage_refs
         if hypothesis_id is not None:

@@ -7,14 +7,28 @@ from fastapi.testclient import TestClient
 from skidc.planning import behavior_identity, cluster_behaviors, derive_candidates
 from skidc.dispatcher.prompting import format_dispatch_graph
 from skidc.dispatcher.protocol.client import ApiResult
+from skidc.dispatcher.tasks.explore import _with_web_fact_output_rules
 from skidc.dispatcher.tasks.reason import (
+    _bind_matching_coverage,
+    _bind_matching_surface,
     _create_agent_hypothesis_work,
     _ensure_pending_surface_mapping_work,
+    _intent_signature_from_data,
     _select_v3_frontier,
+    _with_web_reason_planning_rules,
     ensure_coverage_work,
 )
 from skidc.server.db import get_conn
 from tests.conftest import InProcessClient
+
+def _claim_reason(http: TestClient, project_id: str, worker: str = "reasoner") -> None:
+    response = http.post(
+        f"/projects/{project_id}/reason/claim",
+        json={"worker": worker, "trigger": "test completion"},
+    )
+    assert response.status_code == 200
+
+
 
 
 def _create_real_project(
@@ -97,6 +111,23 @@ def test_real_project_cannot_complete_before_recon_transition(http_client: TestC
     assert any(item["ref"] == "project-phase" for item in blockers)
 
 
+def test_recon_reason_drops_model_supplied_coverage_category(http_client: TestClient) -> None:
+    project_id = _create_real_project(http_client, enter_explore=False, planning_version=3)
+    project = InProcessClient(http_client).get_project(project_id)
+
+    sanitized = _bind_matching_coverage(
+        project,
+        {
+            "from": ["origin"],
+            "description": "inventory public assets",
+            "action_kind": "asset_discovery",
+            "coverage_refs": ["asset"],
+        },
+    )
+
+    assert "coverage_refs" not in sanitized
+
+
 def test_v2_planner_records_limitations_without_blocking_completion(
     http_client: TestClient,
 ) -> None:
@@ -152,10 +183,11 @@ def test_v2_planner_records_limitations_without_blocking_completion(
         item for item in detail.hypotheses if item.id == failed_intent.hypothesis_id
     )
     assert failed_hypothesis.status == "inconclusive"
+    assert client.claim_reason(project_id, "reasoner", "bounded work exhausted").ok
     completed = client.complete(
-        project_id, ["origin"], "completed with explicit execution limitations", "reasoner",
+        project_id, [], "bounded failures remain limitations, not completion blockers", "reasoner",
     )
-    assert completed.status_code == 200
+    assert completed.ok
 
 
 def test_work_identity_deduplicates_primary_but_allows_explicit_verification(
@@ -173,9 +205,19 @@ def test_work_identity_deduplicates_primary_but_allows_explicit_verification(
     }
     first = http_client.post(f"/projects/{project_id}/intents", json=payload)
     second = http_client.post(f"/projects/{project_id}/intents", json={**payload, "description": "replacement"})
+    candidate = http_client.post(
+        f"/projects/{project_id}/facts",
+        json={"description": "Candidate SQL behavior requiring independent reproduction."},
+    )
+    assert candidate.status_code == 201
     verification = http_client.post(
         f"/projects/{project_id}/intents",
-        json={**payload, "description": "independent verification", "action_kind": "verification_probe"},
+        json={
+            **payload,
+            "from": [candidate.json()["id"]],
+            "description": "independent verification",
+            "action_kind": "verification_probe",
+        },
     )
 
     assert first.status_code == second.status_code == verification.status_code == 201
@@ -189,7 +231,12 @@ def test_conclusion_surfaces_become_inventory_without_completion_deadlock(
     project_id = _create_real_project(http_client)
     intent = http_client.post(
         f"/projects/{project_id}/intents",
-        json={"from": ["origin"], "description": "discover routes", "creator": "reasoner"},
+        json={
+            "from": ["origin"],
+            "description": "discover routes",
+            "creator": "reasoner",
+            "action_kind": "asset_discovery",
+        },
     ).json()
     http_client.post(
         f"/projects/{project_id}/intents/{intent['id']}/heartbeat", json={"worker": "worker"}
@@ -201,12 +248,8 @@ def test_conclusion_surfaces_become_inventory_without_completion_deadlock(
             "description": "A POST upload surface was observed.",
             "status": "informational",
             "observed_surfaces": [{
-                "fingerprint": "upload-post-authenticated",
-                "surface_group": "authenticated upload",
-                "target": "example.test",
-                "port": 443,
                 "method": "POST",
-                "path_template": "/v1/upload",
+                "path": "/v1/upload",
                 "params": ["file"],
                 "auth_context": "authenticated",
                 "surface_type": "upload_point",
@@ -216,10 +259,15 @@ def test_conclusion_surfaces_become_inventory_without_completion_deadlock(
     assert concluded.status_code == 200
     surfaces = http_client.get(f"/projects/{project_id}/surfaces").json()
     assert [(item["method"], item["path_template"]) for item in surfaces] == [("POST", "/v1/upload")]
+    assert surfaces[0]["fingerprint"] != "upload-post-authenticated"
+    assert surfaces[0]["surface_group"]
+    assert surfaces[0]["target"] == "example.test"
+    assert surfaces[0]["port"] == 443
 
+    _claim_reason(http_client, project_id)
     completed = http_client.post(
         f"/projects/{project_id}/complete",
-        json={"from": [concluded.json()["fact"]["id"]], "description": "complete with pending surface recorded", "worker": "reasoner"},
+        json={"from": [], "description": "complete with pending surface recorded", "worker": "reasoner"},
     )
     assert completed.status_code == 200
     report = http_client.get(f"/projects/{project_id}/export?format=report").text
@@ -271,10 +319,194 @@ def test_v3_pending_function_gets_one_mapping_intent_and_result_fact(
     assert failed.status_code == 200
     assert failed.json()["status"] == "concluded"
     detail = client.get_project(project_id)
-    result = next(fact for fact in detail.facts if fact.id == failed.json()["to"])
-    assert result.kind == "execution_result"
-    assert result.status == "failed"
-    assert result.data["failure_stage"] == "execution_failed"
+    assert failed.json()["to"] is not None
+    assert failed.json()["dead_lettered_at"] is not None
+    assert len(detail.facts) == 3
+
+def test_v3_ignores_legacy_surface_and_coverage_without_fact_evidence(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client, planning_version=3)
+    fingerprint = "legacy-intent-derived-surface"
+    assert http_client.post(
+        f"/projects/{project_id}/surfaces",
+        json={
+            "fingerprint": fingerprint,
+            "surface_group": "upload:/admin",
+            "target": "example.test",
+            "port": 443,
+            "method": "GET",
+            "path_template": "/admin",
+            "surface_type": "upload_point",
+            "traits": {"admin": True, "upload": True},
+        },
+    ).status_code == 200
+    assert http_client.post(
+        f"/projects/{project_id}/coverage",
+        json={
+            "item_type": "vuln_class",
+            "description": "Legacy coverage inferred from an Intent description.",
+            "surface_fingerprint": fingerprint,
+            "test_family": "file_path",
+            "test_variants": ["upload"],
+            "required": True,
+        },
+    ).status_code == 201
+
+    client = InProcessClient(http_client)
+    assert ensure_coverage_work(client, client.get_project(project_id), "dispatcher") == 0
+    refreshed = client.get_project(project_id)
+    assert refreshed.hypotheses == []
+    assert refreshed.intents == []
+    full = http_client.get(f"/projects/{project_id}?view=full").json()
+    assert full["project"]["completion_blockers"] == []
+    assert full["surface_inventory"][0]["test_status"] == "unassessed"
+
+def test_v3_surface_index_does_not_create_mapping_or_security_work(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client, planning_version=3)
+    for surface in (
+        {
+            "fingerprint": "account-update-post",
+            "surface_group": "account update",
+            "target": "example.test",
+            "port": 443,
+            "method": "POST",
+            "path_template": "/account/{id}",
+            "params": ["id", "callback_url"],
+            "auth_context": "session",
+            "surface_type": "form",
+            "source_fact_id": "origin",
+        },
+        {
+            "fingerprint": "search-get",
+            "surface_group": "search",
+            "target": "example.test",
+            "port": 443,
+            "method": "GET",
+            "path_template": "/search",
+            "params": ["q"],
+            "auth_context": "anonymous",
+            "surface_type": "route",
+            "source_fact_id": "origin",
+        },
+    ):
+        assert http_client.post(
+            f"/projects/{project_id}/surfaces", json=surface,
+        ).status_code == 200
+
+    client = InProcessClient(http_client)
+    before = client.get_project(project_id)
+    assert len(before.surface_inventory) == 2
+
+    assert ensure_coverage_work(client, before, "dispatcher") == 0
+
+    after = client.get_project(project_id)
+    assert len(after.surface_inventory) == 2
+    assert after.intents == []
+    assert after.hypotheses == []
+    assert after.coverage_items == []
+    assert {
+        (surface.fingerprint, surface.planning_status)
+        for surface in after.surface_inventory
+    } == {
+        (surface.fingerprint, surface.planning_status)
+        for surface in before.surface_inventory
+    }
+
+def test_function_mapping_is_informational_not_a_security_finding(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client, planning_version=3)
+    assert http_client.post(
+        f"/projects/{project_id}/surfaces",
+        json={
+            "fingerprint": "public-image",
+            "surface_group": "public image",
+            "target": "example.test",
+            "port": 443,
+            "method": "GET",
+            "path_template": "/upload/logo.png",
+            "surface_type": "static_file",
+            "source_fact_id": "origin",
+        },
+    ).status_code == 200
+    client = InProcessClient(http_client)
+    mapping_project = client.get_project(project_id)
+    behavior_key = behavior_identity(mapping_project.surface_inventory[0])[0]
+    assert _create_agent_hypothesis_work(
+        client,
+        mapping_project,
+        "reasoner",
+        {
+            "from": ["origin"],
+            "behavior_key": behavior_key,
+            "path": "/upload/logo.png",
+            "description": "Compatibility mapping for a legacy static observation.",
+            "hypothesis": "Record the static resource as an informational observation.",
+            "test_family": "surface_config",
+            "test_variant": "function_mapping",
+            "action_kind": "surface_discovery",
+            "confidence": 0.8,
+            "impact": 1.0,
+            "estimated_cost": 1.0,
+            "risk_level": "safe",
+        },
+    ) is True
+    planned = client.get_project(project_id)
+    intent = planned.intents[0]
+    coverage_id = intent.coverage_refs[0]
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{intent.id}/heartbeat",
+        json={"worker": "executor"},
+    ).status_code == 200
+
+    concluded = http_client.post(
+        f"/projects/{project_id}/intents/{intent.id}/conclude",
+        json={
+            "worker": "executor",
+            "description": "The static image endpoint was mapped successfully.",
+            "status": "confirmed",
+            "vuln_type": "function_mapping",
+            "severity": "info",
+            "coverage_refs": [coverage_id],
+        },
+    )
+    assert concluded.status_code == 200
+    fact = concluded.json()["fact"]
+    assert fact["status"] is None
+    assert fact["vuln_type"] is None
+    assert fact["severity"] is None
+    assert fact["kind"] == "surface_observation"
+    assert fact["result_class"] is None
+
+    detail = http_client.get(f"/projects/{project_id}").json()
+    coverage = next(item for item in detail["coverage_items"] if item["id"] == coverage_id)
+    assert coverage["outcome"] == "informational"
+    assert coverage["variant_results"][0]["status"] == "untested"
+
+    historical = http_client.post(
+        f"/projects/{project_id}/facts",
+        json={
+            "description": "Legacy mapping row",
+            "status": "confirmed",
+            "vuln_type": "function_mapping",
+            "severity": "info",
+        },
+    )
+    assert historical.status_code == 201
+    refreshed = http_client.get(f"/projects/{project_id}").json()
+    historical_model = next(
+        item for item in refreshed["facts"] if item["id"] == historical.json()["id"]
+    )
+    assert historical_model["result_class"] is None
+
+    assert client.claim_reason(project_id, "reasoner", "test completion").ok
+    completed = client.complete(project_id, [], "assessment recorded", "reasoner")
+    assert completed.status_code == 200
+    assert http_client.get(f"/projects/{project_id}/attack-paths").json() == []
+
 
 
 def test_failed_high_priority_behavior_does_not_block_next_breadth_slot(
@@ -417,6 +649,25 @@ def test_v3_dispatch_graph_uses_compact_behavior_view(
     http_client: TestClient,
 ) -> None:
     project_id = _create_real_project(http_client, planning_version=3)
+    mapping_intent = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"],
+            "description": "map the article behavior",
+            "creator": "reasoner",
+            "action_kind": "function_mapping",
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{mapping_intent['id']}/heartbeat",
+        json={"worker": "mapper"},
+    ).status_code == 200
+    mapped_fact = http_client.post(
+        f"/projects/{project_id}/intents/{mapping_intent['id']}/conclude",
+        json={"worker": "mapper", "description": "Observed the article route behavior."},
+    )
+    assert mapped_fact.status_code == 200
+    evidence_fact_id = mapped_fact.json()["fact"]["id"]
     endpoint = f"/projects/{project_id}/surfaces"
     common = {
         "surface_group": "article detail",
@@ -424,7 +675,7 @@ def test_v3_dispatch_graph_uses_compact_behavior_view(
         "port": 443,
         "method": "GET",
         "auth_context": "anonymous",
-        "source_fact_id": "origin",
+        "source_fact_id": evidence_fact_id,
     }
     for fingerprint, path, params in (
         ("article-a", "/article/100", ["id"]),
@@ -446,6 +697,501 @@ def test_v3_dispatch_graph_uses_compact_behavior_view(
     assert len(payload["behaviors"]) == 1
     assert payload["behaviors"][0]["observation_count"] == 2
     assert payload["behaviors"][0]["params"] == ["id", "q"]
+    assert payload["behaviors"][0]["index_status"] == "indexed"
+    assert payload["behaviors"][0]["coverage_status"] == "open"
+    assert "planning_status" not in payload["behaviors"][0]
+    assert payload["behavior_coverage"] == {
+        **payload["behavior_coverage"],
+        "indexed": 1,
+        "important_total": 1,
+        "closed": 0,
+        "open": 1,
+        "frontier_count": 1,
+    }
+
+
+def test_v3_behavior_frontier_rolls_after_explicit_security_test(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client, planning_version=3)
+    mapping_intent = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"],
+            "description": "map admin behaviors",
+            "creator": "reasoner",
+            "action_kind": "surface_mapping",
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{mapping_intent['id']}/heartbeat",
+        json={"worker": "mapper"},
+    ).status_code == 200
+    mapped = http_client.post(
+        f"/projects/{project_id}/intents/{mapping_intent['id']}/conclude",
+        json={"worker": "mapper", "description": "Observed 45 distinct admin handlers."},
+    )
+    assert mapped.status_code == 200
+    evidence_fact_id = mapped.json()["fact"]["id"]
+
+    for index in range(45):
+        created = http_client.post(
+            f"/projects/{project_id}/surfaces",
+            json={
+                "fingerprint": f"admin-handler-{index}",
+                "surface_group": "admin",
+                "target": "example.test",
+                "port": 443,
+                "method": "POST",
+                "path_template": f"/admin/handler-{index:03x}",
+                "params": ["record_id"],
+                "auth_context": "admin",
+                "source_fact_id": evidence_fact_id,
+            },
+        )
+        assert created.status_code == 200
+
+    client = InProcessClient(http_client)
+    first = json.loads(format_dispatch_graph(client.get_project(project_id)))
+    assert first["behavior_coverage"]["important_total"] == 45
+    assert first["behavior_coverage"]["open"] == 45
+    assert first["behavior_coverage"]["frontier_count"] == 40
+    assert len(first["behaviors"]) == 40
+    assert {item["coverage_status"] for item in first["behaviors"]} == {"open"}
+
+    tested_behavior = first["behaviors"][0]
+    tested_surface = tested_behavior["surface_refs"][0]
+    security_intent = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": [evidence_fact_id],
+            "description": "test one admin handler",
+            "creator": "reasoner",
+            "action_kind": "security_test",
+            "surface_refs": [tested_surface],
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{security_intent['id']}/heartbeat",
+        json={"worker": "tester"},
+    ).status_code == 200
+    concluded = http_client.post(
+        f"/projects/{project_id}/intents/{security_intent['id']}/conclude",
+        json={
+            "worker": "tester",
+            "description": "The assigned handler was tested.",
+            "data": {"tested_surface_refs": [tested_surface]},
+        },
+    )
+    assert concluded.status_code == 200
+
+    second = json.loads(format_dispatch_graph(client.get_project(project_id)))
+    assert second["behavior_coverage"]["closed"] == 1
+    assert second["behavior_coverage"]["open"] == 44
+    assert second["behavior_coverage"]["frontier_count"] == 40
+    assert tested_behavior["behavior_key"] not in {
+        item["behavior_key"] for item in second["behaviors"]
+    }
+    assert second["behavior_coverage"]["frontier_revision"] != first["behavior_coverage"]["frontier_revision"]
+
+
+def test_v3_completion_requires_explicit_important_behavior_test(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client, planning_version=3)
+    evidence = http_client.post(
+        f"/projects/{project_id}/facts",
+        json={"description": "Observed the administrator settings handler."},
+    )
+    assert evidence.status_code == 201
+    evidence_fact_id = evidence.json()["id"]
+    surface = http_client.post(
+        f"/projects/{project_id}/surfaces",
+        json={
+            "fingerprint": "admin-settings",
+            "surface_group": "admin settings",
+            "target": "example.test",
+            "port": 443,
+            "method": "POST",
+            "path_template": "/admin/settings",
+            "params": ["site_name"],
+            "auth_context": "admin",
+            "source_fact_id": evidence_fact_id,
+        },
+    ).json()
+    _claim_reason(http_client, project_id)
+    blocked = http_client.post(
+        f"/projects/{project_id}/complete",
+        json={"from": [], "description": "done", "worker": "reasoner"},
+    )
+    assert blocked.status_code == 409
+    behavior_blockers = [
+        item for item in blocked.json()["detail"]["blockers"]
+        if item["kind"] == "behavior"
+    ]
+    assert len(behavior_blockers) == 1
+    assert behavior_blockers[0]["status"] == "open"
+
+    intent = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": [evidence_fact_id],
+            "description": "test admin settings authorization and input handling",
+            "creator": "reasoner",
+            "action_kind": "security_test",
+            "surface_refs": [surface["id"]],
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
+        json={"worker": "tester"},
+    ).status_code == 200
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/conclude",
+        json={
+            "worker": "tester",
+            "description": "The assigned settings Behavior was tested.",
+            "data": {"tested_surface_refs": [surface["id"]]},
+        },
+    ).status_code == 200
+
+    completed = http_client.post(
+        f"/projects/{project_id}/complete",
+        json={"from": [], "description": "important Behaviors closed", "worker": "reasoner"},
+    )
+    assert completed.status_code == 200
+
+
+def test_v3_web_dispatch_graph_keeps_complete_fact_description(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client, planning_version=3)
+    intent = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"],
+            "description": "inspect one authentication result",
+            "creator": "reasoner",
+            "action_kind": "auth_probe",
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
+        json={"worker": "explorer"},
+    ).status_code == 200
+    critical_result = "ADMIN_LOGIN_SUCCEEDED_AND_SESSION_IS_VALID"
+    description = ("Authentication execution detail. " * 20) + critical_result
+    concluded = http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/conclude",
+        json={"worker": "explorer", "description": description},
+    )
+    assert concluded.status_code == 200
+    fact_id = concluded.json()["fact"]["id"]
+
+    project = InProcessClient(http_client).get_project(project_id)
+    stored_fact = next(fact for fact in project.facts if fact.id == fact_id)
+    assert stored_fact.summary == description[:320]
+
+    web_payload = json.loads(format_dispatch_graph(project))
+    web_fact = next(fact for fact in web_payload["facts"] if fact["id"] == fact_id)
+    assert web_fact["summary"] == description
+    assert critical_result in web_fact["summary"]
+
+    non_web_project = project.model_copy(deep=True)
+    non_web_project.project = project.project.model_copy(update={"mode": "ctf"})
+    non_web_payload = json.loads(format_dispatch_graph(non_web_project))
+    non_web_fact = next(
+        fact for fact in non_web_payload["facts"] if fact["id"] == fact_id
+    )
+    assert non_web_fact["summary"] == description[:320]
+    assert critical_result not in non_web_fact["summary"]
+
+
+def test_web_fact_rules_are_added_without_changing_non_web_prompt(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client)
+    project = InProcessClient(http_client).get_project(project_id)
+    base_prompt = 'existing explore contract'
+
+    web_prompt = _with_web_fact_output_rules(base_prompt, project)
+    assert web_prompt.startswith(base_prompt)
+    assert 'Start description with one direct sentence' in web_prompt
+    assert 'current task log or execution artifact' in web_prompt
+    assert 'separate milestone Facts' in web_prompt
+    assert 'authentication artifacts inside the project container' in web_prompt
+    assert 'is no_result, never a negative security conclusion' in web_prompt
+    assert _with_web_fact_output_rules(base_prompt, project, 'mock') == base_prompt
+
+    non_web_project = project.model_copy(deep=True)
+    non_web_project.project = project.project.model_copy(update={'mode': 'ctf'})
+    assert _with_web_fact_output_rules(base_prompt, non_web_project) == base_prompt
+
+
+def test_web_fact_keeps_its_execution_log_as_traceable_evidence(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client)
+    intent = http_client.post(
+        f'/projects/{project_id}/intents',
+        json={
+            'from': ['origin'],
+            'description': 'test one authentication outcome',
+            'creator': 'reasoner',
+            'action_kind': 'auth_probe',
+        },
+    ).json()
+    intent_id = intent['id']
+    claimed = http_client.post(
+        f'/projects/{project_id}/intents/{intent_id}/heartbeat',
+        json={'worker': 'explorer'},
+    )
+    assert claimed.status_code == 200
+
+    task_log = http_client.post(
+        f'/projects/{project_id}/logs',
+        json={
+            'task_type': 'explore',
+            'intent_id': intent_id,
+            'worker_name': 'explorer',
+            'phase': 'explore_execute',
+            'stdin': 'submit the authorized login request',
+            'stdout': 'HTTP 302; Set-Cookie: authenticated-session',
+            'stderr': '',
+            'return_code': 0,
+            'duration_ms': 120,
+        },
+    ).json()
+    task_log_id = task_log['id']
+    description = (
+        'Administrator login succeeded. The response issued an authenticated '
+        'session and redirected to the administration page.'
+    )
+    concluded = http_client.post(
+        f'/projects/{project_id}/intents/{intent_id}/conclude',
+        json={'worker': 'explorer', 'description': description},
+    )
+    assert concluded.status_code == 200
+    fact = concluded.json()['fact']
+    assert fact['description'] == description
+    assert f'task_log:{task_log_id}' in fact['evidence_refs']
+    assert task_log_id in fact['task_log_refs']
+
+
+def test_web_reason_uses_cairn_planning_and_binds_only_unique_surface(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client)
+    surface_ids = {}
+    for fingerprint, path in (
+        ('login-form', '/login'),
+        ('search-form', '/search'),
+    ):
+        response = http_client.post(
+            f'/projects/{project_id}/surfaces',
+            json={
+                'fingerprint': fingerprint,
+                'surface_group': fingerprint,
+                'target': 'example.test',
+                'port': 443,
+                'method': 'GET',
+                'path_template': path,
+                'surface_type': 'form',
+                'source_fact_id': 'origin',
+            },
+        )
+        assert response.status_code == 200
+        surface_ids[path] = response.json()['id']
+
+    project = InProcessClient(http_client).get_project(project_id)
+    security = _bind_matching_surface(
+        project,
+        {
+            'from': ['origin'],
+            'description': 'test the login authentication behavior',
+            'target': 'example.test',
+            'port': 443,
+            'path': '/login',
+            'action_kind': 'auth_probe',
+        },
+    )
+    assert security['surface_ref'] == surface_ids['/login']
+
+    mapping = _bind_matching_surface(
+        project,
+        {
+            'from': ['origin'],
+            'description': 'map the login interaction',
+            'path': '/login',
+            'action_kind': 'asset_discovery',
+        },
+    )
+    assert 'surface_ref' not in mapping
+
+    capability = _bind_matching_surface(
+        project,
+        {
+            'from': ['origin'],
+            'description': 'establish reusable CAPTCHA handling',
+            'action_kind': 'authentication_capability',
+        },
+    )
+    assert 'surface_ref' not in capability
+
+    first_signature = _intent_signature_from_data(
+        project,
+        {
+            **security,
+            'test_variant': 'session_behavior',
+        },
+    )
+    second_signature = _intent_signature_from_data(
+        project,
+        {
+            **security,
+            'surface_ref': surface_ids['/search'],
+            'test_variant': 'session_behavior',
+        },
+    )
+    assert first_signature != second_signature
+
+    base_prompt = '2. Otherwise, propose one smallest useful Intent.'
+    web_prompt = _with_web_reason_planning_rules(base_prompt, project, 2)
+    assert 'propose one or two smallest useful Intents' in web_prompt
+    assert 'no more than 2 entries' in web_prompt
+    assert 'independent, high-value, non-overlapping' in web_prompt
+    assert 'fixed page-by-vulnerability matrix' in web_prompt
+    assert 'authenticated/privileged session as a milestone' in web_prompt
+    assert 'from that Fact' in web_prompt
+    assert _with_web_reason_planning_rules(base_prompt, project, 2, 'mock') == base_prompt
+
+    non_web = project.model_copy(deep=True)
+    non_web.project = project.project.model_copy(update={'mode': 'ctf'})
+    assert _bind_matching_surface(non_web, security) == security
+    assert _with_web_reason_planning_rules(base_prompt, non_web, 2) == base_prompt
+
+
+def test_surface_graph_state_uses_exact_surface_ref_across_api_ui_and_report(
+    http_client: TestClient,
+) -> None:
+    project_id = _create_real_project(http_client)
+    mapping_intent = http_client.post(
+        f'/projects/{project_id}/intents',
+        json={
+            'from': ['origin'],
+            'description': 'map the login and search pages',
+            'creator': 'reasoner',
+            'action_kind': 'asset_discovery',
+        },
+    ).json()
+    mapping_intent_id = mapping_intent['id']
+    assert http_client.post(
+        f'/projects/{project_id}/intents/{mapping_intent_id}/heartbeat',
+        json={'worker': 'mapper'},
+    ).status_code == 200
+    mapped = http_client.post(
+        f'/projects/{project_id}/intents/{mapping_intent_id}/conclude',
+        json={
+            'worker': 'mapper',
+            'description': 'The login and search pages were mapped.',
+        },
+    )
+    assert mapped.status_code == 200
+    mapping_fact_id = mapped.json()['fact']['id']
+
+    surface_ids = {}
+    for fingerprint, path, surface_group in (
+        ('login-form', '/login', 'login form'),
+        ('search-form', '/search', 'search form'),
+    ):
+        response = http_client.post(
+            f'/projects/{project_id}/surfaces',
+            json={
+                'fingerprint': fingerprint,
+                'surface_group': surface_group,
+                'target': 'example.test',
+                'port': 443,
+                'method': 'GET',
+                'path_template': path,
+                'surface_type': 'form',
+                'source_fact_id': mapping_fact_id,
+            },
+        )
+        assert response.status_code == 200
+        surface_ids[path] = response.json()['id']
+
+    security_intent = http_client.post(
+        f'/projects/{project_id}/intents',
+        json={
+            'from': [mapping_fact_id],
+            'description': 'test only the login form authentication behavior',
+            'creator': 'reasoner',
+            'action_kind': 'auth_probe',
+            'surface_ref': surface_ids['/login'],
+        },
+    ).json()
+    security_intent_id = security_intent['id']
+    assert http_client.post(
+        f'/projects/{project_id}/intents/{security_intent_id}/heartbeat',
+        json={'worker': 'explorer'},
+    ).status_code == 200
+    tested = http_client.post(
+        f'/projects/{project_id}/intents/{security_intent_id}/conclude',
+        json={
+            'worker': 'explorer',
+            'description': 'The login form authentication behavior was tested.',
+        },
+    )
+    assert tested.status_code == 200
+
+    for view in ('dispatch', 'full'):
+        detail = http_client.get(
+            f'/projects/{project_id}?view={view}',
+        ).json()
+        states = {
+            surface['path_template']: (
+                surface['graph_discovery_status'],
+                surface['graph_testing_status'],
+            )
+            for surface in detail['surface_inventory']
+        }
+        assert states == {
+            '/login': ('mapped', 'security_tested'),
+            '/search': ('mapped', 'not_tested'),
+        }
+
+    login_surface_id = surface_ids['/login']
+    search_surface_id = surface_ids['/search']
+    report = http_client.get(
+        f'/projects/{project_id}/export?format=report',
+    ).text
+    assert (
+        f'- {login_surface_id} (GET /login): '
+        'graph_state=mapped / security_tested'
+    ) in report
+    assert (
+        f'- {search_surface_id} (GET /search): '
+        'graph_state=mapped / not_tested'
+    ) in report
+
+    index = http_client.get('/').text
+    assert 'surface.graph_discovery_status' in index
+    assert 'surface.graph_testing_status' in index
+    assert 'factIds.includes(intent.to)' not in index
+
+    with get_conn() as conn:
+        conn.execute(
+            'UPDATE projects SET mode = ? WHERE id = ?',
+            ('ctf', project_id),
+        )
+    non_web = http_client.get(
+        f'/projects/{project_id}?view=full',
+    ).json()
+    assert all(
+        surface['graph_discovery_status'] is None
+        and surface['graph_testing_status'] is None
+        for surface in non_web['surface_inventory']
+    )
 
 
 def test_v2_assesses_non_security_behavior_without_creating_matrix(http_client: TestClient) -> None:
@@ -472,8 +1218,9 @@ def test_v2_assesses_non_security_behavior_without_creating_matrix(http_client: 
     assert detail.hypotheses == []
     assert detail.coverage_items == []
     assert detail.intents == []
+    assert client.claim_reason(project_id, "reasoner", "test completion").ok
     completed = client.complete(
-        project_id, ["origin"], "no evidence-supported security hypothesis remained", "reasoner"
+        project_id, [], "no evidence-supported security hypothesis remained", "reasoner"
     )
     assert completed.status_code == 200
 
@@ -604,7 +1351,7 @@ def test_v3_agent_materializes_only_exact_evidence_backed_hypothesis(http_client
         },
     )
     assert concluded.status_code == 200
-    assert client.get_project(project_id).hypotheses[0].status == "blocked_by_precondition"
+    assert client.get_project(project_id).hypotheses[0].status == "concluded"
 
 
 def test_v3_frontier_prunes_stalled_evidence_basis_and_reopens_for_new_fact(

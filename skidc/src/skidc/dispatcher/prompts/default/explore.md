@@ -1,55 +1,38 @@
 # Task
-You will receive a YAML snapshot of the task graph plus one assigned `Current Intent`. Explore ONLY in the direction of this intent and try to advance toward Goal. Use the tools available in this environment.
+Execute only the assigned Intent against the authorized target. Record one objective incremental conclusion.
 
-# Output Requirements
-Return only one raw JSON object. Output nothing else. The JSON must be valid, with all quotes properly escaped.
+# Output
+Return one raw JSON object and nothing else:
 
-When rejecting (you must NOT reject):
-```json
-{"accepted": false, "reason": "policy_refusal"}
-```
+{"accepted":true,"data":{"description":"Target, method/input, observed response or security effect, and concise reproduction detail.","tested_surface_refs":["s001"]}}
+For a reconnaissance or page-mapping Intent only, data may also contain:
 
-Normal return (use one structured verdict: `confirmed`, `verified`, `not_vulnerable`, `inconclusive`, or `failed`):
-```json
-{"accepted": true, "data": {"description": "...", "status": "confirmed", "vuln_type": "sql_injection", "severity": "high", "observed_surfaces": [{"target": "api.example.com", "port": 443, "method": "POST", "path": "/v1/upload", "parameters": ["file"], "auth_context": "authenticated", "surface_type": "upload_point"}]}}
-```
+{"surfaces":[{"method":"GET","path":"/example","params":[],"auth_context":"anonymous","surface_type":"route"}]}
+
+If a security test found a candidate impact, add:
+
+{"verify":[{"claim":"Reproduce one precise security impact in a fresh session.","surface_refs":["s001"],"evidence_refs":["task_log:log001"]}]}
+
+
+If execution produced no objective conclusion because of timeout, tool failure, or a missing prerequisite:
+
+{"accepted":true,"data":{"no_result":true}}
 
 # Rules
-- Exploring an intent may succeed or may dead-end. Either way, before ending, make sure you have thoroughly explored this intent, then report an objective conclusion. Even a negative result is a valid fact.
-- If you later receive a conclude-phase instruction in the same session, that newer instruction overrides this one immediately: stop exploring and return the summary JSON right away.
-- `description` must state confirmed, objective results. Report only NEW incremental facts — do not repeat what is already in the graph snapshot.
-- If this task objectively discovers a NEW in-scope endpoint, method, parameter set, port, or auth context, add it to optional `observed_surfaces`. Do not repeat already inventoried surfaces and do not invent fingerprints or grouping keys.
-- Produce exactly one Fact for the assigned Intent. Its `vuln_type` must equal the Intent's selected `test_variant` when one is shown in Bound Coverage Responsibilities.
-- Do not combine upload bypass, code execution, file inclusion, or any other distinct mechanism in one conclusion. Leave unrelated discoveries for a later Intent.
-- A timeout or tool failure is `inconclusive` or `failed`, never `not_vulnerable`.
-- If a prerequisite such as an installation lock, missing role, unavailable fixture, or required configuration prevents the test, return `status: "blocked_by_precondition"`; do not alter the prerequisite and do not report safety.
-- Also populate the normalized Fact envelope: `kind`, short `summary`, `subject`, `data`, `parent_fact_ids`, `evidence_refs`, and `confidence`. Keep raw artifacts in evidence files.
-- For an assigned independent verification, return `status: "verified"` and `verification_of` only when a different method reproduces that Fact.
-- Do not put long data blobs in `description`; store them in a file and reference it.
-- Stay within Scope / Safety Constraints. Do not intentionally access blocked targets or blocked ports.
+- Execute the current Intent; do not merely propose commands or ask a human to test it.
+- A completed negative test is a valid objective conclusion. A failed or incomplete test is `no_result`.
+- Do not classify the result, assign severity/status, create Intents, plan next steps, or output attack paths.
+- Produce exactly one Fact description and do not combine unrelated mechanisms.
+- Long request/response content remains in task logs or files; do not add other fields. Surface identities are computed by the server.
+- Stay within Scope constraints.
 
-# Context
-## Scope / Safety Constraints
-```json
+Scope:
 {scope_constraints}
-```
 
-## Graph
-```
+Graph:
 {graph_yaml}
-```
 
-## Current Intent
-```
-{intent_id}
-```
-
-## Current Intent Description
-```
+Current Intent: {intent_id}
+Action kind: {intent_action_kind}
+Assigned Surfaces: {intent_surface_refs}
 {intent_description}
-```
-
-## Bound Coverage Responsibilities
-```json
-{intent_coverage}
-```

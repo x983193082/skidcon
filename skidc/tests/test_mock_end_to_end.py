@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from skidc.dispatcher.contracts import extract_reason_handoff, validate_reason_payload
 from skidc.dispatcher.models import ReasonCheckpoint
 from skidc.dispatcher.prompting import format_coverage_summary
+from skidc.dispatcher.tasks.explore import _write_explore_conclusion
 from skidc.dispatcher.tasks.reason import (
     _coverage_from_seed_deck,
     _coverage_key,
@@ -14,6 +15,7 @@ from skidc.dispatcher.tasks.reason import (
     ensure_coverage_work,
     _persist_reason_handoff,
     _profile_coverage_from_seed,
+    _ensure_orphan_verify_work,
 )
 from tests.conftest import (
     InProcessClient,
@@ -87,7 +89,38 @@ def test_reason_explore_reason_complete_chain(http_client: TestClient) -> None:
     assert any("/explore_execute-" in path and "f001" in content for _, path, content in containers.writes)
 
 
-def test_reason_can_complete_with_unresolved_coverage_as_a_limitation(http_client: TestClient) -> None:
+def test_v3_recon_reason_intent_does_not_materialize_surface_or_coverage(
+    http_client: TestClient,
+) -> None:
+    client = InProcessClient(http_client)
+    containers = LocalContainerManager()
+    loop = make_loop(
+        mock_config(
+            bootstrap=phase("complete"),
+            reason=phase("intent"),
+            explore=phase("fact"),
+        ),
+        client,
+        containers,
+    )
+    project_id = create_project(
+        http_client,
+        bootstrap_enabled=False,
+        required_recon_categories=["port_scan", "directory", "asset"],
+    )
+    try:
+        dispatch_and_wait(loop)
+        project = client.get_project(project_id)
+    finally:
+        loop.close()
+
+    assert project.project.phase == "recon"
+    assert len(project.intents) >= 1
+    assert project.surface_inventory == []
+    assert project.coverage_items == []
+
+
+def test_reason_stops_for_attention_when_required_coverage_is_unresolved(http_client: TestClient) -> None:
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
     loop = make_loop(
@@ -134,18 +167,10 @@ def test_reason_can_complete_with_unresolved_coverage_as_a_limitation(http_clien
 def test_failed_attempt_fact_can_be_followed_by_alternate_work_with_full_trace(
     http_client: TestClient,
 ) -> None:
-    project_id = http_client.post(
-        "/projects",
-        json={
-            "title": "alternate attempt",
-            "origin": "http://example.test/login",
-            "goal": "verify the authorized login surface",
-            "mode": "real_website",
-            "recon_profile": {"required_categories": []},
-        },
-    ).json()["project"]["id"]
-    advanced = http_client.post(f"/projects/{project_id}/phase/advance", json={})
-    assert advanced.status_code == 200 and advanced.json()["advanced"]
+    project_id = create_project(
+        http_client, bootstrap_enabled=False, required_recon_categories=[]
+    )
+    assert http_client.post(f"/projects/{project_id}/phase/advance", json={}).json()["advanced"]
     coverage = http_client.post(
         f"/projects/{project_id}/coverage",
         json={
@@ -156,168 +181,97 @@ def test_failed_attempt_fact_can_be_followed_by_alternate_work_with_full_trace(
             "priority": 8,
         },
     ).json()
-    first = http_client.post(
+    intent = http_client.post(
         f"/projects/{project_id}/intents",
         json={
             "from": ["origin"],
-            "description": "try the first login verification method",
+            "description": "verify login with an alternate method after transient failure",
             "creator": "reasoner",
-            "priority": 8,
             "coverage_refs": [coverage["id"]],
         },
     ).json()
-    http_client.post(
-        f"/projects/{project_id}/intents/{first['id']}/heartbeat",
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
         json={"worker": "worker-1"},
-    )
+    ).status_code == 200
     first_log = http_client.post(
         f"/projects/{project_id}/logs",
         json={
-            "task_type": "explore",
-            "intent_id": first["id"],
-            "worker_name": "worker-1",
-            "phase": "explore_execute",
-            "stdin": "first verification method",
-            "stdout": "",
-            "stderr": "timed out",
-            "return_code": 124,
-            "timed_out": True,
-            "duration_ms": 1000,
+            "task_type": "explore", "intent_id": intent["id"], "worker_name": "worker-1",
+            "phase": "explore_execute", "stdin": "first method", "stdout": "",
+            "stderr": "timed out", "return_code": 124, "timed_out": True, "duration_ms": 1000,
         },
     ).json()
-    dead = http_client.post(
-        f"/projects/{project_id}/intents/{first['id']}/failure",
-        json={
-            "worker": "worker-1",
-            "error": "first method timed out",
-            "max_attempts": 1,
-            "backoff_seconds": 0,
-        },
-    )
-    assert dead.status_code == 200
-    assert dead.json()["status"] == "concluded"
-
-    after_failure = http_client.get(f"/projects/{project_id}").json()
-    assert after_failure["project"]["status"] == "active"
-    assert after_failure["project"]["completion_blockers"] == []
-    failed_intent = next(item for item in after_failure["intents"] if item["id"] == first["id"])
-    assert failed_intent["status"] == "concluded"
-    assert next(fact for fact in after_failure["facts"] if fact["id"] == failed_intent["to"])["status"] == "failed"
-
-    replacement = http_client.post(
-        f"/projects/{project_id}/intents",
-        json={
-            "from": ["origin"],
-            "description": "retry login verification with an alternate method",
-            "creator": "reasoner",
-            "priority": 8,
-            "coverage_refs": [coverage["id"]],
-        },
+    retry = http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/failure",
+        json={"worker": "worker-1", "error": "first method timed out", "max_attempts": 3, "backoff_seconds": 0},
     ).json()
-    http_client.post(
-        f"/projects/{project_id}/intents/{replacement['id']}/heartbeat",
+    assert retry["status"] == "open"
+    assert retry["to"] is None
+    assert retry["dead_lettered_at"] is None
+    assert len(http_client.get(f"/projects/{project_id}").json()["facts"]) == 2
+
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
         json={"worker": "worker-2"},
-    )
-    replacement_log = http_client.post(
+    ).status_code == 200
+    second_log = http_client.post(
         f"/projects/{project_id}/logs",
         json={
-            "task_type": "explore",
-            "intent_id": replacement["id"],
-            "worker_name": "worker-2",
-            "phase": "explore_execute",
-            "stdin": "alternate verification method",
-            "stdout": "control weakness reproduced",
-            "stderr": "",
-            "return_code": 0,
-            "duration_ms": 200,
+            "task_type": "explore", "intent_id": intent["id"], "worker_name": "worker-2",
+            "phase": "explore_execute", "stdin": "alternate method",
+            "stdout": "security effect reproduced", "stderr": "", "return_code": 0, "duration_ms": 200,
         },
     ).json()
     fact = http_client.post(
-        f"/projects/{project_id}/intents/{replacement['id']}/conclude",
+        f"/projects/{project_id}/intents/{intent['id']}/conclude",
         json={
             "worker": "worker-2",
-            "description": "Login authentication weakness was confirmed by the alternate method.",
-            "vuln_type": "authentication_bypass",
-            "severity": "high",
-            "status": "confirmed",
-            "coverage_refs": [coverage["id"]],
+            "description": "Alternate request sequence reproduced the login security effect.",
+            "evidence_refs": ["evidence/login-alternate.txt"],
         },
     ).json()["fact"]
+    assert fact["status"] is None and fact["vuln_type"] is None and fact["result_class"] is None
+    ledger = http_client.get(f"/projects/{project_id}/coverage").json()[0]
+    assert ledger["execution_status"] == "completed"
+    assert ledger["outcome"] == "informational"
 
-    coverage_after = http_client.get(f"/projects/{project_id}/coverage").json()[0]
-    assert coverage_after["intent_ids"] == [first["id"], replacement["id"]]
-    assert coverage_after["outcome"] == "vulnerable"
-    assert coverage_after["execution_status"] == "completed"
-    assert set(coverage_after["task_log_refs"]) == {first_log["id"], replacement_log["id"]}
-
-
-    verifier = http_client.post(
+    verify_intent = http_client.post(
         f"/projects/{project_id}/intents",
         json={
             "from": [fact["id"]],
-            "description": "independently reproduce the confirmed authentication bypass",
+            "description": "independently reproduce the login security effect",
             "creator": "reasoner",
-            "priority": 9,
-            "coverage_refs": [coverage["id"]],
-            "test_variant": "authentication_bypass",
+            "action_kind": "verify_candidate",
         },
     ).json()
-    http_client.post(
-        f"/projects/{project_id}/intents/{verifier['id']}/heartbeat",
-        json={"worker": "worker-3"},
-    )
-    verifier_log = http_client.post(
-        f"/projects/{project_id}/logs",
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{verify_intent['id']}/heartbeat",
+        json={"worker": "verifier"},
+    ).status_code == 200
+    verification = http_client.post(
+        f"/projects/{project_id}/intents/{verify_intent['id']}/conclude",
         json={
-            "task_type": "explore",
-            "intent_id": verifier["id"],
-            "worker_name": "worker-3",
-            "phase": "explore_execute",
-            "stdin": "independent verification method",
-            "stdout": "authentication bypass independently reproduced",
-            "stderr": "",
-            "return_code": 0,
-            "duration_ms": 180,
-        },
-    ).json()
-    verified_fact = http_client.post(
-        f"/projects/{project_id}/intents/{verifier['id']}/conclude",
-        json={
-            "worker": "worker-3",
-            "description": "An independent request sequence reproduced the authentication bypass.",
-            "vuln_type": "authentication_bypass",
-            "severity": "high",
-            "status": "verified",
+            "worker": "verifier",
+            "description": "A fresh session reproduced the login security effect.",
+            "status": "reproduced",
             "verification_of": fact["id"],
-            "coverage_refs": [coverage["id"]],
+            "kind": "verification_result",
+            "data": {"result": "reproduced", "attempts": [{"attempt": 1}]},
         },
     ).json()["fact"]
-
-    verified_coverage = http_client.get(f"/projects/{project_id}/coverage").json()[0]
-    assert verified_coverage["intent_ids"] == [first["id"], replacement["id"], verifier["id"]]
-    assert set(verified_coverage["task_log_refs"]) == {
-        first_log["id"], replacement_log["id"], verifier_log["id"]
-    }
-    verified_variant = next(item for item in verified_coverage["variant_results"] if item["variant"] == "authentication_bypass")
-    assert verified_variant["verification"] == "verified"
-
+    assert http_client.post(
+        f"/projects/{project_id}/reason/claim",
+        json={"worker": "reasoner", "trigger": "test completion"},
+    ).status_code == 200
     completed = http_client.post(
         f"/projects/{project_id}/complete",
-        json={
-            "from": [fact["id"], verified_fact["id"]],
-            "description": "all required coverage has a terminal independently verified result",
-            "worker": "reasoner",
-        },
+        json={"from": [verification["id"]], "description": "goal edge selects the reproduced result", "worker": "reasoner"},
     )
     assert completed.status_code == 200
-    detail = http_client.get(f"/projects/{project_id}").json()
-    assert detail["project"]["status"] == "completed"
-    assert detail["project"]["completion_blockers"] == []
-
-    report = http_client.get(f"/projects/{project_id}/export?format=report").text
-    assert first_log["id"] in report
-    assert replacement_log["id"] in report
-    assert verifier_log["id"] in report
+    paths = http_client.get(f"/projects/{project_id}/attack-paths").json()
+    assert len(paths) == 1 and paths[0]["status"] == "complete"
+    assert set(paths[0]["task_log_refs"]) == {first_log["id"], second_log["id"]}
 
 
 def test_enabled_project_skips_bootstrap_when_worker_lacks_capability(http_client: TestClient) -> None:
@@ -617,3 +571,333 @@ def test_v2_does_not_expand_manual_coverage_variants(http_client: TestClient) ->
     after = client.get_project(project_id)
     assert after.intents == []
     assert after.coverage_items[0].id == coverage["id"]
+
+def _create_web_verify_case(http_client: TestClient) -> tuple[str, str, str]:
+    created = http_client.post(
+        "/projects",
+        json={
+            "title": "bounded Verify integration",
+            "origin": "http://example.test/",
+            "goal": "Assess the authorized local Web application.",
+            "mode": "real_website",
+            "bootstrap_enabled": False,
+            "recon_profile": {"required_categories": []},
+        },
+    )
+    assert created.status_code == 201
+    project_id = created.json()["project"]["id"]
+    advanced = http_client.post(f"/projects/{project_id}/phase/advance", json={})
+    assert advanced.status_code == 200
+    assert advanced.json()["advanced"] is True
+
+    candidate_intent = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"],
+            "description": "Probe the reflected input and record the observed behavior.",
+            "creator": "reasoner",
+            "action_kind": "xss_probe",
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{candidate_intent['id']}/heartbeat",
+        json={"worker": "explorer"},
+    ).status_code == 200
+    candidate_response = http_client.post(
+        f"/projects/{project_id}/intents/{candidate_intent['id']}/conclude",
+        json={
+            "worker": "explorer",
+            "description": "A reflected marker was observed and requires independent reproduction.",
+        },
+    )
+    assert candidate_response.status_code == 200
+    candidate_id = candidate_response.json()["fact"]["id"]
+
+    verify_response = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": [candidate_id],
+            "description": "Independently reproduce the candidate reflected-input finding.",
+            "creator": "reasoner",
+            "action_kind": "verify_candidate",
+            "priority": 10,
+        },
+    )
+    assert verify_response.status_code == 201
+    duplicate = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": [candidate_id],
+            "description": "Same Verify work expressed with alternate wording.",
+            "creator": "reasoner",
+            "action_kind": "verify_candidate",
+            "priority": 9,
+        },
+    )
+    assert duplicate.status_code == 201
+    assert duplicate.json()["id"] == verify_response.json()["id"]
+    return project_id, candidate_id, verify_response.json()["id"]
+
+
+def test_web_explore_candidate_deterministically_creates_verify_intent(
+    http_client: TestClient,
+) -> None:
+    client = InProcessClient(http_client)
+    created = http_client.post(
+        "/projects",
+        json={
+            "title": "deterministic Verify handoff",
+            "origin": "http://example.test/",
+            "goal": "Assess the authorized local Web application.",
+            "mode": "real_website",
+            "bootstrap_enabled": False,
+            "recon_profile": {"required_categories": []},
+        },
+    )
+    project_id = created.json()["project"]["id"]
+    assert http_client.post(f"/projects/{project_id}/phase/advance", json={}).status_code == 200
+    surface = http_client.post(
+        f"/projects/{project_id}/surfaces",
+        json={
+            "fingerprint": "search-get-q",
+            "surface_group": "search",
+            "target": "example.test",
+            "port": 80,
+            "method": "GET",
+            "path_template": "/search",
+            "params": ["q"],
+            "auth_context": "anonymous",
+            "surface_type": "route",
+            "source_fact_id": "origin",
+        },
+    ).json()
+    created_intent = client.create_intent(
+        project_id,
+        ["origin"],
+        "Probe one reflected input.",
+        "reasoner",
+        target="example.test",
+        port=80,
+        path="/search",
+        surface_ref=surface["id"],
+        surface_refs=[surface["id"]],
+        action_kind="security_test",
+        test_variant="xss",
+    )
+    intent_id = created_intent.data["id"]
+    config = mock_config(
+        bootstrap=phase("complete"),
+        reason=phase("complete"),
+        explore=phase("fact"),
+    )
+    worker = config.workers[0]
+    assert client.heartbeat(project_id, intent_id, worker.name).ok
+    project = client.get_project(project_id)
+    intent = next(item for item in project.intents if item.id == intent_id)
+
+    status = _write_explore_conclusion(
+        client,
+        project,
+        intent,
+        worker,
+        {
+            "description": "The tested marker was reflected in an executable response context.",
+            "tested_surface_refs": [surface["id"]],
+            "verify_requests": [{
+                "claim": "Repeat the request in a fresh session and confirm marker execution.",
+                "surface_refs": [surface["id"]],
+                "evidence_refs": ["log001"],
+            }],
+        },
+        source="test",
+        phase_ms=1,
+    )
+    assert status == "success"
+
+    after = client.get_project(project_id)
+    candidate = next(fact for fact in after.facts if fact.id not in {"origin", "goal"})
+    assert candidate.data == {
+        "tested_surface_refs": [surface["id"]],
+        "verify_requests": [{
+            "claim": "Repeat the request in a fresh session and confirm marker execution.",
+            "surface_refs": [surface["id"]],
+            "evidence_refs": ["log001"],
+        }],
+        "verify_request": "Repeat the request in a fresh session and confirm marker execution.",
+    }
+    verify = next(item for item in after.intents if item.action_kind == "verify")
+    assert verify.from_ == [candidate.id]
+    assert verify.path == "/search"
+    assert verify.test_variant == "xss"
+    assert verify.surface_refs == [surface["id"]]
+
+
+def test_web_surface_testing_state_uses_exact_tested_refs(http_client: TestClient) -> None:
+    created = http_client.post(
+        "/projects",
+        json={
+            "title": "exact Surface test state",
+            "origin": "http://example.test/",
+            "goal": "Assess the authorized local Web application.",
+            "mode": "real_website",
+            "bootstrap_enabled": False,
+            "recon_profile": {"required_categories": []},
+        },
+    ).json()
+    project_id = created["project"]["id"]
+    assert http_client.post(f"/projects/{project_id}/phase/advance", json={}).status_code == 200
+    surfaces = []
+    for index in range(2):
+        surfaces.append(http_client.post(
+            f"/projects/{project_id}/surfaces",
+            json={
+                "fingerprint": f"route-{index}",
+                "surface_group": "routes",
+                "target": "example.test",
+                "port": 80,
+                "method": "GET",
+                "path_template": f"/route/{index}",
+                "params": [],
+                "auth_context": "anonymous",
+                "surface_type": "route",
+                "source_fact_id": "origin",
+            },
+        ).json())
+    refs = [surface["id"] for surface in surfaces]
+    intent = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"],
+            "description": "Test the related route batch.",
+            "creator": "reasoner",
+            "action_kind": "security_test",
+            "surface_refs": refs,
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
+        json={"worker": "explorer"},
+    ).status_code == 200
+    concluded = http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/conclude",
+        json={
+            "worker": "explorer",
+            "description": "Only the first assigned route was actually tested.",
+            "data": {"tested_surface_refs": [refs[0]]},
+        },
+    )
+    assert concluded.status_code == 200
+    state = {
+        surface["id"]: surface["graph_testing_status"]
+        for surface in http_client.get(f"/projects/{project_id}").json()["surface_inventory"]
+    }
+    assert state == {refs[0]: "security_tested", refs[1]: "not_tested"}
+
+
+def test_reason_restores_orphan_verify_handoff_once(http_client: TestClient) -> None:
+    project_id, candidate_id, verify_intent_id = _create_web_verify_case(http_client)
+    # Remove only the queued test Intent to simulate a transient handoff failure.
+    from skidc.server.db import get_conn
+
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM intent_sources WHERE project_id = ? AND intent_id = ?",
+            (project_id, verify_intent_id),
+        )
+        conn.execute(
+            "DELETE FROM intents WHERE project_id = ? AND id = ?",
+            (project_id, verify_intent_id),
+        )
+        conn.execute(
+            "UPDATE facts SET data = ? WHERE project_id = ? AND id = ?",
+            (
+                json.dumps({"verify_request": "Reproduce the reflected-input candidate."}),
+                project_id,
+                candidate_id,
+            ),
+        )
+
+    client = InProcessClient(http_client)
+    assert _ensure_orphan_verify_work(client, client.get_project(project_id), "reasoner") == 1
+    assert _ensure_orphan_verify_work(client, client.get_project(project_id), "reasoner") == 0
+
+
+def test_verify_reproduced_runs_all_three_fresh_attempts(
+    http_client: TestClient,
+) -> None:
+    client = InProcessClient(http_client)
+    containers = LocalContainerManager()
+    loop = make_loop(
+        mock_config(
+            bootstrap=phase("complete"),
+            reason=phase("complete"),
+            explore=phase("fact"),
+            verify=phase("reproduced"),
+        ),
+        client,
+        containers,
+    )
+    project_id, candidate_id, verify_intent_id = _create_web_verify_case(http_client)
+    try:
+        dispatch_and_wait(loop)
+        project = client.get_project(project_id)
+    finally:
+        loop.close()
+
+    result = next(fact for fact in project.facts if fact.verification_of == candidate_id)
+    assert result.kind == "verification_result"
+    assert result.status == "reproduced"
+    assert result.vuln_type is None and result.severity is None
+    assert result.data["result"] == "reproduced"
+    assert len(result.data["attempts"]) == 3
+    logs = http_client.get(
+        f"/projects/{project_id}/logs",
+        params={"task_type": "verify", "intent_id": verify_intent_id},
+    ).json()
+    assert {log["phase"] for log in logs} == {
+        "verify_execute_attempt_1",
+        "verify_execute_attempt_2",
+        "verify_execute_attempt_3",
+    }
+
+
+def test_verify_not_reproduced_uses_three_attempts_and_does_not_block_complete(
+    http_client: TestClient,
+) -> None:
+    client = InProcessClient(http_client)
+    containers = LocalContainerManager()
+    loop = make_loop(
+        mock_config(
+            bootstrap=phase("complete"),
+            reason=phase("complete"),
+            explore=phase("fact"),
+            verify=phase("not_reproduced"),
+        ),
+        client,
+        containers,
+    )
+    project_id, candidate_id, verify_intent_id = _create_web_verify_case(http_client)
+    try:
+        dispatch_and_wait(loop)
+        after_verify = client.get_project(project_id)
+        result = next(fact for fact in after_verify.facts if fact.verification_of == candidate_id)
+        assert result.status == "not_reproduced"
+        assert len(result.data["attempts"]) == 3
+
+        dispatch_and_wait(loop)
+        completed = client.get_project(project_id)
+    finally:
+        loop.close()
+
+    assert completed.project.status == "completed"
+    logs = http_client.get(
+        f"/projects/{project_id}/logs",
+        params={"task_type": "verify", "intent_id": verify_intent_id},
+    ).json()
+    assert {log["phase"] for log in logs} == {
+        "verify_execute_attempt_1",
+        "verify_execute_attempt_2",
+        "verify_execute_attempt_3",
+    }
+    paths = http_client.get(f"/projects/{project_id}/attack-paths").json()
+    assert all(result.id not in path["fact_chain"] for path in paths)

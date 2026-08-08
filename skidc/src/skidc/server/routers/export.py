@@ -4,11 +4,13 @@ from datetime import datetime
 import json
 import yaml
 
+from skidc.planning import is_surface_mapping_intent
 from skidc.server.db import get_conn
 from skidc.server.services import (
     build_completed_attack_paths,
     build_coverage_items,
     build_hypotheses,
+    derive_web_surface_graph_state,
     assessment_limitations,
     fact_to_model,
     get_project_or_404,
@@ -167,11 +169,14 @@ def _export_yaml(conn, project_id: str) -> str:
             "concluded_at": format_export_timestamp(i["concluded_at"]),
         }
         for col in (
-            "target", "port", "path", "surface_type", "action_kind", "test_variant", "priority", "attempt_count",
+            "target", "port", "path", "surface_type", "surface_ref", "action_kind", "test_variant", "priority", "attempt_count",
             "last_error", "last_worker", "next_retry_at", "failed_at", "dead_lettered_at", "status",
         ):
             if col in i.keys() and i[col] is not None:
                 entry[col] = i[col]
+        surface_refs = _json_list(_row_get(i, "surface_refs"))
+        if surface_refs:
+            entry["surface_refs"] = surface_refs
         suggested_tools = _json_list(_row_get(i, "suggested_tools"))
         if suggested_tools:
             entry["suggested_tools"] = suggested_tools
@@ -262,6 +267,12 @@ def _project_mode(proj) -> str:
     phase = _row_get(proj, "phase") or "explore"
     return "real_website" if (not bool(proj["bootstrap_enabled"]) or phase == "recon") else "ctf"
 
+def _web_intent_is_mapping(intent) -> bool:
+    return is_surface_mapping_intent(
+        _row_get(intent, "action_kind"),
+        _row_get(intent, "test_variant"),
+    )
+
 
 def _export_timeline(conn, project_id: str) -> str:
     proj, facts, hints, intents, sources_by_intent, _attack_paths = _load_project_data(conn, project_id)
@@ -316,8 +327,266 @@ def _export_timeline(conn, project_id: str) -> str:
     return "\n\n".join(e[2] for e in events) + "\n"
 
 
+def _export_web_fact_graph_report(
+    conn, project_id: str, proj, facts, intents, sources_by_intent, attack_paths
+) -> str:
+    """Render Web results from executed Fact-Intent edges without verdict classification."""
+    coverage_items = _load_coverage_items(conn, project_id)
+    coverage_models = {
+        item.id: item
+        for item in build_coverage_items(conn, project_id, coverage_items)
+    }
+    surfaces = _load_surface_inventory(conn, project_id)
+    producers_by_fact: dict[str, list] = {}
+    for intent in intents:
+        if intent["to_fact_id"]:
+            producers_by_fact.setdefault(intent["to_fact_id"], []).append(intent)
+    execution_facts = [fact for fact in facts if fact["id"] not in {"origin", "goal"}]
+    completion = next(
+        (
+            item for item in intents
+            if item["to_fact_id"] == "goal" and item["status"] == "concluded"
+        ),
+        None,
+    )
+    goal_linked_fact_ids = (
+        set(sources_by_intent.get(completion["id"], []))
+        if completion is not None
+        else set()
+    )
+    reproduced_findings = [
+        fact for fact in execution_facts
+        if str(fact["kind"] or "").casefold() == "verification_result"
+        and str(fact["status"] or "").casefold() == "reproduced"
+        and fact["verification_of"]
+    ]
+    not_reproduced = [
+        fact for fact in execution_facts
+        if str(fact["kind"] or "").casefold() == "verification_result"
+        and str(fact["status"] or "").casefold() == "not_reproduced"
+    ]
+    mapping_facts = [
+        fact for fact in execution_facts
+        if fact not in reproduced_findings
+        and fact not in not_reproduced
+        and (
+            bool(fact["recon_category"])
+            or any(
+                _web_intent_is_mapping(intent)
+                for intent in producers_by_fact.get(fact["id"], [])
+            )
+        )
+    ]
+    other_test_facts = [
+        fact for fact in execution_facts
+        if fact not in reproduced_findings
+        and fact not in not_reproduced
+        and fact not in mapping_facts
+    ]
+    surface_states = []
+    for surface in surfaces:
+        discovery, testing, fact_ids = derive_web_surface_graph_state(
+            conn, surface, intents,
+        )
+        graph_state = (
+            "legacy / ignored"
+            if discovery == "legacy"
+            else f"{discovery} / {testing}"
+        )
+        surface_states.append((surface, graph_state, fact_ids))
+    logs = conn.execute(
+        "SELECT * FROM task_logs WHERE project_id = ? ORDER BY created_at",
+        (project_id,),
+    ).fetchall()
+    limitations = assessment_limitations(conn, project_id)
+    hypotheses = build_hypotheses(conn, project_id)
+    facts_by_id = {fact["id"]: fact for fact in facts}
+    origin = facts_by_id.get("origin")
+    goal = facts_by_id.get("goal")
+    scope_policy = _json_object(_row_get(proj, "scope_policy"))
+    recon_profile = _json_object(_row_get(proj, "recon_profile"))
+
+    report = [
+        f"# Penetration Test Report: {proj['title']}", "",
+        "## Project", "",
+        f"- Project ID: {proj['id']}",
+        f"- Mode: {_project_mode(proj)}",
+        f"- Status: {proj['status']}",
+        f"- Phase: {_row_get(proj, 'phase') or 'explore'}",
+        f"- Completion Outcome: {_row_get(proj, 'completion_outcome') or 'pending'}",
+        f"- Stop Reason: {_row_get(proj, 'stop_reason_code') or '-'}",
+        f"- Stop Detail: {_row_get(proj, 'stop_reason_detail') or '-'}",
+        f"- Created At: {format_export_timestamp(proj['created_at']) or proj['created_at']}",
+        f"- Origin: {origin['description'] if origin else ''}",
+        f"- Goal: {goal['description'] if goal else ''}", "",
+        "## Scope And Safety Boundaries", "",
+    ]
+    report.extend(_format_scope_policy(scope_policy) if scope_policy else ["- Scope policy: not configured"])
+    if recon_profile:
+        report.extend(["", "## Recon Profile", "", *_format_recon_profile(recon_profile)])
+
+    report.extend(["", "## Executive Summary", ""])
+    if completion is not None:
+        report.append(f"- Completion summary: {completion['description']}")
+    report.extend([
+        f"- Executed Facts: {len(execution_facts)}",
+        f"- Concluded Intent edges: {sum(item['status'] == 'concluded' for item in intents)}",
+        f"- Independently reproduced security findings: {len(reproduced_findings)}",
+        f"- Verification results not reproduced: {len(not_reproduced)}",
+        f"- Mapping and recon facts: {len(mapping_facts)}",
+        f"- Surface records: {len(surfaces)}",
+        f"- Execution logs: {len(logs)}",
+    ])
+
+    report.extend(["", "## Hypothesis Plan", ""])
+    report.append("Hypotheses are scheduling records; only concluded Fact-Intent edges are evidence.")
+    if hypotheses:
+        for item in hypotheses:
+            report.append(
+                f"- {item.id}: status={item.status}; test={item.test_family}/{item.test_variant}; "
+                f"behavior={item.behavior_key}; evidence={_inline_list(item.trigger_fact_ids)}"
+            )
+    else:
+        report.append("No hypotheses were recorded.")
+
+    report.extend(["", "## Test Results", "", "## Independently Reproduced Security Findings", ""])
+    if reproduced_findings:
+        for fact in reproduced_findings:
+            title = str(fact["summary"] or fact["description"] or fact["id"]).splitlines()[0]
+            report.extend([
+                f"### {fact['id']}: {_clip_block(title, 160)}", "",
+                f"- Terminal Fact: {fact['id']}",
+                f"- Completion edge: {completion['id'] if completion and fact['id'] in goal_linked_fact_ids else '-'}",
+                f"- Evidence: {_inline_list(_json_list(fact['evidence_refs']))}",
+                "",
+                fact["description"],
+                "",
+            ])
+    else:
+        report.append("No reproduced Verification Fact was recorded.")
+
+    report.extend(["", "## Executed Tests Without Reproduction", ""])
+    if not_reproduced:
+        for fact in not_reproduced:
+            producer_ids = [item["id"] for item in producers_by_fact.get(fact["id"], [])]
+            report.extend([
+                f"### {fact['id']}", "",
+                f"- Verification of: {fact['verification_of'] or '-'}",
+                f"- Produced by: {_inline_list(producer_ids)}",
+                f"- Evidence: {_inline_list(_json_list(fact['evidence_refs']))}",
+                "",
+                fact["description"], "",
+            ])
+    else:
+        report.append("No verification result was recorded as not_reproduced.")
+
+    report.extend(["", "## Other Executed Security Observations", ""])
+    if other_test_facts:
+        for fact in other_test_facts:
+            producer_ids = [item["id"] for item in producers_by_fact.get(fact["id"], [])]
+            note = "candidate or executed observation; not a reproduced finding"
+            report.extend([
+                f"### {fact['id']}", "",
+                f"- Classification: {note}",
+                f"- Produced by: {_inline_list(producer_ids)}",
+                f"- Evidence: {_inline_list(_json_list(fact['evidence_refs']))}",
+                "",
+                fact["description"], "",
+            ])
+    else:
+        report.append("No other executed security observations were recorded.")
+
+    report.extend(["", "## Mapping And Recon Evidence", ""])
+    if mapping_facts:
+        for fact in mapping_facts:
+            producer_ids = [item["id"] for item in intents if item["to_fact_id"] == fact["id"]]
+            report.extend([
+                f"### {fact['id']}", "",
+                f"- Produced by: {_inline_list(producer_ids)}",
+                f"- Evidence: {_inline_list(_json_list(fact['evidence_refs']))}",
+                "",
+                fact["description"], "",
+            ])
+    else:
+        report.append("No mapping or recon Facts were recorded.")
+
+    report.extend(["", "## Surface Coverage", ""])
+    if surface_states:
+        for surface, graph_state, fact_ids in surface_states:
+            endpoint = " ".join(
+                item for item in [surface["method"], surface["path_template"] or surface["target"]]
+                if item
+            ) or surface["surface_group"]
+            report.append(
+                f"- {surface['id']} ({endpoint}): graph_state={graph_state}; "
+                f"facts={_inline_list(fact_ids)}"
+            )
+    else:
+        report.append("No Surface records were recorded.")
+
+    report.extend(["", "## Untested And Limited Items", ""])
+    untested_surfaces = [
+        (surface, state) for surface, state, _fact_ids in surface_states
+        if state not in {"legacy / ignored"} and not state.endswith("security_tested")
+    ]
+    failed_logs = [log for log in logs if log["timed_out"] or (log["return_code"] not in {None, 0})]
+    if not untested_surfaces and not failed_logs:
+        report.append("No graph-derived untested Surface or failed execution was recorded.")
+    for surface, state in untested_surfaces:
+        report.append(f"- Surface {surface['id']}: {state}")
+    for log in failed_logs:
+        report.append(
+            f"- Execution {log['id']}: return_code={log['return_code']}; timed_out={bool(log['timed_out'])}"
+        )
+
+    report.extend(["", "## Coverage Ledger (Audit Only)", ""])
+    report.extend(
+        _format_coverage_ledger(coverage_items, coverage_models)
+        if coverage_items else ["No coverage records were recorded."]
+    )
+    report.extend(["", "## Assessment Limitations", ""])
+    if proj["status"] == "active" and (_row_get(proj, "phase") or "explore") == "recon":
+        report.append(
+            "Structured recon is in progress. This phase gate is graph progress, not a list of security findings."
+        )
+    report.append("Coverage, Surface, and Hypothesis records are audit context and do not create attack paths or block completion.")
+    visible_limitations = [
+        item for item in limitations
+        if not (proj["status"] == "active" and (_row_get(proj, "phase") or "explore") == "recon" and item.kind == "reason" and item.ref == "project-phase")
+    ]
+    if visible_limitations:
+        for item in visible_limitations:
+            report.append(f"- {item.kind}/{item.ref}: status={item.status}; reason={item.reason}")
+    else:
+        report.append("- No active assessment limitations.")
+
+    report.extend(["", "## Completed Causal Attack Paths", ""])
+    if attack_paths:
+        path_models = {path.id: path for path in attack_paths}
+        for path in attack_paths:
+            report.extend(_format_attack_path(path.model_dump(mode="json"), facts_by_id, path_models[path.id]))
+    else:
+        report.append("No completed causal attack path was recorded.")
+
+    report.extend(["", "## Test Process", ""])
+    if logs:
+        report.extend(_format_log_timeline_item(log) for log in logs)
+    else:
+        report.append("No execution logs were recorded.")
+    report.extend(["", "## Execution Input Index", ""])
+    if logs:
+        for log in logs:
+            report.extend(_format_log_input_summary(log))
+    else:
+        report.append("No execution inputs were recorded.")
+    return "\n".join(report).rstrip() + "\n"
+
 def _export_report(conn, project_id: str) -> str:
     proj, facts, hints, intents, sources_by_intent, attack_paths = _load_project_data(conn, project_id)
+    if _project_mode(proj) == "real_website":
+        return _export_web_fact_graph_report(
+            conn, project_id, proj, facts, intents, sources_by_intent, attack_paths
+        )
     coverage_items = _load_coverage_items(conn, project_id)
     logs = conn.execute(
         "SELECT * FROM task_logs WHERE project_id = ? ORDER BY created_at",
@@ -332,6 +601,13 @@ def _export_report(conn, project_id: str) -> str:
     }
     hypotheses = build_hypotheses(conn, project_id)
     limitations = assessment_limitations(conn, project_id)
+    phase = str(_row_get(proj, "phase") or "explore")
+    active_recon = proj["status"] == "active" and phase == "recon"
+    visible_limitations = (
+        [item for item in limitations if not (item.kind == "reason" and item.ref == "project-phase")]
+        if active_recon
+        else limitations
+    )
     attack_path_models = {path.id: path for path in attack_paths}
     origin_fact = facts_by_id.get("origin")
     goal_fact = facts_by_id.get("goal")
@@ -386,7 +662,7 @@ def _export_report(conn, project_id: str) -> str:
 
     report.extend(["", "## Hypothesis Plan", ""])
     report.append(
-        "Planning semantics: Coverage and Hypotheses are an audit ledger. They guide Reason and document limitations, but do not block completion."
+        "Planning semantics: Coverage and Hypotheses are an audit ledger. Facts and concluded Intent edges are the only causal evidence."
     )
     if hypotheses:
         for item in hypotheses:
@@ -402,18 +678,22 @@ def _export_report(conn, project_id: str) -> str:
         report.append("No evidence-supported Hypotheses were recorded.")
 
     report.extend(["", "## Assessment Limitations", ""])
-    report.append(
-        "Reason decides whether the current Facts sufficiently assess the Goal. Coverage, Surface, Hypothesis, "
-        "failed, and inconclusive records remain visible here but do not force the project to stop."
-    )
-    if limitations:
-        for limitation in limitations:
+    if active_recon:
+        report.append(
+            "Structured recon is in progress. Its phase gate is progress state, not a completion blocker."
+        )
+    else:
+        report.append(
+            "Reason decides whether terminal Facts sufficiently assess the Goal. Required non-terminal assessment work remains visible here and may block completion."
+        )
+    if visible_limitations:
+        for limitation in visible_limitations:
             report.append(
                 f"- {limitation.kind}/{limitation.ref}: status={limitation.status}; "
                 f"reason={limitation.reason}"
             )
     else:
-        report.append("- No assessment limitations are currently recorded.")
+        report.append("- No assessment limitations are currently active.")
 
     report.extend(["", "## Coverage Ledger", ""])
     if coverage_items:
@@ -803,7 +1083,12 @@ def _format_attack_path(path, facts_by_id: dict, model) -> list[str]:
         "",
         f"- Severity: {path['severity']}",
         f"- Status: {_attack_path_status(path)}",
-        f"- Suggested status: {_row_get(path, 'suggested_status') or 'hypothesis'}",
+    ]
+    if not bool(_row_get(path, "derived_from_goal")):
+        lines.append(
+            f"- Suggested status: {_row_get(path, 'suggested_status') or 'hypothesis'}"
+        )
+    lines.extend([
         f"- Derived reason: {_row_get(path, 'status_reason') or 'not calculated'}",
         f"- Chain: {' -> '.join(chain)}",
         f"- Task logs: {_inline_list(model.task_log_refs)}",
@@ -811,7 +1096,7 @@ def _format_attack_path(path, facts_by_id: dict, model) -> list[str]:
         path["description"],
         "",
         "Evidence chain:",
-    ]
+    ])
     for fact_id in chain:
         fact = facts_by_id.get(fact_id)
         if fact is None:
@@ -902,7 +1187,7 @@ def _inline_list(value: list) -> str:
 
 def _attack_path_status(path) -> str:
     status = _row_get(path, "status")
-    return status if status in ("hypothesis", "confirmed", "inconclusive", "refuted") else "hypothesis"
+    return status if status in ("hypothesis", "confirmed", "inconclusive", "refuted", "complete") else "hypothesis"
 
 
 def _clip_block(value: str | None, limit: int = 4000) -> str:

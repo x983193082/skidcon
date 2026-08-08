@@ -10,7 +10,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-TaskType = Literal["reason", "explore", "bootstrap"]
+TaskType = Literal["reason", "explore", "verify", "bootstrap"]
 WorkerType = Literal["claudecode", "codex", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
@@ -36,6 +36,8 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{scope_constraints}"),
     "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{scope_constraints}"),
     "bootstrap.md": ("{origin}", "{goal}", "{hints}", "{scope_constraints}"),
+    "verify.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{candidate_fact}", "{attempt_number}", "{max_attempts}", "{previous_attempts}", "{scope_constraints}"),
+    "verify_conclude.md": ("{intent_id}", "{candidate_fact}"),
     "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}", "{scope_constraints}"),
 }
 
@@ -45,6 +47,8 @@ PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
         "explore.md": ("{intent_id}",),
         "explore_conclude.md": ("{intent_id}",),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
+        "verify.md": ("{intent_id}", "{attempt_number}", "{max_attempts}"),
+        "verify_conclude.md": ("{intent_id}",),
         "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
     }
 }
@@ -56,6 +60,7 @@ MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "explore_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "verify_execute": frozenset({"reproduced", "not_reproduced", "invalid_json", "invalid_payload", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -85,6 +90,14 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
         "delay": [0.05, 0.3],
         "outcomes": {
             "complete": "1.0", "fact": "0.0", "rejected": "0.0",
+            "invalid_payload": "0.0", "command_fail": "0.0",
+            "invalid_json": "0.0",
+        },
+    },
+    "verify_execute": {
+        "delay": [0.05, 0.3],
+        "outcomes": {
+            "reproduced": "1.0", "not_reproduced": "0.0",
             "invalid_json": "0.0", "invalid_payload": "0.0", "command_fail": "0.0",
         },
     },
@@ -115,10 +128,16 @@ class BootstrapTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
+class VerifyTaskConfig(BaseModel):
+    timeout: int = Field(default=300, gt=0)
+    max_attempts: int = Field(default=3, ge=3, le=3)
+
+
 class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
     reason: ReasonTaskConfig
     explore: ExploreTaskConfig
+    verify: VerifyTaskConfig = Field(default_factory=VerifyTaskConfig)
 
 
 class ContainerConfig(BaseModel):

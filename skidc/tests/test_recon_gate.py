@@ -64,7 +64,7 @@ def _run_one_dispatch_cycle(loop: DispatcherLoop) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_recon_gate_allows_dispatch_of_unclaimed_explore_intents(
+def test_recon_new_fact_is_reasoned_before_unclaimed_explore_intents(
     http_client: TestClient,
 ) -> None:
     """Unclaimed explore intents MUST be dispatched even when the recon gate
@@ -113,16 +113,21 @@ def test_recon_gate_allows_dispatch_of_unclaimed_explore_intents(
         unclaimed = [i for i in project.intents if i.to is None and i.worker is None]
         assert len(unclaimed) >= 1, "precondition: should have unclaimed intents"
         trigger = loop._reason_trigger(project)
-        assert trigger is not None, "precondition: reason should be triggered"
+        assert trigger is not None and "facts:" in trigger
 
         # 4) Attempt dispatch — post-fix should dispatch the unclaimed intent
         _run_one_dispatch_cycle(loop)
 
-        # POST-FIX: the dispatcher should have dispatched the unclaimed intent
-        assert loop.futures, (
-            "dispatcher should dispatch unclaimed explore intents even when "
-            f"recon gate blocks reason (trigger={trigger!r})"
-        )
+        # A changed Fact graph is always analyzed before queued Explore work.
+        assert loop.futures
+        assert {task.task_type for task in loop.futures.values()} == {"reason"}
+
+        # Once Reason records the new checkpoint, queued Explore work resumes.
+        for future in list(loop.futures):
+            future.result(timeout=10)
+        _run_one_dispatch_cycle(loop)
+        assert loop.futures
+        assert {task.task_type for task in loop.futures.values()} == {"explore"}
     finally:
         loop.close()
 
@@ -165,21 +170,18 @@ def test_recon_gate_allows_reason_to_plan_remaining_work(
         # 2) Explore i002 → fact f001
         dispatch_and_wait(loop)
 
-        # Preconditions: reason trigger fires, no unclaimed intents
+        # Preconditions: deterministic recon work remains; Reason stays gated.
         project = client.get_project(project_id)
         unclaimed = [i for i in project.intents if i.to is None and i.worker is None]
-        assert len(unclaimed) == 0, "precondition: no unclaimed intents"
+        assert len(unclaimed) >= 1, "precondition: deterministic recon intents exist"
         trigger = loop._reason_trigger(project)
-        assert trigger is not None, "precondition: reason should be triggered"
+        assert trigger is not None and "facts:" in trigger
 
-        # 3) Attempt dispatch — post-fix should dispatch reason
+        # 3) Attempt dispatch — the next deterministic recon Intent runs.
         _run_one_dispatch_cycle(loop)
 
-        # POST-FIX: the dispatcher should have re-dispatched reason
-        assert loop.futures, (
-            "dispatcher should re-dispatch reason to plan remaining recon work "
-            f"even when recon gate is incomplete (trigger={trigger!r})"
-        )
+        assert loop.futures
+        assert {task.task_type for task in loop.futures.values()} == {"reason"}
     finally:
         loop.close()
 

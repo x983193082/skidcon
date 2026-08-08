@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 import skidc.dispatcher.scheduler.loop as scheduler_loop
 from skidc.dispatcher.models import ReasonCheckpoint
+from skidc.server.db import get_conn
 from tests.conftest import (
     InProcessClient,
     LocalContainerManager,
@@ -48,6 +49,45 @@ def test_intents_expose_retry_and_dead_letter_state(http_client: TestClient) -> 
     assert intent["dead_lettered_at"] is None
 
 
+def test_web_project_read_expires_stale_intent_and_reason_leases(
+    http_client: TestClient,
+) -> None:
+    project_id = create_project(
+        http_client, bootstrap_enabled=False, required_recon_categories=[],
+    )
+    intent = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"],
+            "description": "legacy executable work",
+            "creator": "reasoner",
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
+        json={"worker": "stale-explorer"},
+    ).status_code == 200
+    assert http_client.post(
+        f"/projects/{project_id}/reason/claim",
+        json={"worker": "stale-reasoner", "trigger": "test"},
+    ).status_code == 200
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE intents SET last_heartbeat_at = ? WHERE project_id = ? AND id = ?",
+            ("2000-01-01 00:00:00", project_id, intent["id"]),
+        )
+        conn.execute(
+            "UPDATE projects SET reason_last_heartbeat_at = ? WHERE id = ?",
+            ("2000-01-01 00:00:00", project_id),
+        )
+
+    detail = http_client.get(f"/projects/{project_id}").json()
+    refreshed_intent = next(item for item in detail["intents"] if item["id"] == intent["id"])
+    assert refreshed_intent["worker"] is None
+    assert refreshed_intent["last_heartbeat_at"] is None
+    assert detail["project"]["reason"] is None
+
+
 def test_intent_failure_records_retry_then_result_fact(http_client: TestClient) -> None:
     project_id = http_client.post(
         "/projects",
@@ -84,7 +124,7 @@ def test_intent_failure_records_retry_then_result_fact(http_client: TestClient) 
     assert third.json()["status"] == "concluded"
     assert third.json()["execution_status"] == "failed"
     assert third.json()["to"] is not None
-    assert http_client.get(f"/projects/{project_id}").json()["facts"][-1]["status"] == "failed"
+    assert http_client.get(f"/projects/{project_id}").json()["facts"][-1]["status"] is None
     assert third.json()["dead_lettered_at"]
     assert third.json()["next_retry_at"] is None
 
@@ -137,7 +177,7 @@ def test_conclusion_failure_also_produces_result_fact(http_client: TestClient) -
     detail = http_client.get(f"/projects/{project_id}").json()
     fact = next(item for item in detail["facts"] if item["id"] == terminal["to"])
     assert fact["kind"] == "execution_result"
-    assert fact["status"] == "failed"
+    assert fact["status"] is None
     assert fact["data"]["failure_stage"] == "conclusion_failed"
     assert fact["task_log_refs"] == [task_log["id"]]
 
@@ -186,9 +226,9 @@ def test_intent_failure_updates_bound_coverage_lifecycle(http_client: TestClient
     )
     assert dead.status_code == 200
     inconclusive = http_client.get(f"/projects/{project_id}/coverage").json()[0]
-    assert inconclusive["execution_status"] == "completed"
-    assert inconclusive["outcome"] == "inconclusive"
-    assert inconclusive["status"] == "inconclusive"
+    assert inconclusive["execution_status"] == "queued"
+    assert inconclusive["outcome"] is None
+    assert inconclusive["status"] == "untested"
 
     replacement = http_client.post(
         f"/projects/{project_id}/intents",
@@ -276,13 +316,15 @@ def test_failed_result_fact_does_not_block_other_explore_paths(http_client: Test
         loop.reason_checkpoints[project_id] = ReasonCheckpoint(fact_count=2, hint_count=0, open_intent_count=2)
 
         _run_dispatch_cycle(loop)
-        _run_dispatch_cycle(loop)  # terminal failure + successful alternate path can now be summarized
+        _run_dispatch_cycle(loop)
+        _run_dispatch_cycle(loop)  # Reason may complete only after both Fact edges are committed.
+        _run_dispatch_cycle(loop)  # The final Fact change receives its Reason pass.
 
         project = http_client.get(f"/projects/{project_id}").json()
         intents = {intent["id"]: intent for intent in project["intents"]}
         assert intents[dead["id"]]["status"] == "concluded"
         assert intents[dead["id"]]["to"] is not None
-        assert next(fact for fact in project["facts"] if fact["id"] == intents[dead["id"]]["to"])["status"] == "failed"
+        assert next(fact for fact in project["facts"] if fact["id"] == intents[dead["id"]]["to"])["status"] is None
         assert intents[live["id"]]["status"] == "concluded"
         assert intents[live["id"]]["to"] is not None
         assert project["project"]["status"] == "completed"
@@ -353,10 +395,10 @@ def test_explore_failure_produces_result_after_repeated_attempts(http_client: Te
     intent = project["intents"][0]
     assert intent["status"] == "concluded"
     assert intent["execution_status"] == "failed"
-    assert next(fact for fact in project["facts"] if fact["id"] == intent["to"])["status"] == "failed"
-    assert intent["attempt_count"] >= 3
+    assert intent["to"] is not None
+    assert intent["attempt_count"] == 3
     assert intent["last_error"]
-    assert intent["dead_lettered_at"]
+    assert intent["dead_lettered_at"] is not None
     assert project["project"]["status"] == "completed"
 
 
@@ -373,7 +415,9 @@ def test_reason_failures_are_visible_on_project(http_client: TestClient, monkeyp
         client,
         containers,
     )
-    project_id = create_project(http_client, bootstrap_enabled=False)
+    project_id = create_project(http_client, bootstrap_enabled=False, required_recon_categories=[])
+    advanced = http_client.post(f"/projects/{project_id}/phase/advance", json={})
+    assert advanced.status_code == 200 and advanced.json()["advanced"]
     try:
         for _ in range(3):
             dispatch_and_wait(loop)

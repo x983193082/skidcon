@@ -24,6 +24,9 @@ tasks:
   explore:
     timeout: 600
     conclude_timeout: 120
+  verify:
+    timeout: 300
+    max_attempts: 3
 
 container:
   image: "skidc-worker:latest"
@@ -33,7 +36,7 @@ container:
 workers:
   - name: "mock-observer"
     type: "mock"
-    task_types: [bootstrap, reason, explore]
+    task_types: [bootstrap, reason, verify, explore]
     max_running: 2
     priority: 0
     env:
@@ -43,3 +46,4 @@ workers:
       MOCK_REASON: '{"delay":[0.1,2.2],"outcomes":{"complete":0.1,"intent":0.4,"noop":0.1,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
       MOCK_EXPLORE_EXECUTE: '{"delay":[0.1,12.0],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
       MOCK_EXPLORE_CONCLUDE: '{"delay":[0.1,2.2],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
+      MOCK_VERIFY_EXECUTE: '{"delay":[0.1,2.2],"outcomes":{"reproduced":0.5,"not_reproduced":0.5}}'

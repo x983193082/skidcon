@@ -47,6 +47,10 @@ tasks:
     timeout: 600
     # Budget for the conclude fallback that summarizes partial findings.
     conclude_timeout: 120
+  verify:
+    # Independent reproduction attempts for one suspected Web finding.
+    timeout: 300
+    max_attempts: 3
 
 container:
   # Worker container image. One container per project; the dispatcher execs agents inside.
@@ -69,7 +73,7 @@ workers:
   # (Old names deepseek-chat / deepseek-reasoner are deprecated after 2026-07-24.)
   - name: "claudecode_deepseek"
     type: "claudecode"
-    task_types: [bootstrap, reason, explore]
+    task_types: [bootstrap, reason, verify, explore]
     max_running: 2
     priority: 0
     env:
@@ -80,7 +84,7 @@ workers:
   # ---- Qwen, driven through the Codex CLI loop ----
   - name: "codex_qwen"
     type: "codex"
-    task_types: [bootstrap, reason, explore]
+    task_types: [bootstrap, reason, verify, explore]
     max_running: 2
     priority: 1
     env:

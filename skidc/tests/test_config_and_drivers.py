@@ -14,6 +14,7 @@ from skidc.dispatcher.contracts import (
     validate_bootstrap_execute_payload,
     validate_explore_payload,
     validate_reason_payload,
+    validate_verify_payload,
 )
 from skidc.dispatcher.workers.registry import get_driver
 
@@ -166,6 +167,181 @@ def test_validate_explore_rejection():
     assert validate_explore_payload({"accepted": False, "reason": "no"}) == ("rejected", None)
 
 
+def test_web_explore_accepts_only_one_objective_description() -> None:
+    payload = {"accepted": True, "data": {"description": "POST /login returned the tested response."}}
+    assert validate_explore_payload(payload, fact_only=True) == (
+        "fact",
+        {"description": "POST /login returned the tested response."},
+    )
+
+
+def test_web_explore_accepts_precise_verify_handoff() -> None:
+    payload = {
+        "accepted": True,
+        "data": {
+            "description": "The login response changed under the tested input.",
+            "tested_surface_refs": ["surf001"],
+            "verify": {
+                "claim": "Repeat the same POST in a fresh session and compare the authenticated response.",
+                "surface_refs": ["surf001"],
+                "evidence_refs": ["log001"],
+            },
+        },
+    }
+    assert validate_explore_payload(payload, fact_only=True) == (
+        "fact",
+        {
+            "description": "The login response changed under the tested input.",
+            "tested_surface_refs": ["surf001"],
+            "verify_requests": [{
+                "claim": "Repeat the same POST in a fresh session and compare the authenticated response.",
+                "surface_refs": ["surf001"],
+                "evidence_refs": ["log001"],
+            }],
+        },
+    )
+
+    payload["data"]["verify"] = {"claim": ""}
+    with pytest.raises(ValueError, match=r"verify\[0\]\.claim is required"):
+        validate_explore_payload(payload, fact_only=True)
+
+
+def test_web_mapping_explore_accepts_only_simplified_surfaces() -> None:
+    payload = {
+        "accepted": True,
+        "data": {
+            "description": "Mapped the login form.",
+            "surfaces": [{
+                "method": "post",
+                "path": "/login",
+                "params": ["username", "password"],
+                "auth_context": "anonymous",
+                "surface_type": "form",
+            }],
+        },
+    }
+    assert validate_explore_payload(
+        payload, fact_only=True, allow_surfaces=True,
+    ) == (
+        "fact",
+        {
+            "description": "Mapped the login form.",
+            "observed_surfaces": [{
+                "method": "POST",
+                "path": "/login",
+                "params": ["username", "password"],
+                "auth_context": "anonymous",
+                "surface_type": "form",
+            }],
+        },
+    )
+
+    payload["data"]["surfaces"][0]["fingerprint"] = "model-owned"
+    with pytest.raises(ValueError, match="unexpected Surface fields"):
+        validate_explore_payload(
+            payload, fact_only=True, allow_surfaces=True,
+        )
+
+
+def test_web_mapping_accepts_111_surfaces_but_keeps_a_hard_safety_cap() -> None:
+    surfaces = [
+        {
+            "method": "GET",
+            "path": f"/mapped/{index}",
+            "params": [],
+            "auth_context": "anonymous",
+            "surface_type": "route",
+        }
+        for index in range(111)
+    ]
+    kind, data = validate_explore_payload(
+        {
+            "accepted": True,
+            "data": {"description": "Mapped 111 routes.", "surfaces": surfaces},
+        },
+        fact_only=True,
+        allow_surfaces=True,
+    )
+    assert kind == "fact"
+    assert data is not None and len(data["observed_surfaces"]) == 111
+
+    with pytest.raises(ValueError, match="at most 500"):
+        validate_explore_payload(
+            {
+                "accepted": True,
+                "data": {
+                    "description": "Too many routes.",
+                    "surfaces": surfaces * 5,
+                },
+            },
+            fact_only=True,
+            allow_surfaces=True,
+        )
+
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"vuln_type": "xss"},
+        {"status": "confirmed"},
+        {"next_intents": [{"description": "continue"}]},
+        {"surfaces": [{"method": "GET", "path": "/admin"}]},
+        {"observed_surfaces": [{"path": "/admin"}]},
+        {"evidence_refs": ["/tmp/evidence.txt"]},
+    ],
+)
+def test_web_explore_rejects_semantic_or_planning_fields(extra: dict) -> None:
+    with pytest.raises(ValueError, match="Web Explore data may contain only description"):
+        validate_explore_payload(
+            {"accepted": True, "data": {"description": "objective result", **extra}},
+            fact_only=True,
+        )
+
+
+def test_web_explore_no_result_is_a_non_semantic_retry_signal() -> None:
+    assert validate_explore_payload(
+        {"accepted": True, "data": {"no_result": True}}, fact_only=True
+    ) == ("no_result", None)
+
+
+@pytest.mark.parametrize("result", ["reproduced", "not_reproduced"])
+def test_validate_verify_accepts_only_two_terminal_results(result: str) -> None:
+    kind, data = validate_verify_payload(
+        {
+            "accepted": True,
+            "data": {
+                "result": result,
+                "description": "Fresh-session verification attempt recorded objective evidence.",
+                "evidence_refs": ["/tmp/verify-evidence.txt"],
+            },
+        }
+    )
+
+    assert kind == result
+    assert data == {
+        "result": result,
+        "description": "Fresh-session verification attempt recorded objective evidence.",
+        "evidence_refs": ["/tmp/verify-evidence.txt"],
+    }
+
+
+@pytest.mark.parametrize("result", ["confirmed", "verified", "inconclusive", "failed", "unknown"])
+def test_validate_verify_rejects_extra_result_states(result: str) -> None:
+    with pytest.raises(ValueError, match="result must be reproduced or not_reproduced"):
+        validate_verify_payload(
+            {
+                "accepted": True,
+                "data": {"result": result, "description": "not a valid terminal result"},
+            }
+        )
+
+
+def test_validate_verify_requires_wrapped_terminal_output() -> None:
+    with pytest.raises(ValueError, match="accepted must be true"):
+        validate_verify_payload({"result": "reproduced", "description": "bare payload"})
+
+
 def test_validate_reason_complete_and_intents():
     kind, data, recon_complete = validate_reason_payload(
         {"accepted": True, "data": {"complete": {"from": ["f001"], "description": "done"}}},
@@ -199,6 +375,133 @@ def test_validate_reason_accepts_checkpointing_noop_when_graph_has_no_new_work()
         max_intents=3,
     )
     assert (kind, data, recon_complete) == ("noop", None, False)
+
+
+def test_web_reason_accepts_one_minimal_intent_and_maps_verify_executor() -> None:
+    kind, data, recon_complete = validate_reason_payload(
+        {
+            "accepted": True,
+            "data": {
+                "intent": {
+                    "from": ["f006"],
+                    "description": "Reproduce the candidate in a fresh session.",
+                    "executor": "verify",
+                }
+            },
+        },
+        open_intents_empty=True,
+        max_intents=9,
+        web_mode=True,
+    )
+
+    assert kind == "intents"
+    assert recon_complete is False
+    assert data == [
+        {
+            "from": ["f006"],
+            "description": "Reproduce the candidate in a fresh session.",
+            "action_kind": "verify",
+        }
+    ]
+
+
+def test_web_reason_accepts_cairn_style_intent_batch_and_caps_to_limit() -> None:
+    kind, data, recon_complete = validate_reason_payload(
+        {
+            "accepted": True,
+            "data": {
+                "intents": [
+                    {"from": ["f001"], "description": "first", "action_kind": "surface_mapping"},
+                    {"from": ["f002"], "description": "second", "action_kind": "surface_mapping"},
+                    {"from": ["f003"], "description": "third", "action_kind": "surface_mapping"},
+                ]
+            },
+        },
+        open_intents_empty=True,
+        max_intents=2,
+        web_mode=True,
+    )
+
+    assert kind == "intents"
+    assert recon_complete is False
+    assert [intent["description"] for intent in data] == ["first", "second"]
+
+
+def test_web_reason_normalizes_intent_array_under_singular_key() -> None:
+    kind, data, _ = validate_reason_payload(
+        {
+            "accepted": True,
+            "data": {
+                "intent": [
+                    {"from": ["f001"], "description": "first", "action_kind": "surface_mapping"},
+                    {"from": ["f002"], "description": "second", "action_kind": "surface_mapping"},
+                ]
+            },
+        },
+        open_intents_empty=True,
+        max_intents=2,
+        web_mode=True,
+    )
+
+    assert kind == "intents"
+    assert [intent["description"] for intent in data] == ["first", "second"]
+
+
+def test_web_reason_limits_one_intent_to_five_related_surfaces() -> None:
+    with pytest.raises(ValueError, match="at most 5"):
+        validate_reason_payload(
+            {
+                "accepted": True,
+                "data": {
+                    "intent": {
+                        "from": ["f001"],
+                        "description": "oversized batch",
+                        "action_kind": "security_test",
+                        "surface_refs": [f"surf{index:03d}" for index in range(6)],
+                    }
+                },
+            },
+            open_intents_empty=True,
+            max_intents=2,
+            web_mode=True,
+        )
+
+
+def test_web_reason_requires_canonical_action_and_surface_binding() -> None:
+    base = {"accepted": True, "data": {"intent": {"from": ["f001"], "description": "test"}}}
+    with pytest.raises(ValueError, match="action_kind is required"):
+        validate_reason_payload(base, open_intents_empty=True, max_intents=2, web_mode=True)
+
+    base["data"]["intent"]["action_kind"] = "security_test"
+    with pytest.raises(ValueError, match="requires surface_ref"):
+        validate_reason_payload(base, open_intents_empty=True, max_intents=2, web_mode=True)
+
+    base["data"]["intent"]["surface_refs"] = ["surf001", "surf002"]
+    kind, data, _ = validate_reason_payload(
+        base, open_intents_empty=True, max_intents=2, web_mode=True,
+    )
+    assert kind == "intents"
+    assert data[0]["surface_refs"] == ["surf001", "surf002"]
+    assert data[0]["surface_ref"] == "surf001"
+
+
+
+
+def test_web_reason_noop_requires_existing_open_intent() -> None:
+    with pytest.raises(ValueError, match="cannot return noop when no Open Intent exists"):
+        validate_reason_payload(
+            {"accepted": True, "data": {}},
+            open_intents_empty=True,
+            max_intents=9,
+            web_mode=True,
+        )
+
+    assert validate_reason_payload(
+        {"accepted": True, "data": {}},
+        open_intents_empty=False,
+        max_intents=9,
+        web_mode=True,
+    ) == ("noop", None, False)
 
 
 def test_reason_intents_with_attack_paths_still_valid():

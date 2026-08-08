@@ -10,7 +10,12 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
-from skidc.planning import behavior_identity
+from skidc.planning import (
+    behavior_identity,
+    behavior_importance,
+    cluster_behaviors,
+    is_surface_mapping_intent,
+)
 from skidc.server.models import (
     AttackPath,
     AttackPathStep,
@@ -43,11 +48,14 @@ ACTIVE_ACTION_KEYWORDS = (
 )
 DOMAIN_SCAN_ACTION_KEYWORDS = ("dns", "domain", "subdomain", "zone")
 
-_RECON_CATEGORY_HINTS: dict[str, tuple[str, ...]] = {
-    "port_scan": ("port_scan", "port", "service", "nmap", "naabu", "tcp", "udp"),
-    "subdomain": ("subdomain", "dns", "subfinder", "amass", "cname"),
-    "directory": ("directory", "dir", "path", "endpoint", "ffuf", "gobuster", "dirsearch"),
-    "asset": ("asset", "crawl", "url", "javascript", "katana"),
+_RECON_INTENT_ALIASES: dict[str, frozenset[str]] = {
+    "port_scan": frozenset({"port_scan", "default_port_check", "service_inventory", "service_discovery"}),
+    "subdomain": frozenset({"subdomain", "subdomain_enumeration", "dns_enumeration"}),
+    "directory": frozenset({"directory", "directory_enumeration", "path_enumeration", "common_wordlist", "medium_wordlist"}),
+    "asset": frozenset({"asset", "asset_discovery", "asset_inventory", "crawl_and_fingerprint", "crawl_katana"}),
+}
+
+_ANDROID_RECON_CATEGORY_HINTS: dict[str, tuple[str, ...]] = {
     "android_app": ("android_app", "apk", "package", "manifest"),
     "android_ui": ("android_ui", "ui", "screen", "activity"),
     "mobile_api": ("mobile_api", "api_call", "network"),
@@ -65,16 +73,25 @@ class ReconGateResult:
 
 
 def recon_category_from_intent(row: sqlite3.Row) -> str | None:
-    """Derive Recon identity from structured Intent fields, never Fact prose."""
-    values = (
+    """Read Recon identity only from explicit structured Intent fields.
+
+    Tool names and arbitrary prose are excluded, so a security Intent that
+    suggests ``curl`` cannot become asset Recon because it contains ``url``.
+    """
+    values = [
         _row_get(row, "action_kind"),
         _row_get(row, "test_variant"),
         _row_get(row, "surface_type"),
-        _row_get(row, "suggested_tools"),
-    )
-    haystack = " ".join(str(value or "") for value in values).casefold()
-    for category, hints in _RECON_CATEGORY_HINTS.items():
-        if category in haystack or any(hint in haystack for hint in hints):
+    ]
+    for value in values:
+        token = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+        for category, aliases in _RECON_INTENT_ALIASES.items():
+            if token in aliases or token.startswith(f"{category}_") or token.endswith(f"_{category}"):
+                return category
+    android_values = [*values, _row_get(row, "suggested_tools")]
+    android_haystack = " ".join(str(value or "") for value in android_values).casefold()
+    for category, hints in _ANDROID_RECON_CATEGORY_HINTS.items():
+        if category in android_haystack or any(hint in android_haystack for hint in hints):
             return category
     return None
 
@@ -90,7 +107,7 @@ def derive_recon_fact_fields(
     """Return canonical Recon fields for an Intent conclusion."""
     derived_category = recon_category_from_intent(intent)
     category = derived_category or (supplied_category.strip() if supplied_category else None)
-    if category not in _RECON_CATEGORY_HINTS:
+    if category not in _RECON_INTENT_ALIASES and category not in _ANDROID_RECON_CATEGORY_HINTS:
         return category, supplied_executed, supplied_found_results
     executed = True if supplied_executed is None else bool(supplied_executed)
     found_results = (
@@ -210,7 +227,7 @@ def utc_after_seconds(seconds: int) -> str:
 
 
 def reason_state_fingerprint(conn: sqlite3.Connection, project_id: str) -> str:
-    """Hash semantic graph state; duplicate Hint rows do not create new work."""
+    """Hash semantic graph/input state; duplicate Hint rows do not create new work."""
     project = conn.execute(
         "SELECT phase, mode, scope_policy, recon_profile FROM projects WHERE id = ?",
         (project_id,),
@@ -381,7 +398,13 @@ def link_coverage_evidence(
     )
 
 
-def _fact_values(row: sqlite3.Row, *, compact: bool = False, include_detail: bool = True) -> dict:
+def _fact_values(
+    row: sqlite3.Row,
+    *,
+    compact: bool = False,
+    include_detail: bool = True,
+    preserve_description: bool = False,
+) -> dict:
     values = dict(row)
     values.pop("project_id", None)
     summary = str(values.get("summary") or values.get("description") or "")[:320]
@@ -393,7 +416,8 @@ def _fact_values(row: sqlite3.Row, *, compact: bool = False, include_detail: boo
     values["schema_version"] = int(values.get("schema_version") or 1)
     values["kind"] = str(values.get("kind") or "legacy_text")
     if compact:
-        values["description"] = summary
+        if not preserve_description:
+            values["description"] = summary
         if not include_detail:
             values["subject"] = {}
             values["data"] = {}
@@ -416,20 +440,32 @@ def fact_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -
     ).fetchall()
     intent_refs = _fact_intent_refs(conn, project_id, row["id"], coverage_rows)
     values = _fact_values(row)
+    project = conn.execute("SELECT mode FROM projects WHERE id = ?", (project_id,)).fetchone()
+    fact_only = project is not None and project["mode"] == "real_website"
     return Fact(
         **values,
         coverage_refs=[item["id"] for item in coverage_rows],
-        surface_class=_fact_surface_class(conn, project_id, row, coverage_rows),
-        result_class=_fact_result_class(conn, project_id, row, coverage_rows),
+        surface_class=None if fact_only else _fact_surface_class(conn, project_id, row, coverage_rows),
+        result_class=None if fact_only else _fact_result_class(conn, project_id, row, coverage_rows),
         intent_refs=intent_refs,
         task_log_refs=_task_log_refs_for_intents(conn, project_id, intent_refs),
     )
 
 
 
-def fact_to_dispatch_model(row: sqlite3.Row, *, include_detail: bool = False) -> Fact:
-    """Return a compact Fact index with selected structured details."""
-    return Fact(**_fact_values(row, compact=True, include_detail=include_detail))
+def fact_to_dispatch_model(
+    row: sqlite3.Row,
+    *,
+    include_detail: bool = False,
+    preserve_description: bool = False,
+) -> Fact:
+    """Return a compact Fact index, optionally preserving its objective text."""
+    return Fact(**_fact_values(
+        row,
+        compact=True,
+        include_detail=include_detail,
+        preserve_description=preserve_description,
+    ))
 
 
 def coverage_item_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -> CoverageItem:
@@ -582,14 +618,21 @@ def _fact_result_class(
     coverage_rows: list[sqlite3.Row],
 ) -> str:
     status = str(fact["status"] or "").casefold()
+    if _fact_is_informational_observation(conn, project_id, fact, coverage_rows):
+        return "informational"
+    if status in {"informational", "completed"}:
+        return "informational"
     if status in {"refuted", "false_positive", "not_vulnerable"}:
         return "refuted"
     # Direct failed/inconclusive Facts are still reportable test results even
     # when they have no vulnerability metadata or source Intent.
     if status in {"failed", "inconclusive"}:
         return "limited"
+    severity = str(fact["severity"] or "").strip().casefold()
+    vuln_type = str(fact["vuln_type"] or "").strip().casefold()
     is_finding = (
-        bool(fact["vuln_type"] or fact["severity"])
+        bool(vuln_type)
+        or severity in {"low", "medium", "high", "critical"}
         or _fact_has_security_intent(conn, project_id, fact["id"])
         or any(_coverage_is_security_check(row) for row in coverage_rows)
     )
@@ -606,6 +649,46 @@ def _fact_result_class(
         return "limited"
     return "limited"
 
+_NON_SECURITY_VARIANTS = {
+    "function_mapping", "crawl_and_fingerprint", "crawl_katana",
+    "common_wordlist", "medium_wordlist", "default_port_check",
+    "http_connectivity_check",
+}
+_NON_SECURITY_ACTION_MARKERS = (
+    "recon", "discover", "enumerat", "fingerprint", "crawl", "inventory",
+    "mapping", "asset", "directory", "port_scan",
+)
+
+
+def _fact_is_informational_observation(
+    conn: sqlite3.Connection,
+    project_id: str,
+    fact: sqlite3.Row,
+    coverage_rows: list[sqlite3.Row],
+) -> bool:
+    vuln_type = str(fact["vuln_type"] or "").strip().casefold()
+    if vuln_type in _NON_SECURITY_VARIANTS:
+        return True
+    if coverage_rows and all(not _coverage_is_security_check(row) for row in coverage_rows):
+        return True
+    rows = conn.execute(
+        """
+        SELECT action_kind, test_variant
+        FROM intents
+        WHERE project_id = ? AND to_fact_id = ?
+        """,
+        (project_id, fact["id"]),
+    ).fetchall()
+    for row in rows:
+        variant = str(row["test_variant"] or "").strip().casefold()
+        action_kind = str(row["action_kind"] or "").strip().casefold()
+        if variant in _NON_SECURITY_VARIANTS:
+            return True
+        if action_kind and any(marker in action_kind for marker in _NON_SECURITY_ACTION_MARKERS):
+            return True
+    return False
+
+
 
 def _fact_has_security_intent(
     conn: sqlite3.Connection,
@@ -620,12 +703,9 @@ def _fact_has_security_intent(
         """,
         (project_id, fact_id),
     ).fetchall()
-    recon_markers = (
-        "recon", "discover", "enumerat", "fingerprint", "crawl", "asset", "directory", "port_scan",
-    )
     for row in rows:
         action_kind = str(row["action_kind"] or "").strip().casefold()
-        if action_kind and not any(marker in action_kind for marker in recon_markers):
+        if action_kind and not any(marker in action_kind for marker in _NON_SECURITY_ACTION_MARKERS):
             return True
     return False
 
@@ -684,7 +764,155 @@ def _reason_task_log_refs(conn: sqlite3.Connection, project_id: str) -> list[str
     ]
 
 
-def surface_inventory_to_model(row: sqlite3.Row) -> SurfaceInventoryItem:
+def derive_web_surface_graph_state(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    intents: list[sqlite3.Row] | None = None,
+) -> tuple[str, str, list[str]]:
+    '''Derive Web Surface state only from explicit concluded Fact-Intent edges.'''
+    surface_id = str(row['id'])
+    if surface_id.startswith('legacy:'):
+        return 'legacy', 'legacy', []
+
+    fact_ids: list[str] = []
+    for fact_id in [
+        _row_get(row, 'source_fact_id'),
+        *_json_list(_row_get(row, 'evidence_fact_ids')),
+    ]:
+        if fact_id and fact_id not in fact_ids:
+            fact_ids.append(str(fact_id))
+
+    intent_rows = intents
+    if intent_rows is None:
+        intent_rows = conn.execute(
+            '''SELECT status, to_fact_id, surface_ref, surface_refs, action_kind, test_variant
+               FROM intents
+               WHERE project_id = ?
+               ORDER BY created_at, id''',
+            (row['project_id'],),
+        ).fetchall()
+
+    mapped = any(
+        _row_get(intent, 'status') == 'concluded'
+        and _row_get(intent, 'to_fact_id') in fact_ids
+        and is_surface_mapping_intent(
+            _row_get(intent, 'action_kind'),
+            _row_get(intent, 'test_variant'),
+        )
+        for intent in intent_rows
+    )
+    security_tested = False
+    for intent in intent_rows:
+        action_kind = str(_row_get(intent, 'action_kind') or '').strip().casefold().replace('-', '_')
+        to_fact_id = _row_get(intent, 'to_fact_id')
+        if (
+            _row_get(intent, 'status') != 'concluded'
+            or to_fact_id in {None, 'goal'}
+            or action_kind == 'verify'
+            or action_kind.startswith('verify_')
+            or is_surface_mapping_intent(action_kind, _row_get(intent, 'test_variant'))
+        ):
+            continue
+        fact = conn.execute(
+            'SELECT data FROM facts WHERE project_id = ? AND id = ?',
+            (row['project_id'], to_fact_id),
+        ).fetchone()
+        tested_refs: list[str] = []
+        if fact is not None:
+            stored_tested_refs = _json_dict(fact['data']).get('tested_surface_refs')
+            if isinstance(stored_tested_refs, list):
+                tested_refs = [
+                    str(surface_ref) for surface_ref in stored_tested_refs
+                    if isinstance(surface_ref, str) and surface_ref
+                ]
+            else:
+                tested_refs = _json_list(stored_tested_refs)
+        if not tested_refs:
+            tested_refs = list(dict.fromkeys([
+                *_json_list(_row_get(intent, 'surface_refs')),
+                *([_row_get(intent, 'surface_ref')] if _row_get(intent, 'surface_ref') else []),
+            ]))
+        if surface_id in tested_refs:
+            security_tested = True
+            if str(to_fact_id) not in fact_ids:
+                fact_ids.append(str(to_fact_id))
+            break
+    return (
+        'mapped' if mapped else 'discovered',
+        'security_tested' if security_tested else 'not_tested',
+        fact_ids,
+    )
+
+
+def _surface_test_summary(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> tuple[str, int, int]:
+    """Derive testing separately from the Surface planning lifecycle."""
+    if str(_row_get(row, "planning_status") or "pending") != "assessed":
+        return "unassessed", 0, 0
+
+    behavior_key = str(_row_get(row, "behavior_key") or "").strip()
+    if not behavior_key:
+        values = dict(row)
+        values["params"] = _json_list(values.get("params"))
+        values["roles"] = _json_list(values.get("roles"))
+        values["traits"] = _json_dict(values.get("traits"))
+        behavior_key = behavior_identity(values)[0]
+
+    coverage_rows = conn.execute(
+        """
+        SELECT DISTINCT coverage.id, coverage.execution_status, coverage.outcome
+        FROM coverage_items AS coverage
+        JOIN surface_inventory AS surface
+          ON surface.project_id = coverage.project_id
+         AND surface.fingerprint = coverage.surface_fingerprint
+        WHERE coverage.project_id = ?
+          AND surface.behavior_key = ?
+          AND coverage.required <> 0
+          AND coverage.disposition <> 'excluded'
+        ORDER BY coverage.id
+        """,
+        (row["project_id"], behavior_key),
+    ).fetchall()
+    total = len(coverage_rows)
+    if total == 0:
+        return "not_applicable", 0, 0
+
+    terminal_outcomes = {
+        "vulnerable", "not_vulnerable", "not_applicable", "informational",
+    }
+    completed = sum(
+        1 for coverage in coverage_rows
+        if coverage["execution_status"] == "completed"
+        and coverage["outcome"] in terminal_outcomes
+    )
+    if any(
+        coverage["execution_status"] == "blocked"
+        or coverage["outcome"] == "inconclusive"
+        for coverage in coverage_rows
+    ):
+        status = "blocked"
+    elif completed == total:
+        status = "completed"
+    elif any(
+        coverage["execution_status"] in {"queued", "testing"}
+        for coverage in coverage_rows
+    ):
+        status = "testing"
+    elif completed:
+        status = "partial"
+    else:
+        status = "untested"
+    return status, total, completed
+
+
+def surface_inventory_to_model(
+    row: sqlite3.Row,
+    conn: sqlite3.Connection | None = None,
+    *,
+    include_coverage_summary: bool = True,
+) -> SurfaceInventoryItem:
     values = dict(row)
     values.pop("project_id", None)
     values["params"] = _json_list(values.get("params"))
@@ -692,6 +920,20 @@ def surface_inventory_to_model(row: sqlite3.Row) -> SurfaceInventoryItem:
     values["traits"] = _json_dict(values.get("traits"))
     values["capabilities"] = _json_list(values.get("capabilities"))
     values["evidence_fact_ids"] = _json_list(values.get("evidence_fact_ids"))
+    if conn is not None:
+        project = conn.execute(
+            'SELECT mode FROM projects WHERE id = ?',
+            (row['project_id'],),
+        ).fetchone()
+        if project is not None and project['mode'] == 'real_website':
+            discovery, testing, _fact_ids = derive_web_surface_graph_state(conn, row)
+            values['graph_discovery_status'] = discovery
+            values['graph_testing_status'] = testing
+    if conn is not None and include_coverage_summary:
+        test_status, required_count, completed_count = _surface_test_summary(conn, row)
+        values["test_status"] = test_status
+        values["required_coverage_count"] = required_count
+        values["completed_coverage_count"] = completed_count
     return SurfaceInventoryItem(**values)
 
 
@@ -726,15 +968,20 @@ def validate_completion_source_integrity(
     project_id: str,
     fact_ids: list[str],
 ) -> None:
-    """Require real-website completion sources to be terminal Facts with one producer."""
+    """Require Web completion sources to be actual concluded Fact-Intent edges."""
     project = get_project_or_404(conn, project_id)
     if _row_get(project, "mode") != "real_website":
         return
     for fact_id in fact_ids:
-        # origin may anchor a conclusive no-finding/limited assessment, but it
-        # can never produce an attack path because it is not verified evidence.
         if fact_id == "origin":
-            continue
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "invalid_completion_source",
+                    "fact_id": fact_id,
+                    "message": "origin is context, not an executed Fact-Intent result.",
+                },
+            )
         if fact_id == "goal":
             raise HTTPException(
                 409,
@@ -742,20 +989,6 @@ def validate_completion_source_integrity(
                     "code": "invalid_completion_source",
                     "fact_id": fact_id,
                     "message": "goal cannot be used as completion evidence.",
-                },
-            )
-        fact = conn.execute(
-            "SELECT status FROM facts WHERE project_id = ? AND id = ?",
-            (project_id, fact_id),
-        ).fetchone()
-        status = str(fact["status"] or "").strip().casefold() if fact is not None else ""
-        if not status or status in {"pending", "open", "candidate", "queued", "testing", "running"}:
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "invalid_completion_source",
-                    "fact_id": fact_id,
-                    "message": "Completion sources must be terminal Facts, not planning or pending records.",
                 },
             )
         producers = conn.execute(
@@ -775,6 +1008,28 @@ def validate_completion_source_integrity(
                     "producer_intents": [row["id"] for row in producers],
                 },
             )
+        fact = conn.execute(
+            "SELECT kind, status, verification_of FROM facts WHERE project_id = ? AND id = ?",
+            (project_id, fact_id),
+        ).fetchone()
+        if (
+            fact is None
+            or str(fact["kind"] or "").strip().casefold() != "verification_result"
+            or str(fact["status"] or "").strip().casefold() != "reproduced"
+            or not fact["verification_of"]
+        ):
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "invalid_completion_source",
+                    "fact_id": fact_id,
+                    "message": (
+                        "Web vulnerability completion sources must be reproduced "
+                        "Verification Facts. Use an empty source list when no "
+                        "vulnerability was reproduced."
+                    ),
+                },
+            )
 
 
 def _trace_concluded_fact(
@@ -786,7 +1041,7 @@ def _trace_concluded_fact(
     visiting: set[str],
 ) -> None:
     if fact_id in visiting:
-        raise HTTPException(409, "Fact鈥揑ntent graph contains a cycle")
+        raise HTTPException(409, "Fact-Intent graph contains a cycle")
     if fact_id in fact_chain:
         return
     visiting.add(fact_id)
@@ -824,7 +1079,7 @@ def build_completed_attack_paths(
     conn: sqlite3.Connection,
     project_id: str,
 ) -> list[AttackPath]:
-    """Project verified goal-reaching causal subgraphs; never read legacy path rows."""
+    """Project only causal subgraphs selected by the concluded goal edge."""
     project = get_project_or_404(conn, project_id)
     if project["status"] != "completed":
         return []
@@ -838,6 +1093,7 @@ def build_completed_attack_paths(
     if len(completion_rows) != 1:
         return []
     completion = completion_rows[0]
+    web_mode = str(_row_get(project, "mode") or "").casefold() == "real_website"
     source_rows = conn.execute(
         """SELECT fact_id FROM intent_sources
            WHERE project_id = ? AND intent_id = ? ORDER BY rowid""",
@@ -845,16 +1101,22 @@ def build_completed_attack_paths(
     ).fetchall()
     eligible_source_ids: list[str] = []
     for source in source_rows:
-        candidate = conn.execute(
-            "SELECT * FROM facts WHERE project_id = ? AND id = ?",
-            (project_id, source["fact_id"]),
+        source_id = source["fact_id"]
+        if source_id in {"origin", "goal"}:
+            continue
+        source_fact = conn.execute(
+            "SELECT kind, status, verification_of FROM facts WHERE project_id = ? AND id = ?",
+            (project_id, source_id),
         ).fetchone()
-        if (
-            candidate is not None
-            and str(candidate["status"] or "").casefold() in {"confirmed", "verified"}
-            and fact_to_model(conn, candidate, project_id).result_class == "confirmed"
+        if source_fact is None:
+            continue
+        if web_mode and (
+                str(source_fact["kind"] or "").strip().casefold() != "verification_result"
+                or str(source_fact["status"] or "").strip().casefold() != "reproduced"
+                or not source_fact["verification_of"]
         ):
-            eligible_source_ids.append(source["fact_id"])
+            continue
+        eligible_source_ids.append(source_id)
 
     paths: list[AttackPath] = []
     for source in source_rows:
@@ -884,11 +1146,9 @@ def build_completed_attack_paths(
             "SELECT * FROM facts WHERE project_id = ? AND id = ?",
             (project_id, source_id),
         ).fetchone()
-        if fact is None or str(fact["status"] or "").casefold() not in {"confirmed", "verified"}:
+        if fact is None:
             continue
         fact_model = fact_to_model(conn, fact, project_id)
-        if fact_model.result_class != "confirmed":
-            continue
         fact_chain: list[str] = []
         intent_refs: list[str] = []
         _trace_concluded_fact(
@@ -934,7 +1194,7 @@ def build_completed_attack_paths(
                     required=step_fact_id != "origin",
                     order=order,
                     fact_status=step_fact["status"],
-                    derived_status="confirmed",
+                    derived_status="complete",
                     reason=reason,
                     coverage_refs=step_model.coverage_refs,
                 )
@@ -958,11 +1218,11 @@ def build_completed_attack_paths(
                 fact_chain=fact_chain,
                 description=(
                     f"{completion['description']}\n"
-                    f"Terminal verified Fact {source_id}: {fact['description']}"
+                    f"Terminal Fact {source_id}: {fact['description']}"
                 ),
-                severity=str(fact["severity"] or "medium"),
-                status="confirmed",
-                suggested_status="confirmed",
+                severity=str(fact["severity"] or "unknown"),
+                status="complete",
+                suggested_status="complete",
                 status_reason=(
                     f"Derived from {len(intent_refs)} concluded Intent edge(s), "
                     f"ending at goal through {completion['id']}."
@@ -1413,6 +1673,11 @@ def _variant_fact_verdict(
 ) -> str:
     status = str(row["status"] or "").strip().casefold()
     if status in {"confirmed", "verified"}:
+        if not _coverage_is_security_check(coverage):
+            return "informational"
+        variant = str(row["intent_test_variant"] or row["vuln_type"] or "").strip().casefold()
+        if variant in _NON_SECURITY_VARIANTS:
+            return "informational"
         if row["intent_test_variant"] or row["vuln_type"] or row["severity"]:
             return status
         action_kind = str(row["intent_action_kind"] or "").strip().casefold()
@@ -2209,7 +2474,7 @@ def validate_project_completion_allowed(conn: sqlite3.Connection, project_id: st
             409,
             detail={
                 "code": "completion_blocked",
-                "message": "Project still has unfinished executable work or coverage lifecycle work.",
+                "message": "Project still has unfinished Fact-Intent graph work or open important Behavior coverage.",
                 "blockers": [blocker.model_dump(mode="json") for blocker in blockers],
             },
         )
@@ -2234,6 +2499,10 @@ def assessment_limitations(conn: sqlite3.Connection, project_id: str) -> list[Co
                 suggested_action="finish_recon_then_plan_coverage",
             )
         )
+        # RECON is a stage gate, not a partially materialized vulnerability
+        # assessment.  Surface/Hypothesis/Coverage work starts after transition.
+        return blockers
+
     open_rows = conn.execute(
         """
         SELECT id, status, priority, description, worker, next_retry_at, last_error, failed_at
@@ -2264,6 +2533,51 @@ def assessment_limitations(conn: sqlite3.Connection, project_id: str) -> list[Co
             )
         )
 
+
+    if real_website:
+        orphan_candidates = conn.execute(
+            """
+            SELECT candidate.id, candidate.description
+            FROM facts AS candidate
+            WHERE candidate.project_id = ?
+              AND TRIM(COALESCE(json_extract(candidate.data, '$.verify_request'), '')) <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM facts AS verification
+                  WHERE verification.project_id = candidate.project_id
+                    AND verification.verification_of = candidate.id
+                    AND verification.kind = 'verification_result'
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM intents AS verify_intent
+                  JOIN intent_sources AS source
+                    ON source.project_id = verify_intent.project_id
+                   AND source.intent_id = verify_intent.id
+                  WHERE verify_intent.project_id = candidate.project_id
+                    AND source.fact_id = candidate.id
+                    AND (
+                        LOWER(REPLACE(COALESCE(verify_intent.action_kind, ''), '-', '_')) = 'verify'
+                        OR LOWER(REPLACE(COALESCE(verify_intent.action_kind, ''), '-', '_')) LIKE 'verify_%'
+                        OR LOWER(REPLACE(COALESCE(verify_intent.action_kind, ''), '-', '_')) LIKE 'verification%'
+                    )
+              )
+            ORDER BY candidate.id
+            """,
+            (project_id,),
+        ).fetchall()
+        for candidate in orphan_candidates:
+            blockers.append(
+                CompletionBlocker(
+                    kind="reason",
+                    ref=f"verify:{candidate['id']}",
+                    status="handoff_pending",
+                    reason="candidate Fact requested Verify but no Verify Intent was committed",
+                    description=candidate["description"],
+                    suggested_action="restore_verify_intent",
+                    related_refs=[candidate["id"]],
+                )
+            )
+
     if not real_website:
         return blockers
 
@@ -2276,6 +2590,8 @@ def assessment_limitations(conn: sqlite3.Connection, project_id: str) -> list[Co
         ).fetchall()
         for surface in surface_rows:
             traits = _json_dict(surface["traits"])
+            if not surface["source_fact_id"] and not _json_list(surface["evidence_fact_ids"]):
+                continue
             if traits.get("out_of_scope_support"):
                 continue
             blockers.append(
@@ -2338,6 +2654,17 @@ def assessment_limitations(conn: sqlite3.Connection, project_id: str) -> list[Co
                   SELECT 1 FROM hypotheses AS hypothesis
                   WHERE hypothesis.project_id = coverage.project_id
                     AND hypothesis.coverage_id = coverage.id
+              )
+              AND NOT (
+                  COALESCE(coverage.surface_fingerprint, '') <> ''
+                  AND coverage.source_fact_id IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM surface_inventory AS evidence_surface
+                      WHERE evidence_surface.project_id = coverage.project_id
+                        AND evidence_surface.fingerprint = coverage.surface_fingerprint
+                        AND (evidence_surface.source_fact_id IS NOT NULL
+                             OR COALESCE(evidence_surface.evidence_fact_ids, '[]') <> '[]')
+                  )
               )
             ORDER BY COALESCE(coverage.priority, 0) DESC, coverage.created_at, coverage.id""",
             (project_id,),
@@ -2440,18 +2767,108 @@ def assessment_limitations(conn: sqlite3.Connection, project_id: str) -> list[Co
     return blockers
 
 
-def completion_blockers(conn: sqlite3.Connection, project_id: str) -> list[CompletionBlocker]:
-    """Return only lifecycle work that makes an atomic completion write unsafe.
+def _important_behavior_blockers(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> list[CompletionBlocker]:
+    """Return each important V3 Behavior lacking explicit security-test evidence."""
+    project = conn.execute(
+        "SELECT mode, phase, planning_version FROM projects WHERE id = ?",
+        (project_id,),
+    ).fetchone()
+    if (
+        project is None
+        or project["mode"] != "real_website"
+        or project["phase"] != "explore"
+        or int(project["planning_version"] or 1) < 3
+    ):
+        return []
 
-    Coverage, Surface, and Hypothesis records are assessment limitations, not a
-    second task graph. Keeping them out of this result prevents metadata from
-    deadlocking an otherwise finished project.
-    """
-    return [
-        item
-        for item in assessment_limitations(conn, project_id)
+    surfaces: list[dict] = []
+    surface_ids_by_behavior: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT * FROM surface_inventory WHERE project_id = ? ORDER BY created_at, id",
+        (project_id,),
+    ).fetchall():
+        if str(row["id"]).startswith("legacy:"):
+            continue
+        values = dict(row)
+        values["params"] = _json_list(values.get("params"))
+        values["roles"] = _json_list(values.get("roles"))
+        values["traits"] = _json_dict(values.get("traits"))
+        values["capabilities"] = _json_list(values.get("capabilities"))
+        values["evidence_fact_ids"] = _json_list(values.get("evidence_fact_ids"))
+        if values["traits"].get("out_of_scope_support"):
+            continue
+        evidence_ids = {
+            str(fact_id)
+            for fact_id in [values.get("source_fact_id"), *values["evidence_fact_ids"]]
+            if fact_id and fact_id not in {"origin", "goal"}
+        }
+        if not evidence_ids:
+            continue
+        behavior_key = behavior_identity(values)[0]
+        surfaces.append(values)
+        surface_ids_by_behavior.setdefault(behavior_key, []).append(str(row["id"]))
+
+    tested_surface_refs: set[str] = set()
+    for row in conn.execute(
+        """
+        SELECT fact.data
+        FROM intents AS intent
+        JOIN facts AS fact
+          ON fact.project_id = intent.project_id AND fact.id = intent.to_fact_id
+        WHERE intent.project_id = ?
+          AND intent.status = 'concluded'
+          AND LOWER(REPLACE(COALESCE(intent.action_kind, ''), '-', '_')) = 'security_test'
+        ORDER BY intent.created_at, intent.id
+        """,
+        (project_id,),
+    ).fetchall():
+        raw_refs = _json_dict(row["data"]).get("tested_surface_refs")
+        if isinstance(raw_refs, list):
+            tested_surface_refs.update(
+                str(surface_id) for surface_id in raw_refs
+                if isinstance(surface_id, str) and surface_id
+            )
+
+    blockers: list[CompletionBlocker] = []
+    for behavior in cluster_behaviors(surfaces):
+        importance = behavior_importance(behavior)
+        if importance not in {"critical", "high"}:
+            continue
+        behavior_key = str(behavior["behavior_key"])
+        surface_refs = surface_ids_by_behavior.get(behavior_key, [])
+        if tested_surface_refs.intersection(surface_refs):
+            continue
+        method = str(behavior.get("method") or "GET")
+        path = str(behavior.get("path_template") or "/")
+        blockers.append(
+            CompletionBlocker(
+                kind="behavior",
+                ref=behavior_key,
+                status="open",
+                priority=10 if importance == "critical" else 8,
+                reason=(
+                    "important indexed Behavior has no concluded security_test Fact "
+                    "with an explicit tested_surface_refs binding"
+                ),
+                description=f"{importance} {method} {path}",
+                suggested_action="create_precise_security_test_intent",
+                related_refs=surface_refs,
+            )
+        )
+    blockers.sort(key=lambda item: (-(item.priority or 0), item.ref))
+    return blockers
+
+
+def completion_blockers(conn: sqlite3.Connection, project_id: str) -> list[CompletionBlocker]:
+    """Block completion on live graph work and untested important V3 Behaviors."""
+    live_graph_blockers = [
+        item for item in assessment_limitations(conn, project_id)
         if item.kind in {"intent", "reason"}
     ]
+    return [*live_graph_blockers, *_important_behavior_blockers(conn, project_id)]
 
 
 def project_runtime_fields(
@@ -2462,6 +2879,13 @@ def project_runtime_fields(
 ) -> dict:
     status = row["status"]
     blockers: list[CompletionBlocker] = []
+    phase = str(_row_get(row, "phase") or "explore")
+    # An active recon run is progressing through a stage gate, not blocked.
+    # Completion itself still calls completion_blockers() directly, so this
+    # presentation rule cannot allow premature completion.
+    show_completion_blockers = not (status == "active" and phase == "recon")
+    if include_completion_blockers and status != "completed" and show_completion_blockers:
+        blockers = completion_blockers(conn, row["id"])
     if status == "completed":
         run_state = "completed"
     elif status == "stopped":
@@ -2486,8 +2910,8 @@ def project_runtime_fields(
             progress_values.append(progress["value"])
     return {
         "run_state": run_state,
-        # Full detail is the diagnostic view; blockers must be visible before
-        # the first completion attempt as well as after it.
+        # During active recon the stage gate is represented by phase/progress,
+        # not as a user-facing completion blocker.
         "completion_blockers": blockers if include_completion_blockers else [],
         "last_progress_at": max(value for value in progress_values if value),
     }
@@ -2759,7 +3183,7 @@ def conclude_intent_with_failure_fact(
                id, project_id, description, parent_fact, status,
                schema_version, kind, summary, subject, data,
                parent_fact_ids, evidence_refs, confidence, created_by, created_at
-           ) VALUES (?, ?, ?, ?, 'failed', 1, 'execution_result', ?, ?, ?, ?, ?, 1.0, ?, ?)""",
+           ) VALUES (?, ?, ?, ?, NULL, 1, 'execution_result', ?, ?, ?, ?, ?, 1.0, ?, ?)""",
         (
             fact_id, project_id, summary, source_ids[0] if source_ids else None,
             summary, json.dumps(subject, ensure_ascii=False),
@@ -2795,7 +3219,12 @@ def mark_intent_failure(
         return row
     now = utcnow()
     next_attempt = (_row_get(row, "attempt_count") or 0) + 1
-    if next_attempt >= max_attempts:
+    project = conn.execute("SELECT mode FROM projects WHERE id = ?", (project_id,)).fetchone()
+    real_web = project is not None and project["mode"] == "real_website"
+    # All task execution failures are bounded. real_website used to bypass
+    # this guard, which left Open Intents spinning forever.
+    retry_forever = False
+    if not retry_forever and next_attempt >= max_attempts:
         conn.execute(
             """
             UPDATE intents
@@ -2887,7 +3316,7 @@ def mark_intent_failure(
             """,
             (now, project_id, project_id, intent_id),
         )
-    if next_attempt >= max_attempts:
+    if not retry_forever and next_attempt >= max_attempts:
         conn.execute(
             """UPDATE hypotheses SET status = 'inconclusive', last_error = ?, updated_at = ?
                WHERE project_id = ? AND intent_id = ?
@@ -2901,7 +3330,7 @@ def mark_intent_failure(
                  AND status NOT IN ('supported', 'refuted', 'waived')""",
             (error[:2000], now, project_id, intent_id),
         )
-    if next_attempt >= max_attempts:
+    if not retry_forever and next_attempt >= max_attempts:
         conclude_intent_with_failure_fact(
             conn,
             project_id,
@@ -2912,6 +3341,17 @@ def mark_intent_failure(
             failure_stage="execution_failed",
             now=now,
         )
+        if real_web:
+            conn.execute(
+                """UPDATE coverage_items
+                   SET execution_status = 'queued', status = 'untested',
+                       outcome = NULL, updated_at = ?
+                   WHERE project_id = ? AND id IN (
+                       SELECT coverage_id FROM coverage_intents
+                       WHERE project_id = ? AND intent_id = ?
+                   )""",
+                (now, project_id, project_id, intent_id),
+            )
 
     updated = conn.execute(
         "SELECT * FROM intents WHERE id = ? AND project_id = ?",
@@ -2965,7 +3405,7 @@ def mark_reason_failure(
             exhausted,
             exhausted,
             exhausted,
-            f"Reason failed {next_attempt} times without advancing the Fact鈥揑ntent graph: {last_error}",
+            f"Reason failed {next_attempt} times without advancing the Fact-Intent graph: {last_error}",
             project_id,
         ),
     )
@@ -3069,6 +3509,8 @@ def _intent_model(
         port=_row_get(row, "port"),
         path=_row_get(row, "path"),
         surface_type=_row_get(row, "surface_type"),
+        surface_ref=_row_get(row, "surface_ref"),
+        surface_refs=_json_list(_row_get(row, "surface_refs")),
         action_kind=_row_get(row, "action_kind"),
         test_variant=_row_get(row, "test_variant"),
         priority=_row_get(row, "priority"),
@@ -3257,12 +3699,27 @@ def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> N
 
     # Project reads call lease expiry frequently. Avoid opening a write
     # transaction when there is nothing stale to clean up.
-    if conn.execute(f"SELECT 1 FROM intents {where_clause} LIMIT 1", params).fetchone() is None:
+    stale_rows = conn.execute(
+        f"SELECT project_id, id FROM intents {where_clause}", params,
+    ).fetchall()
+    if not stale_rows:
         return
     conn.execute(
-        f"UPDATE intents SET worker = NULL {where_clause}",
+        f"UPDATE intents SET worker = NULL, last_heartbeat_at = NULL {where_clause}",
         params,
     )
+    now = utcnow()
+    for stale in stale_rows:
+        conn.execute(
+            """UPDATE coverage_items
+               SET execution_status = 'queued', status = 'untested',
+                   outcome = NULL, updated_at = ?
+               WHERE project_id = ? AND id IN (
+                   SELECT coverage_id FROM coverage_intents
+                   WHERE project_id = ? AND intent_id = ?
+               ) AND execution_status = 'testing'""",
+            (now, stale["project_id"], stale["project_id"], stale["id"]),
+        )
 
 
 def expire_reason_leases(conn: sqlite3.Connection, project_id: str | None = None) -> None:

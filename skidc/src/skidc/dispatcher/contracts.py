@@ -59,9 +59,11 @@ def _looks_like_bootstrap_conclude_data(payload: dict[str, Any]) -> bool:
 
 
 def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
-    # description is required; the rest are optional fact metadata fields.
+    # Cairn-style Explore conclusions are objective text plus optional raw
+    # evidence/surface observations. Semantic labels such as "confirmed",
+    # severity, or vulnerability type are deliberately not part of the write
+    # contract: the concluded Intent edge is the source of graph truth.
     return isinstance(payload, dict) and "description" in payload
-
 
 _EXPLORE_STRING_FIELDS = (
     "scope",
@@ -82,12 +84,144 @@ _EXPLORE_STRING_FIELDS = (
 _EXPLORE_BOOL_FIELDS = ("recon_executed", "recon_found_results")
 
 
+
+_WEB_INTENT_FIELDS = frozenset(
+    {
+        "from",
+        "description",
+        "executor",
+        "target",
+        "port",
+        "path",
+        "surface_type",
+        "surface_ref",
+        "surface_refs",
+        "action_kind",
+        "test_variant",
+        "priority",
+        "suggested_tools",
+        "coverage_refs",
+    }
+)
+
+
+def _normalize_web_reason_intent(intent: object) -> dict[str, Any]:
+    if not isinstance(intent, dict):
+        raise ValueError("invalid intent")
+    extra_fields = set(intent) - _WEB_INTENT_FIELDS
+    if extra_fields:
+        raise ValueError(
+            f"unexpected Web Intent fields: {', '.join(sorted(extra_fields))}"
+        )
+    from_ids = intent.get("from")
+    description = intent.get("description")
+    if not isinstance(from_ids, list) or not from_ids or not all(
+        isinstance(fact_id, str) and fact_id.strip() for fact_id in from_ids
+    ):
+        raise ValueError("intent.from must contain Fact ids")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("intent.description is required")
+    normalized = dict(intent)
+    normalized["from"] = [fact_id.strip() for fact_id in from_ids]
+    normalized["description"] = description.strip()
+    executor = normalized.pop("executor", "explore")
+    if executor not in {"explore", "verify"}:
+        raise ValueError("intent.executor must be explore or verify")
+    if executor == "verify":
+        normalized["action_kind"] = "verify"
+    action_kind = normalized.get("action_kind")
+    if not isinstance(action_kind, str) or not action_kind.strip():
+        raise ValueError("Web Intent action_kind is required")
+    action_kind = action_kind.strip().casefold().replace("-", "_")
+    if action_kind not in {"surface_mapping", "security_test", "verify"}:
+        raise ValueError(
+            "Web Intent action_kind must be surface_mapping, security_test, or verify"
+        )
+    normalized["action_kind"] = action_kind
+    surface_ref = normalized.get("surface_ref")
+    raw_surface_refs = normalized.get("surface_refs")
+    if raw_surface_refs is None:
+        raw_surface_refs = [surface_ref] if isinstance(surface_ref, str) else []
+    if not isinstance(raw_surface_refs, list) or not all(
+        isinstance(surface_id, str) and surface_id.strip()
+        for surface_id in raw_surface_refs
+    ):
+        raise ValueError("intent.surface_refs must contain Surface ids")
+    surface_refs = list(dict.fromkeys(surface_id.strip() for surface_id in raw_surface_refs))
+    if len(surface_refs) > 5:
+        raise ValueError("one Web Intent may bind at most 5 related Surfaces")
+    if surface_ref is not None and (
+        not isinstance(surface_ref, str) or surface_ref.strip() not in surface_refs
+    ):
+        raise ValueError("intent.surface_ref must also appear in surface_refs")
+    if action_kind == "security_test" and not surface_refs:
+        raise ValueError("security_test Intent requires surface_ref or surface_refs")
+    if surface_refs:
+        normalized["surface_refs"] = surface_refs
+        normalized["surface_ref"] = surface_refs[0]
+    else:
+        normalized.pop("surface_refs", None)
+        normalized.pop("surface_ref", None)
+    return normalized
+
+
+def _validate_web_reason_data(
+    data: dict[str, Any], *, open_intents_empty: bool, max_intents: int,
+) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None, bool]:
+    keys = set(data)
+    if keys - {"complete", "intent", "intents"}:
+        raise ValueError("Web Reason data may contain only complete, intent, or intents")
+    if "intent" in data and "intents" in data:
+        raise ValueError("intent and intents cannot coexist")
+    if "complete" in data and ({"intent", "intents"} & keys):
+        raise ValueError("complete and intents cannot coexist")
+
+    complete = data.get("complete")
+    if complete is not None:
+        if not isinstance(complete, dict) or set(complete) != {"from", "description"}:
+            raise ValueError("invalid complete payload")
+        if not isinstance(complete.get("from"), list):
+            raise ValueError("complete.from must be an array")
+        if not isinstance(complete.get("description"), str) or not complete["description"].strip():
+            raise ValueError("complete.description is required")
+        return "complete", complete, False
+
+    intents = data.get("intents")
+    if intents is None and data.get("intent") is not None:
+        singular_or_list = data["intent"]
+        # Some model backends emit the plural shape under the singular key.
+        # It is unambiguous here, so normalize it instead of discarding valid work.
+        intents = singular_or_list if isinstance(singular_or_list, list) else [singular_or_list]
+    if intents is not None:
+        if not isinstance(intents, list):
+            raise ValueError("intents must be an array")
+        normalized = [_normalize_web_reason_intent(intent) for intent in intents]
+        if not normalized:
+            if open_intents_empty:
+                raise ValueError("Web Reason must return work when no Open Intent exists")
+            return "noop", None, False
+        return "intents", normalized[:max(1, max_intents)], False
+
+    if open_intents_empty:
+        raise ValueError("Web Reason cannot return noop when no Open Intent exists")
+    return "noop", None, False
+
+
 def validate_reason_payload(
     payload: dict[str, Any], open_intents_empty: bool, max_intents: int,
+    *, web_mode: bool = False,
 ) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None, bool]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None, False
+    if web_mode:
+        if accepted is not True or not isinstance(data, dict):
+            raise ValueError("accepted must be true")
+        return _validate_web_reason_data(
+            dict(data),
+            open_intents_empty=open_intents_empty,
+            max_intents=max_intents,
+        )
     if accepted is None:
         if not _looks_like_reason_data(payload):
             raise ValueError("accepted must be true or false")
@@ -255,45 +389,205 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
     return "fact", fact_description.strip()
 
 
-def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+MAX_WEB_SURFACES_PER_RESULT = 500
+
+
+def _validate_web_surfaces(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError("surfaces must be an array")
+    if len(value) > MAX_WEB_SURFACES_PER_RESULT:
+        raise ValueError(
+            f"surfaces may contain at most {MAX_WEB_SURFACES_PER_RESULT} entries"
+        )
+    allowed = {"method", "path", "params", "auth_context", "surface_type"}
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise ValueError(f"surfaces[{index}] must be an object")
+        extra = set(raw) - allowed
+        if extra:
+            raise ValueError(
+                f"unexpected Surface fields: {', '.join(sorted(extra))}"
+            )
+        method = raw.get("method")
+        path = raw.get("path")
+        params = raw.get("params", [])
+        auth_context = raw.get("auth_context", "anonymous")
+        surface_type = raw.get("surface_type", "route")
+        if not isinstance(method, str) or not method.strip():
+            raise ValueError(f"surfaces[{index}].method is required")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError(f"surfaces[{index}].path is required")
+        if not isinstance(params, list) or not all(
+            isinstance(item, str) and item.strip() for item in params
+        ):
+            raise ValueError(f"surfaces[{index}].params must contain strings")
+        if not isinstance(auth_context, str) or not auth_context.strip():
+            raise ValueError(f"surfaces[{index}].auth_context is required")
+        if not isinstance(surface_type, str) or not surface_type.strip():
+            raise ValueError(f"surfaces[{index}].surface_type is required")
+        normalized.append({
+            "method": method.strip().upper(),
+            "path": path.strip(),
+            "params": list(dict.fromkeys(item.strip() for item in params)),
+            "auth_context": auth_context.strip(),
+            "surface_type": surface_type.strip(),
+        })
+    return normalized
+
+
+def _validate_web_surface_refs(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise ValueError(f"{field} must contain Surface ids")
+    return list(dict.fromkeys(item.strip() for item in value))
+
+
+def _validate_web_verify_requests(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, str):
+        value = [{"claim": value}]
+    elif isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list) or not value:
+        raise ValueError("verify must be a non-empty string, object, or array")
+    normalized: list[dict[str, Any]] = []
+    allowed = {"claim", "surface_ref", "surface_refs", "evidence_refs"}
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict) or set(raw) - allowed:
+            raise ValueError(f"verify[{index}] contains unexpected fields")
+        claim = raw.get("claim")
+        if not isinstance(claim, str) or not claim.strip():
+            raise ValueError(f"verify[{index}].claim is required")
+        surface_refs = raw.get("surface_refs")
+        if surface_refs is None:
+            surface_ref = raw.get("surface_ref")
+            surface_refs = [surface_ref] if isinstance(surface_ref, str) else []
+        surface_refs = _validate_web_surface_refs(surface_refs, f"verify[{index}].surface_refs")
+        evidence_refs = raw.get("evidence_refs", [])
+        if not isinstance(evidence_refs, list) or not all(
+            isinstance(item, str) and item.strip() for item in evidence_refs
+        ):
+            raise ValueError(f"verify[{index}].evidence_refs must contain references")
+        normalized.append({
+            "claim": claim.strip(),
+            "surface_refs": surface_refs,
+            "evidence_refs": list(dict.fromkeys(item.strip() for item in evidence_refs)),
+        })
+    return normalized
+
+
+def validate_explore_payload(
+    payload: dict[str, Any], *, fact_only: bool = False, allow_surfaces: bool = False,
+) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
+    if fact_only:
+        if accepted is not True or not isinstance(data, dict):
+            raise ValueError("accepted must be true")
+        if data == {"no_result": True}:
+            return "no_result", None
+        allowed_fields = {"description", "tested_surface_refs", "verify"}
+        if allow_surfaces:
+            allowed_fields.add("surfaces")
+        required_fields = {"description"}
+        if not required_fields.issubset(data) or not set(data).issubset(allowed_fields):
+            raise ValueError("Web Explore data may contain only description, verify, or allowed surfaces")
+        description = data.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("description is required")
+        result: dict[str, Any] = {"description": description.strip()}
+        if "tested_surface_refs" in data:
+            result["tested_surface_refs"] = _validate_web_surface_refs(
+                data["tested_surface_refs"], "tested_surface_refs",
+            )
+        verify = data.get("verify")
+        if verify is not None:
+            result["verify_requests"] = _validate_web_verify_requests(verify)
+        if "surfaces" in data:
+            result["observed_surfaces"] = _validate_web_surfaces(data["surfaces"])
+        return "fact", result
     if accepted is None:
         if not _looks_like_explore_data(payload):
             raise ValueError("accepted must be true or false")
         data = payload
     if not isinstance(data, dict):
         raise ValueError("accepted must be true or false")
+    if data.get("no_result") is True:
+        return "no_result", None
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description is required")
     result: dict[str, Any] = {"description": description.strip()}
-    for field in _EXPLORE_STRING_FIELDS:
-        value = data.get(field)
-        if isinstance(value, str) and value.strip():
-            result[field] = value.strip()
-    for field in _EXPLORE_BOOL_FIELDS:
-        value = data.get(field)
-        if isinstance(value, bool):
-            result[field] = value
-    for field in ("subject", "data"):
-        value = data.get(field)
-        if isinstance(value, dict):
-            result[field] = dict(value)
-    for field in ("parent_fact_ids", "evidence_refs"):
-        value = data.get(field)
-        if isinstance(value, list):
-            result[field] = [item.strip() for item in value if isinstance(item, str) and item.strip()]
-    confidence = data.get("confidence")
-    if isinstance(confidence, (int, float)) and 0 <= float(confidence) <= 1:
-        result["confidence"] = float(confidence)
-    schema_version = data.get("schema_version")
-    if isinstance(schema_version, int) and schema_version >= 1:
-        result["schema_version"] = schema_version
+    evidence_refs = data.get("evidence_refs")
+    if not fact_only:
+        for field in _EXPLORE_STRING_FIELDS:
+            value = data.get(field)
+            if isinstance(value, str) and value.strip():
+                result[field] = value.strip()
+        for field in _EXPLORE_BOOL_FIELDS:
+            value = data.get(field)
+            if isinstance(value, bool):
+                result[field] = value
+        for field in ("subject", "data"):
+            value = data.get(field)
+            if isinstance(value, dict):
+                result[field] = dict(value)
+        parent_fact_ids = data.get("parent_fact_ids")
+        if isinstance(parent_fact_ids, list):
+            result["parent_fact_ids"] = [item.strip() for item in parent_fact_ids if isinstance(item, str) and item.strip()]
+        confidence = data.get("confidence")
+        if isinstance(confidence, (int, float)) and 0 <= float(confidence) <= 1:
+            result["confidence"] = float(confidence)
+        schema_version = data.get("schema_version")
+        if isinstance(schema_version, int) and schema_version >= 1:
+            result["schema_version"] = schema_version
+    if isinstance(evidence_refs, list):
+        result["evidence_refs"] = [
+            item.strip() for item in evidence_refs
+            if isinstance(item, str) and item.strip()
+        ]
     observed_surfaces = data.get("observed_surfaces")
     if isinstance(observed_surfaces, list):
         result["observed_surfaces"] = [
             dict(surface) for surface in observed_surfaces[:100] if isinstance(surface, dict)
         ]
     return "fact", result
+
+
+_VERIFY_RESULTS = frozenset({"reproduced", "not_reproduced"})
+
+
+def validate_verify_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Validate the deliberately small Verify Agent terminal protocol."""
+    accepted, data = _unwrap_wrapped_payload(payload)
+    if accepted is not True or not isinstance(data, dict):
+        raise ValueError("accepted must be true")
+
+    extra_keys = set(data) - {"result", "description", "evidence_refs"}
+    if extra_keys:
+        raise ValueError(f"unexpected verify fields: {', '.join(sorted(extra_keys))}")
+
+    result = data.get("result")
+    if result not in _VERIFY_RESULTS:
+        raise ValueError("result must be reproduced or not_reproduced")
+
+    description = data.get("description")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("description is required")
+
+    normalized: dict[str, Any] = {
+        "result": result,
+        "description": description.strip(),
+    }
+    evidence_refs = data.get("evidence_refs")
+    if evidence_refs is not None:
+        if not isinstance(evidence_refs, list) or not all(
+            isinstance(item, str) and item.strip() for item in evidence_refs
+        ):
+            raise ValueError("evidence_refs must be an array of non-empty strings")
+        normalized["evidence_refs"] = [
+            item.strip() for item in evidence_refs
+        ]
+    return result, normalized

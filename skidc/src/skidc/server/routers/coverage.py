@@ -311,7 +311,7 @@ def list_surface_inventory(project_id: str):
             "SELECT * FROM surface_inventory WHERE project_id = ? ORDER BY created_at, id",
             (project_id,),
         ).fetchall()
-        return [surface_inventory_to_model(row) for row in rows]
+        return [surface_inventory_to_model(row, conn) for row in rows]
 
 
 @router.post("/projects/{project_id}/surfaces", response_model=SurfaceInventoryItem)
@@ -328,7 +328,7 @@ def upsert_surface_inventory(project_id: str, body: UpsertSurfaceInventoryReques
         if body.source_fact_id:
             validate_facts_exist(conn, project_id, [body.source_fact_id])
         row = upsert_surface_inventory_record(conn, project_id, body)
-        return surface_inventory_to_model(row)
+        return surface_inventory_to_model(row, conn)
 
 
 def _find_profile_coverage(conn, project_id: str, body: CreateCoverageItemRequest):

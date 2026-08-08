@@ -47,9 +47,43 @@ from skidc.dispatcher.tasks.common import (
 )
 from skidc.dispatcher.workers.registry import get_driver
 from skidc.server.models import ProjectDetail
-from skidc.planning import behavior_identity, derive_candidates, select_round
+from skidc.planning import (
+    behavior_identity,
+    derive_candidates,
+    is_surface_mapping_intent,
+    select_round,
+)
 
 LOG = logging.getLogger(__name__)
+
+
+_WEB_REASON_PLANNING_RULES = '''# Web Planning Rules
+- The singular Intent example above is shorthand. You may return intent or intents, with no more than {max_intents} entries.
+- Each Intent must be one independent, high-value, non-overlapping direction. Do not make it too broad or overly specific.
+- Do not create a fixed page-by-vulnerability matrix. Choose only tests supported by the current Facts and the observed function of the Surface.
+- A mapping Intent maps pages and interactions. A security Intent tests one concrete security question; do not combine unrelated findings.
+- When a security Intent targets one recorded Surface, use that exact Surface id as surface_ref.
+- Do not invent surface_ref. Global recon, component identification, and authentication capability work may omit it.
+- A Fact with data.verify_request is an unverified candidate. It must receive a Verify Intent before Complete.
+- Treat a newly established CAPTCHA capability or authenticated/privileged session as a milestone. Create the next authenticated work from that Fact, reuse its saved authentication artifact, and prioritize mapping or testing the newly reachable authenticated Surfaces.
+- Do not fold CAPTCHA setup, login success, and unrelated authenticated-page testing into one Intent.
+'''
+
+
+def _with_web_reason_planning_rules(
+    prompt: str,
+    project: ProjectDetail,
+    max_intents: int,
+    prompt_group: str = 'default',
+) -> str:
+    if project.project.mode != 'real_website' or prompt_group == 'mock':
+        return prompt
+    rules = _WEB_REASON_PLANNING_RULES.format(max_intents=max_intents)
+    web_prompt = prompt.replace(
+        '2. Otherwise, propose one smallest useful Intent.',
+        '2. Otherwise, propose one or two smallest useful Intents.',
+    )
+    return f'{web_prompt.rstrip()}\n\n{rules}'
 
 
 def run_reason_task(
@@ -68,6 +102,16 @@ def run_reason_task(
     lease = HeartbeatLease.for_reason(client, project.project.id, worker.name, config.runtime.interval)
     lease.start()
     try:
+        if (
+            project.project.mode == "real_website"
+            and _ensure_orphan_verify_work(client, project, worker.name)
+        ):
+            LOG.info(
+                "reason deterministically restored missing Verify work project=%s worker=%s",
+                project.project.id,
+                worker.name,
+            )
+            return "success"
         container_name = container_manager.ensure_running(project.project.id)
 
         if task_healthcheck_enabled(config):
@@ -97,6 +141,11 @@ def run_reason_task(
             if intent.to is None and intent.status == "open"
         ]
         allowed_fact_ids = [fact.id for fact in project.facts if fact.id != "goal"]
+        reason_max_intents = (
+            min(2, config.tasks.reason.max_intents)
+            if project.project.mode == "real_website"
+            else config.tasks.reason.max_intents
+        )
         current_phase = project.project.phase
         sub_goals = [
             f"- {fact.id}: {fact.description} (status: {fact.status or 'pending'})"
@@ -123,8 +172,15 @@ def run_reason_task(
                 ),
                 "fact_ids": format_fact_ids(allowed_fact_ids),
                 "open_intents": format_open_intents(open_intents),
-                "max_intents": str(config.tasks.reason.max_intents),
+                "max_intents": str(reason_max_intents),
             },
+        )
+
+        prompt = _with_web_reason_planning_rules(
+            prompt,
+            project,
+            reason_max_intents,
+            config.runtime.prompt_group,
         )
 
         session = driver.prepare_session()
@@ -175,7 +231,8 @@ def run_reason_task(
             kind, data, recon_complete = validate_reason_payload(
                 payload,
                 open_intents_empty=not open_intents,
-                max_intents=config.tasks.reason.max_intents,
+                max_intents=reason_max_intents,
+                web_mode=project.project.mode == "real_website",
             )
         except Exception as exc:
             LOG.warning("reason parse failed project=%s worker=%s error=%s execute_ms=%s stdout=%s stderr=%s", project.project.id, worker.name, exc, execute_ms, preview(result.stdout), preview(result.stderr))
@@ -205,31 +262,20 @@ def run_reason_task(
             support_ports=project.project.scope_policy.support_ports,
         )
 
-        if (
-            kind == "complete"
-            and project.project.mode == "real_website"
-            and project.project.planning_version >= 3
-            and project.project.phase == "explore"
-        ):
-            breadth_budget = min(
-                project.project.recon_profile.frontier_breadth_slots,
-                config.tasks.reason.max_intents,
-            )
-            mapping_created = (
-                _ensure_pending_surface_mapping_work(
-                    client, project, worker.name, max_items=breadth_budget
-                )
-                if breadth_budget
-                else 0
-            )
-            if mapping_created:
-                LOG.info(
-                    "reason completion deferred for pending surface mapping project=%s intents=%s",
-                    project.project.id, mapping_created,
-                )
-                return "success"
         if kind == "complete":
-            response = client.complete(project.project.id, data["from"], data["description"], worker.name)
+            completion_sources = list(data["from"])
+            if project.project.mode == "real_website":
+                completion_sources = [
+                    fact.id
+                    for fact in project.facts
+                    if fact.id not in {"origin", "goal"}
+                    and fact.kind == "verification_result"
+                    and fact.status == "reproduced"
+                    and fact.verification_of
+                ]
+            response = client.complete(
+                project.project.id, completion_sources, data["description"], worker.name
+            )
             if response.status_code == 403:
                 LOG.info("project became inactive during reason complete project=%s worker=%s", project.project.id, worker.name)
                 return "success"
@@ -240,24 +286,43 @@ def run_reason_task(
                     worker.name,
                     _completion_blocker_count(response),
                 )
-                return "failed"
+                if project.project.mode == "real_website":
+                    return "completion_blocked"
+                detail = _completion_detail(response) or {}
+                raw_blockers = detail.get("blockers")
+                blocker_rows = raw_blockers if isinstance(raw_blockers, list) else []
+                attention_detail = json.dumps(
+                    {
+                        "message": detail.get("message") or "Assessment closure is blocked.",
+                        "blockers": [
+                            {
+                                "kind": item.get("kind"),
+                                "ref": item.get("ref"),
+                                "status": item.get("status"),
+                            }
+                            for item in blocker_rows if isinstance(item, dict)
+                        ],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                stopped = client.mark_needs_attention(
+                    project.project.id, worker.name,
+                    "assessment_closure_blocked", attention_detail[:4000],
+                )
+                return "success" if stopped.ok else "failed"
             if not response.ok:
                 LOG.warning("reason complete write failed project=%s worker=%s status=%s body=%s", project.project.id, worker.name, response.status_code, response.text)
                 return "failed"
-            LOG.info("project completed project=%s worker=%s from=%s execute_ms=%s total_ms=%s", project.project.id, worker.name, data["from"], execute_ms, total_ms)
+            LOG.info("project completed project=%s worker=%s from=%s execute_ms=%s total_ms=%s", project.project.id, worker.name, completion_sources, execute_ms, total_ms)
             return "success"
         if kind == "intents":
             created = 0
-            v3_frontier = (
-                project.project.mode == "real_website"
-                and project.project.planning_version >= 3
-                and project.project.phase == "explore"
-            )
-            frontier_created = 0
             defer_to_baseline = (
                 project.project.mode == "real_website"
                 and project.project.phase == "recon"
                 and recon_complete
+                and project.project.planning_version < 3
             )
             use_hypothesis_planner = (
                 project.project.mode == "real_website"
@@ -265,39 +330,10 @@ def run_reason_task(
                 and (project.project.phase == "explore" or recon_complete)
             )
             intent_batch = [] if defer_to_baseline or use_hypothesis_planner else data
-            had_pending_behavior = False
-            if v3_frontier:
-                had_pending_behavior = any(
-                    surface.planning_status == "pending"
-                    and not surface.traits.get("out_of_scope_support")
-                    for surface in project.surface_inventory
-                )
-                breadth_budget = min(
-                    project.project.recon_profile.frontier_breadth_slots,
-                    config.tasks.reason.max_intents,
-                )
-                if breadth_budget:
-                    frontier_created = _ensure_pending_surface_mapping_work(
-                        client, project, worker.name, max_items=breadth_budget,
-                    )
-                remaining = max(0, config.tasks.reason.max_intents - frontier_created)
-                raw_candidates = list(data)
-                if frontier_created:
-                    raw_candidates = [
-                        item for item in raw_candidates
-                        if _clean_signature_text(item.get("test_variant")) != "function_mapping"
-                    ]
-                intent_batch = _select_v3_frontier(project, raw_candidates, max_items=remaining)
-                created = frontier_created
             signatures = _existing_intent_signatures(project)
             for raw_intent_data in intent_batch:
-                if v3_frontier:
-                    if _create_agent_hypothesis_work(
-                        client, project, worker.name, raw_intent_data
-                    ):
-                        created += 1
-                    continue
-                intent_data = _bind_matching_coverage(project, raw_intent_data)
+                intent_data = _bind_matching_surface(project, raw_intent_data)
+                intent_data = _bind_matching_coverage(project, intent_data)
                 signature = _intent_signature_from_data(project, intent_data)
                 if signature in signatures:
                     LOG.info(
@@ -318,6 +354,8 @@ def run_reason_task(
                     port=_optional_int(intent_data, "port"),
                     path=_optional_str(intent_data, "path"),
                     surface_type=_optional_str(intent_data, "surface_type"),
+                    surface_ref=_optional_str(intent_data, "surface_ref"),
+                    surface_refs=_optional_str_list(intent_data, "surface_refs"),
                     action_kind=_optional_str(intent_data, "action_kind"),
                     test_variant=_optional_str(intent_data, "test_variant"),
                     priority=_optional_int(intent_data, "priority"),
@@ -337,10 +375,17 @@ def run_reason_task(
                 if signature is not None:
                     signatures.add(signature)
                 intent_id = _response_id(response)
-                if intent_id and (
+                # A V3 real-website Intent is only proposed work.  It must not
+                # become an observed Surface or Required Coverage until an
+                # executor commits a Fact with structured observed_surfaces.
+                materialize_seed_profile = (
                     project.project.mode != "real_website"
-                    or project.project.phase == "recon"
-                    or not coverage_refs
+                    or project.project.planning_version < 3
+                )
+                if (
+                    intent_id
+                    and materialize_seed_profile
+                    and (project.project.phase == "recon" or not coverage_refs)
                 ):
                     if project.project.mode == "real_website":
                         coverage_items = _profile_coverage_from_seed(
@@ -381,53 +426,16 @@ def run_reason_task(
                 baseline_created = ensure_coverage_work(
                     client, client.get_project(project.project.id), worker.name
                 )
-            if (
-                v3_frontier
-                and created == 0
-                and baseline_created == 0
-                and not intent_batch
-                and not open_intents
-                and not had_pending_behavior
-            ):
-                source_ids = _frontier_completion_sources(project)
-                response = client.complete(
-                    project.project.id,
-                    source_ids,
-                    "Adaptive frontier converged: no new evidence-backed, non-duplicate branch remains.",
-                    worker.name,
-                )
-                if response.status_code == 403:
-                    return "success"
-                if response.ok:
-                    LOG.info(
-                        "project completed after frontier convergence project=%s sources=%s",
-                        project.project.id,
-                        source_ids,
-                    )
-                    return "success"
-                LOG.warning(
-                    "frontier convergence completion failed project=%s status=%s body=%s",
-                    project.project.id,
-                    response.status_code,
-                    response.text,
-                )
-                return "failed"
             LOG.info(
-                "reason finished project=%s worker=%s created_intents=%s/%s breadth_intents=%s baseline_intents=%s execute_ms=%s total_ms=%s",
+                "reason finished project=%s worker=%s created_intents=%s/%s baseline_intents=%s execute_ms=%s total_ms=%s",
                 project.project.id,
                 worker.name,
                 created,
                 len(intent_batch),
-                frontier_created,
                 baseline_created,
                 execute_ms,
                 total_ms,
             )
-            if (
-                project.project.planning_version >= 3
-                and intent_batch and created == 0
-            ):
-                return "stalled"
             if created == 0 and baseline_created == 0 and not defer_to_baseline:
                 LOG.info("reason produced only duplicate/no-op intents project=%s", project.project.id)
                 return "stalled"
@@ -452,41 +460,70 @@ def run_reason_task(
         best_effort_release_reason(client, project.project.id, worker.name)
 
 
-def _frontier_completion_sources(project: ProjectDetail, *, limit: int = 8) -> list[str]:
-    """Choose terminal Facts that were actually produced by concluded Intents."""
-    produced_fact_ids = {
-        intent.to
+def _ensure_orphan_verify_work(
+    client: SkidcClient,
+    project: ProjectDetail,
+    worker_name: str,
+) -> int:
+    """Create Verify work for committed candidate Facts whose first handoff was lost."""
+    verified_candidates = {
+        fact.verification_of
+        for fact in project.facts
+        if fact.kind == "verification_result" and fact.verification_of
+    }
+    queued_candidates = {
+        source_id
         for intent in project.intents
-        if intent.to not in (None, "goal")
-        and intent.status == "concluded"
-        and intent.concluded_at is not None
+        if _is_verify_action(intent.action_kind)
+        for source_id in intent.from_
+        if source_id not in {"origin", "goal"}
     }
-    selected: list[str] = []
-    preferred_statuses = {"confirmed", "verified"}
-    terminal_statuses = preferred_statuses | {
-        "completed",
-        "not_vulnerable",
-        "refuted",
-        "failed",
-        "inconclusive",
-        "informational",
-        "blocked_by_precondition",
+    producer_by_fact = {
+        intent.to: intent for intent in project.intents if intent.to is not None
     }
-    for preferred_only in (True, False):
-        for fact in reversed(project.facts):
-            status = str(fact.status or "").casefold()
-            if fact.id not in produced_fact_ids:
-                continue
-            if preferred_only and status not in preferred_statuses:
-                continue
-            if not preferred_only and status not in terminal_statuses:
-                continue
-            if fact.id not in selected:
-                selected.append(fact.id)
-            if len(selected) >= limit:
-                return selected
-    return selected
+    created = 0
+    for fact in project.facts:
+        verify_request = fact.data.get("verify_request")
+        if (
+            not isinstance(verify_request, str)
+            or not verify_request.strip()
+            or fact.id in verified_candidates
+            or fact.id in queued_candidates
+        ):
+            continue
+        producer = producer_by_fact.get(fact.id)
+        response = client.create_intent(
+            project.project.id,
+            [fact.id],
+            verify_request.strip(),
+            worker_name,
+            target=producer.target if producer else None,
+            port=producer.port if producer else None,
+            path=producer.path if producer else None,
+            surface_type=producer.surface_type if producer else None,
+            surface_ref=producer.surface_ref if producer else None,
+            action_kind="verify_candidate",
+            test_variant=producer.test_variant if producer else None,
+            priority=producer.priority if producer else None,
+            suggested_tools=list(producer.suggested_tools) if producer else None,
+        )
+        if response.ok:
+            created += 1
+            queued_candidates.add(fact.id)
+        else:
+            LOG.warning(
+                "failed to restore Verify work project=%s fact=%s status=%s body=%s",
+                project.project.id,
+                fact.id,
+                response.status_code,
+                response.text,
+            )
+    return created
 
+
+def _is_verify_action(action_kind: str | None) -> bool:
+    action = str(action_kind or "").strip().casefold().replace("-", "_")
+    return action == "verify" or action.startswith("verify_") or action.startswith("verification")
 
 
 _VARIANT_FAMILY = {
@@ -548,19 +585,26 @@ def _coverage_by_id(project: ProjectDetail) -> dict[str, object]:
 def _intent_signature(
     *,
     coverage_ref: str | None,
+    surface_refs: list[str] | None,
     test_variant: str | None,
     target: str | None,
     port: int | None,
     path: str | None,
     action_kind: str | None,
-) -> tuple[str, str, str, int, str, str] | None:
+    from_ids: list[str] | None = None,
+) -> tuple[str, str, str, str, int, str, str] | None:
+    action_signature = _clean_signature_text(action_kind)
+    if "verif" in action_signature:
+        source_key = ",".join(sorted(str(value) for value in (from_ids or [])))
+        action_signature = f"{action_signature}|from:{source_key}"
     signature = (
         _clean_signature_text(coverage_ref),
+        ",".join(sorted(_clean_signature_text(value) for value in (surface_refs or []) if value)),
         _clean_signature_text(test_variant),
         _clean_signature_text(target),
         int(port or 0),
         _clean_signature_path(path),
-        _clean_signature_text(action_kind),
+        action_signature,
     )
     # An all-empty signature is not an identity. Legacy/CTF reasoning may
     # legitimately create several descriptive Intents without structured web
@@ -570,19 +614,27 @@ def _intent_signature(
     return signature if any(signature) else None
 
 
-def _existing_intent_signatures(project: ProjectDetail) -> set[tuple[str, str, str, int, str, str]]:
+def _existing_intent_signatures(
+    project: ProjectDetail,
+) -> set[tuple[str, str, str, str, int, str, str]]:
     coverage = _coverage_by_id(project)
-    signatures: set[tuple[str, str, str, int, str, str]] = set()
+    signatures: set[tuple[str, str, str, str, int, str, str]] = set()
     for intent in project.intents:
         coverage_ref = intent.coverage_refs[0] if intent.coverage_refs else None
         item = coverage.get(coverage_ref) if coverage_ref else None
         signature = _intent_signature(
             coverage_ref=coverage_ref,
+            surface_refs=(
+                list(intent.surface_refs or ([intent.surface_ref] if intent.surface_ref else []))
+                if project.project.mode == 'real_website'
+                else []
+            ),
             test_variant=intent.test_variant,
             target=intent.target or getattr(item, "target", None),
             port=intent.port or getattr(item, "port", None),
             path=intent.path or getattr(item, "path", None),
             action_kind=intent.action_kind,
+            from_ids=list(intent.from_),
         )
         if signature is not None:
             signatures.add(signature)
@@ -592,24 +644,88 @@ def _existing_intent_signatures(project: ProjectDetail) -> set[tuple[str, str, s
 def _intent_signature_from_data(
     project: ProjectDetail,
     data: dict,
-) -> tuple[str, str, str, int, str, str] | None:
+) -> tuple[str, str, str, str, int, str, str] | None:
     refs = _optional_str_list(data, "coverage_refs") or []
     coverage_ref = refs[0] if refs else None
     item = _coverage_by_id(project).get(coverage_ref) if coverage_ref else None
     return _intent_signature(
         coverage_ref=coverage_ref,
+        surface_refs=(
+            (_optional_str_list(data, 'surface_refs') or [])
+            or ([_optional_str(data, 'surface_ref')] if _optional_str(data, 'surface_ref') else [])
+            if project.project.mode == 'real_website'
+            else []
+        ),
         test_variant=_optional_str(data, "test_variant"),
         target=_optional_str(data, "target") or getattr(item, "target", None),
         port=_optional_int(data, "port") or getattr(item, "port", None),
         path=_optional_str(data, "path") or getattr(item, "path", None),
         action_kind=_optional_str(data, "action_kind"),
+        from_ids=_optional_str_list(data, "from"),
     )
+
+
+def _bind_matching_surface(project: ProjectDetail, raw: dict) -> dict:
+    data = dict(raw)
+    if project.project.mode != 'real_website':
+        return data
+    if is_surface_mapping_intent(
+        _optional_str(data, 'action_kind'),
+        _optional_str(data, 'test_variant'),
+    ):
+        return data
+
+    known = {surface.id: surface for surface in project.surface_inventory}
+    requested = _optional_str(data, 'surface_ref')
+    if requested in known:
+        return data
+    data.pop('surface_ref', None)
+
+    path = _clean_signature_path(_optional_str(data, 'path'))
+    if not path:
+        return data
+    target = _clean_signature_text(_optional_str(data, 'target'))
+    port = _optional_int(data, 'port')
+    matches = []
+    for surface in project.surface_inventory:
+        if _clean_signature_path(surface.path_template) != path:
+            continue
+        if target and _clean_signature_text(surface.target) not in {'', target}:
+            continue
+        if port and surface.port not in {None, port}:
+            continue
+        matches.append(surface)
+    if len(matches) == 1:
+        data['surface_ref'] = matches[0].id
+    return data
 
 
 def _bind_matching_coverage(project: ProjectDetail, raw: dict) -> dict:
     data = dict(raw)
-    if project.project.mode != "real_website" or _optional_str_list(data, "coverage_refs"):
+    if project.project.mode != "real_website":
         return data
+
+    # Recon categories (for example ``asset`` or ``directory``) are not
+    # Coverage ids. Recon work establishes the evidence-backed surface map;
+    # Coverage is only meaningful after that phase has completed.
+    if project.project.phase == "recon":
+        data.pop("coverage_refs", None)
+        return data
+
+    # Never trust an id invented by the model. Keep at most one reference that
+    # actually exists in the current project, otherwise try the deterministic
+    # variant-to-Coverage binding below.
+    known_ids = {item.id for item in project.coverage_items}
+    requested = [
+        ref
+        for ref in (_optional_str_list(data, "coverage_refs") or [])
+        if ref in known_ids
+    ]
+    if requested:
+        data["coverage_refs"] = requested[:1]
+        return data
+    data.pop("coverage_refs", None)
+
     variant = _optional_str(data, "test_variant")
     family = _VARIANT_FAMILY.get(_clean_signature_text(variant))
     if not variant or family is None:
@@ -835,6 +951,7 @@ def _create_agent_hypothesis_work(
         "path": surface.path_template,
         "surface_type": surface.surface_type,
         "action_kind": action_kind,
+        "surface_ref": surface.id,
         "test_variant": variant,
         "priority": priority,
         "suggested_tools": (
@@ -876,7 +993,7 @@ def _bounded_float(value: object, *, default: float, minimum: float, maximum: fl
     return max(minimum, min(maximum, parsed))
 
 
-_CONCLUSIVE_HYPOTHESIS_STATUSES = {"supported", "refuted"}
+_CONCLUSIVE_HYPOTHESIS_STATUSES = {"concluded", "supported", "refuted"}
 _NO_PROGRESS_HYPOTHESIS_STATUSES = {"inconclusive", "blocked_by_precondition"}
 
 
@@ -962,7 +1079,7 @@ def _frontier_candidate(project: ProjectDetail, data: dict) -> dict | None:
     ]
     same_variant = [item for item in branch_history if item.test_variant == variant]
     for item in same_variant:
-        if item.status in {"supported", "refuted", "waived", "planned", "testing"}:
+        if item.status in {"concluded", "supported", "refuted", "waived", "planned", "testing"}:
             return None
         if (
             item.status in _NO_PROGRESS_HYPOTHESIS_STATUSES
@@ -1075,6 +1192,32 @@ def _select_v3_frontier(
     return selected[:max_items]
 
 
+_PASSIVE_SURFACE_TYPES = {"static_file", "asset", "image", "stylesheet", "script", "font"}
+_PASSIVE_PATH_SUFFIXES = (
+    ".css", ".js", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+    ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot",
+)
+
+
+def _surface_has_fact_evidence(surface) -> bool:
+    return bool(surface.source_fact_id or surface.evidence_fact_ids)
+
+
+def _behavior_requires_active_mapping(surfaces: list) -> bool:
+    """Skip only clearly passive assets; application pages remain mappable."""
+    for surface in surfaces:
+        method = str(surface.method or "GET").upper()
+        path = str(surface.path_template or "/").casefold().split("?", 1)[0]
+        surface_type = str(surface.surface_type or "").casefold()
+        if method not in {"GET", "HEAD"} or surface.params or surface.roles:
+            return True
+        if surface.auth_context != "anonymous" or surface.traits:
+            return True
+        if surface_type not in _PASSIVE_SURFACE_TYPES and not path.endswith(_PASSIVE_PATH_SUFFIXES):
+            return True
+    return False
+
+
 def _ensure_pending_surface_mapping_work(
     client: SkidcClient,
     project: ProjectDetail,
@@ -1085,7 +1228,10 @@ def _ensure_pending_surface_mapping_work(
     """Create at most one mapping hypothesis for each pending Behavior."""
     groups: dict[str, list] = {}
     for surface in project.surface_inventory:
-        if surface.traits.get("out_of_scope_support"):
+        if (
+            surface.traits.get("out_of_scope_support")
+            or not _surface_has_fact_evidence(surface)
+        ):
             continue
         key = behavior_identity(surface)[0]
         groups.setdefault(key, []).append(surface)
@@ -1113,6 +1259,14 @@ def _ensure_pending_surface_mapping_work(
     for behavior_key, surfaces in sorted(pending_groups, key=priority):
         if created >= max_items:
             break
+        if not _behavior_requires_active_mapping(surfaces):
+            _mark_behavior_assessed(client, project, behavior_key)
+            LOG.info(
+                "passive behavior closed without active mapping project=%s behavior=%s",
+                project.project.id,
+                behavior_key,
+            )
+            continue
         surface = surfaces[0]
         source_ids: list[str] = []
         for observation in surfaces:
@@ -1123,16 +1277,12 @@ def _ensure_pending_surface_mapping_work(
             source_ids = ["origin"]
         method = str(surface.method or "GET").upper()
         path = surface.path_template or "/"
-        basis = _hypothesis_basis_fingerprint(
-            behavior_key, "surface_config", "function_mapping", source_ids,
-        )
         existing = next(
             (
                 hypothesis for hypothesis in project.hypotheses
                 if hypothesis.behavior_key == behavior_key
                 and hypothesis.test_family == "surface_config"
                 and hypothesis.test_variant == "function_mapping"
-                and hypothesis.basis_fingerprint == basis
                 and hypothesis.intent_id
             ),
             None,
@@ -1179,6 +1329,8 @@ def _ensure_hypothesis_work(
     client: SkidcClient,
     project: ProjectDetail,
     worker_name: str,
+    *,
+    assessed_only: bool = False,
 ) -> int:
     if any(
         intent.status == "open" and intent.hypothesis_id
@@ -1195,19 +1347,32 @@ def _ensure_hypothesis_work(
     terminal = {
         (item.behavior_key, item.test_family, item.test_variant)
         for item in project.hypotheses
-        if item.status in {"supported", "refuted", "inconclusive", "waived"}
+        if item.status in {
+            "concluded", "supported", "refuted", "inconclusive",
+            "blocked_by_precondition", "waived",
+        }
     }
+    candidate_surfaces = [
+        surface for surface in project.surface_inventory
+        if _surface_has_fact_evidence(surface)
+        if not assessed_only or surface.planning_status == "assessed"
+    ]
     candidates = derive_candidates(
-        project.surface_inventory, goal_text=goal_text,
+        candidate_surfaces, goal_text=goal_text,
         terminal_keys=terminal, required_score=profile.hypothesis_min_score,
     )
-    remaining_slots = max(0, profile.max_hypotheses - len(project.hypotheses))
+    security_hypothesis_count = sum(
+        1 for item in project.hypotheses if item.test_variant != "function_mapping"
+    )
+    remaining_slots = max(0, profile.max_hypotheses - security_hypothesis_count)
     selected = select_round(
         candidates,
         max_items=min(profile.hypothesis_batch_size, remaining_slots),
         min_score=profile.hypothesis_min_score,
     )
     if not selected:
+        if assessed_only:
+            return 0
         for surface in project.surface_inventory:
             if surface.planning_status == "assessed":
                 continue
@@ -1226,6 +1391,24 @@ def _ensure_hypothesis_work(
         if surface is None:
             continue
         source_ids = list(candidate.trigger_fact_ids) or [surface.source_fact_id or "origin"]
+        if assessed_only:
+            candidate_data = asdict(candidate)
+            candidate_data.update({
+                "from": source_ids,
+                "path": surface.path_template,
+                "description": f"Verify {candidate.rationale}",
+                "hypothesis": candidate.rationale,
+                "action_kind": f"{candidate.test_family}_hypothesis",
+                "priority": max(1, min(10, int(round(candidate.score * 2)))),
+                "suggested_tools": _BASELINE_TOOLS.get(candidate.test_family, ["curl"]),
+                "risk_level": "safe",
+                "_frontier_score": candidate.score,
+            })
+            if _create_agent_hypothesis_work(
+                client, project, worker_name, candidate_data,
+            ):
+                created += 1
+            continue
         hypothesis_payload = asdict(candidate)
         hypothesis_payload["trigger_fact_ids"] = source_ids
         hypothesis_payload["status"] = "candidate"
@@ -1279,6 +1462,7 @@ def _ensure_hypothesis_work(
             port=surface.port,
             path=surface.path_template,
             surface_type=surface.surface_type,
+            surface_ref=surface.id,
             action_kind=f"{candidate.test_family}_hypothesis",
             test_variant=candidate.test_variant,
             priority=priority,
@@ -1310,6 +1494,9 @@ def ensure_coverage_work(
     worker_name: str,
 ) -> int:
     if project.project.planning_version >= 3:
+        # planning_version=3 is retained for stored-project compatibility, but
+        # its runtime role is now limited to read-only Surface indexing. Reason
+        # is the only component allowed to create semantic work.
         return 0
     if project.project.planning_version == 2:
         return _ensure_hypothesis_work(client, project, worker_name)
@@ -1362,6 +1549,14 @@ def ensure_coverage_work(
                 break
             source = item.source_fact_id or "origin"
             path = item.path or "/"
+            surface_ref = next(
+                (
+                    surface.id
+                    for surface in project.surface_inventory
+                    if surface.fingerprint == item.surface_fingerprint
+                ),
+                None,
+            )
             response = client.create_intent(
                 project.project.id,
                 [source],
@@ -1371,6 +1566,7 @@ def ensure_coverage_work(
                 port=item.port,
                 path=item.path,
                 surface_type=item.surface_class,
+                surface_ref=surface_ref,
                 action_kind=f"{item.test_family}_probe",
                 test_variant=variant,
                 priority=item.priority,
@@ -1425,6 +1621,13 @@ def _transition_to_explore_with_baseline(
         return -2
 
     refreshed = client.get_project(project.project.id)
+    if refreshed.project.planning_version >= 3:
+        LOG.info(
+            "phase transition project=%s from=recon to=explore without automatic work",
+            project.project.id,
+        )
+        return 0
+
     created = ensure_coverage_work(client, refreshed, worker_name)
     LOG.info(
         "phase transition project=%s from=recon to=explore baseline_intents=%s",
@@ -1432,8 +1635,6 @@ def _transition_to_explore_with_baseline(
         created,
     )
     return created
-
-
 
 
 def _completion_detail(response) -> dict | None:

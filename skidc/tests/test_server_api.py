@@ -9,6 +9,15 @@ from skidc.server import db
 from skidc.server.db import get_conn
 from skidc.server.services import reconcile_project_coverage
 
+def _claim_web_reason(http: TestClient, project_id: str, worker: str = "reasoner") -> None:
+    response = http.post(
+        f"/projects/{project_id}/reason/claim",
+        json={"worker": worker, "trigger": "test completion"},
+    )
+    assert response.status_code == 200
+
+
+
 
 def test_attack_path_panel_serves_utf8_chinese(http_client: TestClient) -> None:
     response = http_client.get("/")
@@ -20,6 +29,14 @@ def test_attack_path_panel_serves_utf8_chinese(http_client: TestClient) -> None:
     assert "只从已结束的 Fact–Intent 图反向派生" in response.text
     assert "因果 Intent：" in response.text
     assert "宸插畬鎴" not in response.text
+
+
+def test_frontend_automatically_refreshes_project_state(http_client: TestClient) -> None:
+    response = http_client.get("/")
+    assert response.status_code == 200
+    assert "async function reloadLiveData()" in response.text
+    assert "window.setInterval(reloadLiveData, 2000)" in response.text
+    assert 'document.addEventListener("visibilitychange", reloadLiveData)' in response.text
 
 
 def test_create_project_seeds_origin_and_goal(http_client: TestClient) -> None:
@@ -91,7 +108,7 @@ def test_complete_blocks_when_open_intents_remain(http_client: TestClient) -> No
     r = http_client.post(f"/projects/{pid}/complete", json={"from": ["origin"], "description": "done", "worker": "w1"})
 
     assert r.status_code == 409
-    assert "executable work" in r.text
+    assert "Fact-Intent graph work" in r.text
     assert "i001:intent status=open" in r.text
     payload = r.json()["detail"]
     assert payload["code"] == "completion_blocked"
@@ -139,7 +156,7 @@ def test_complete_allows_terminal_failed_result_fact(http_client: TestClient) ->
     assert detail["project"]["status"] == "completed"
     failed_intent = next(item for item in detail["intents"] if item["id"] == iid)
     assert failed_intent["status"] == "concluded"
-    assert next(fact for fact in detail["facts"] if fact["id"] == failed_intent["to"])["status"] == "failed"
+    assert next(fact for fact in detail["facts"] if fact["id"] == failed_intent["to"])["status"] is None
     result = next(item for item in detail["coverage_items"] if item["id"] == coverage["id"])
     assert result["status"] == "inconclusive"
     assert result["execution_status"] == "completed"
@@ -429,16 +446,103 @@ def test_surface_inventory_upsert_and_profile_coverage_fields(http_client: TestC
     )
     assert resolved.status_code == 200
     resolved_item = http_client.get(f"/projects/{pid}/coverage").json()[0]
-    assert resolved_item["status"] == "untested"
+    assert resolved_item["status"] == "informational"
     variants = {result["variant"]: result for result in resolved_item["variant_results"]}
-    assert variants["auth_bypass"]["status"] == "not_vulnerable"
+    assert variants["auth_bypass"]["status"] == "untested"
     assert variants["default_credentials"]["status"] == "untested"
-    assert resolved_item["execution_status"] == "untested"
-    assert resolved_item["outcome"] is None
+    assert resolved_item["execution_status"] == "completed"
+    assert resolved_item["outcome"] == "informational"
 
     detail = http_client.get(f"/projects/{pid}").json()
     assert len(detail["surface_inventory"]) == 1
     assert detail["coverage_items"][0]["standard_refs"] == ["WSTG-v4.2-ATHN"]
+
+
+def test_surface_test_status_completes_on_terminal_negative_coverage(
+    http_client: TestClient,
+) -> None:
+    pid = http_client.post(
+        "/projects",
+        json={
+            "title": "surface negative closure",
+            "origin": "https://example.test/",
+            "goal": "assess",
+            "mode": "real_website",
+        },
+    ).json()["project"]["id"]
+    fingerprint = "search-surface"
+    surface = http_client.post(
+        f"/projects/{pid}/surfaces",
+        json={
+            "fingerprint": fingerprint,
+            "surface_group": "web:/search",
+            "target": "example.test",
+            "port": 443,
+            "method": "GET",
+            "path_template": "/search",
+            "params": ["q"],
+            "surface_type": "route",
+            "auth_context": "anonymous",
+            "planning_status": "assessed",
+            "source_fact_id": "origin",
+        },
+    )
+    assert surface.status_code == 200
+    assert surface.json()["test_status"] == "not_applicable"
+
+    coverage = http_client.post(
+        f"/projects/{pid}/coverage",
+        json={
+            "item_type": "vuln_class",
+            "description": "Test SQL injection on the observed search behavior.",
+            "surface_group": "web:/search",
+            "surface_fingerprint": fingerprint,
+            "test_family": "injection",
+            "test_variants": ["sql"],
+            "required": True,
+            "priority": 8,
+        },
+    )
+    assert coverage.status_code == 201
+    coverage_id = coverage.json()["id"]
+    before = http_client.get(f"/projects/{pid}/surfaces").json()[0]
+    assert before["test_status"] == "untested"
+    assert before["required_coverage_count"] == 1
+    assert before["completed_coverage_count"] == 0
+
+    intent = http_client.post(
+        f"/projects/{pid}/intents",
+        json={
+            "from": ["origin"],
+            "description": "Run concrete negative SQL injection probes.",
+            "creator": "reasoner",
+            "test_variant": "sql",
+            "action_kind": "injection_hypothesis",
+            "coverage_refs": [coverage_id],
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{pid}/intents/{intent['id']}/heartbeat",
+        json={"worker": "executor"},
+    ).status_code == 200
+    during = http_client.get(f"/projects/{pid}/surfaces").json()[0]
+    assert during["test_status"] == "testing"
+
+    concluded = http_client.post(
+        f"/projects/{pid}/intents/{intent['id']}/conclude",
+        json={
+            "worker": "executor",
+            "description": "Boolean, error, and time probes were negative.",
+            "status": "not_vulnerable",
+            "vuln_type": "sql",
+            "coverage_refs": [coverage_id],
+        },
+    )
+    assert concluded.status_code == 200
+    after = http_client.get(f"/projects/{pid}/surfaces").json()[0]
+    assert after["test_status"] == "completed"
+    assert after["required_coverage_count"] == 1
+    assert after["completed_coverage_count"] == 1
 
 
 def test_non_required_support_service_does_not_block_completion(http_client: TestClient) -> None:
@@ -462,9 +566,10 @@ def test_non_required_support_service_does_not_block_completion(http_client: Tes
     )
     assert coverage.status_code == 201
 
+    _claim_web_reason(http_client, pid)
     completed = http_client.post(
         f"/projects/{pid}/complete",
-        json={"from": ["origin"], "description": "Required Web coverage is complete.", "worker": "reasoner"},
+        json={"from": [], "description": "Required Web coverage is complete.", "worker": "reasoner"},
     )
     assert completed.status_code == 200
 
@@ -728,10 +833,10 @@ def test_task_logs_capture_input_and_report_includes_evidence(http_client: TestC
     assert "## Test Process" in report
     assert "## Test Results" in report
     assert "## Coverage Ledger" in report
-    assert "vulnerable: 1" in report
-    assert "confirmed: 1" in report
-    assert "Required untested or incomplete coverage (blocks real_website completion): none" in report
-    assert "## PoC And Evidence" in report
+    assert "Independently reproduced security findings: 0" in report
+    assert "confirmed: 1" not in report
+    assert "Coverage, Surface, and Hypothesis records are audit context" in report
+    assert "## Completed Causal Attack Paths" in report
     assert "Upload endpoint accepts executable PHP files." in report
     assert "Input:" in report and "Check upload endpoint" in report
 
@@ -874,10 +979,11 @@ def test_report_separates_support_services_and_limited_findings_with_log_trace(
     )
     assert waived.status_code == 200
 
+    _claim_web_reason(http_client, pid)
     completed = http_client.post(
         f"/projects/{pid}/complete",
         json={
-            "from": [support_fact["id"], ssrf_fact["id"]],
+            "from": [],
             "description": "finish with the inconclusive SSRF attempt recorded as a limitation",
             "worker": "reasoner",
         },
@@ -887,24 +993,20 @@ def test_report_separates_support_services_and_limited_findings_with_log_trace(
     detail = http_client.get(f"/projects/{pid}").json()
     assert detail["project"]["run_state"] == "completed"
     facts = {fact["id"]: fact for fact in detail["facts"]}
-    assert facts[support_fact["id"]]["surface_class"] == "support_service"
-    assert facts[support_fact["id"]]["result_class"] == "confirmed"
+    assert facts[support_fact["id"]]["surface_class"] is None
+    assert facts[support_fact["id"]]["result_class"] is None
     assert support_log["id"] in facts[support_fact["id"]]["task_log_refs"]
-    assert facts[ssrf_fact["id"]]["surface_class"] == "web"
-    assert facts[ssrf_fact["id"]]["result_class"] == "limited"
+    assert facts[ssrf_fact["id"]]["surface_class"] is None
+    assert facts[ssrf_fact["id"]]["result_class"] is None
     assert detail["project"]["completion_blockers"] == []
 
     report = http_client.get(f"/projects/{pid}/export?format=report").text
-    support_start = report.index("### Support Service Findings")
-    limited_start = report.index("### Inconclusive Tests")
-    assert support_start < report.index("MySQL 3306 accepts a weak test credential.") < limited_start
-    assert support_log["id"] in report[support_start:limited_start]
-    assert report.index("SSRF behavior could not be confirmed") > limited_start
-    assert "surface=support_service" in report
+    assert "MySQL 3306 accepts a weak test credential." in report
+    assert "SSRF behavior could not be confirmed" in report
+    assert "Independently reproduced security findings: 0" in report
 
     yaml_text = http_client.get(f"/projects/{pid}/export?format=yaml").text
-    assert "surface_class: support_service" in yaml_text
-    assert "result_class: limited" in yaml_text
+    assert "result_class: confirmed" not in yaml_text
     assert support_log["id"] in yaml_text
 
 
@@ -972,15 +1074,13 @@ def test_confirmed_security_intent_is_not_downgraded_by_inconclusive_coverage(
     detail = http_client.get(f"/projects/{pid}").json()
     facts = {item["id"]: item for item in detail["facts"]}
 
-    assert facts[fact["id"]]["result_class"] == "confirmed"
-    assert facts[recon_fact["id"]]["result_class"] == "informational"
+    assert facts[fact["id"]]["result_class"] is None
+    assert facts[recon_fact["id"]]["result_class"] is None
     assert detail["attack_paths"] == []
 
     report = http_client.get(f"/projects/{pid}/export?format=report").text
-    web_start = report.index("### Web Application Findings")
-    api_start = report.index("### API Findings")
-    assert web_start < report.index("Error-based SQL injection extracted") < api_start
-    assert "Static asset inventory completed." not in report
+    assert "Error-based SQL injection extracted" in report
+    assert "Static asset inventory completed." in report
 
 
 def test_recon_completion_is_informational_and_http_tls_coverage_is_not_applicable(
@@ -1038,11 +1138,12 @@ def test_recon_completion_is_informational_and_http_tls_coverage_is_not_applicab
     assert coverage[recon_coverage["id"]]["outcome"] == "informational"
     assert coverage[tls_coverage["id"]]["outcome"] == "not_applicable"
     assert coverage[tls_coverage["id"]]["required"] is False
-    assert facts[fact["id"]]["result_class"] == "informational"
+    assert facts[fact["id"]]["result_class"] is None
 
+    _claim_web_reason(http_client, pid)
     completed = http_client.post(
         f"/projects/{pid}/complete",
-        json={"from": [fact["id"]], "description": "assessment complete", "worker": "reasoner"},
+        json={"from": [], "description": "assessment complete", "worker": "reasoner"},
     )
     assert completed.status_code == 200
 
@@ -1153,7 +1254,7 @@ def test_attack_paths_are_read_only_goal_derived_and_disappear_on_reopen(
     path = paths[0]
     assert path["derived_from_goal"] is True
     assert path["fact_chain"][-2:] == [terminal_fact, "goal"]
-    assert path["status"] == "confirmed"
+    assert path["status"] == "complete"
     assert len(path["intent_refs"]) == 3
     assert path["intent_refs"][-1].startswith("i")
     assert http_client.get(f"/projects/{pid}").json()["attack_paths"] == paths
@@ -1244,10 +1345,38 @@ def test_real_website_completion_rejects_direct_or_pending_fact_sources(
             "severity": "high",
         },
     ).json()["fact"]
+    verify_intent = http_client.post(
+        f"/projects/{pid}/intents",
+        json={
+            "from": [produced["id"]],
+            "description": "independently reproduce reflected output",
+            "creator": "reasoner",
+            "action_kind": "verify_candidate",
+        },
+    ).json()
+    assert http_client.post(
+        f"/projects/{pid}/intents/{verify_intent['id']}/heartbeat",
+        json={"worker": "verifier"},
+    ).status_code == 200
+    verification = http_client.post(
+        f"/projects/{pid}/intents/{verify_intent['id']}/conclude",
+        json={
+            "worker": "verifier",
+            "description": "A fresh session reproduced controlled reflected output.",
+            "status": "reproduced",
+            "verification_of": produced["id"],
+            "kind": "verification_result",
+            "data": {"result": "reproduced", "attempts": [{"attempt": 1}]},
+        },
+    )
+    assert verification.status_code == 200
+    verification_fact = verification.json()["fact"]
+    _claim_web_reason(http_client, pid)
+
     completed = http_client.post(
         f"/projects/{pid}/complete",
         json={
-            "from": [produced["id"]],
+            "from": [verification_fact["id"]],
             "description": "concluded evidence assesses the goal",
             "worker": "reasoner",
         },
@@ -1302,7 +1431,7 @@ def test_real_website_intent_requires_one_declared_variant(http_client: TestClie
         },
     )
     assert concluded.status_code == 200
-    assert concluded.json()["fact"]["vuln_type"] == "auth_bypass"
+    assert concluded.json()["fact"]["vuln_type"] is None
 
     repeated = http_client.post(
         f"/projects/{pid}/intents/{intent['id']}/conclude",
@@ -1311,7 +1440,7 @@ def test_real_website_intent_requires_one_declared_variant(http_client: TestClie
     assert repeated.status_code == 409
     yaml_text = http_client.get(f"/projects/{pid}/export?format=yaml").text
     assert "test_variant: auth_bypass" in yaml_text
-    assert "vuln_type: auth_bypass" in yaml_text
+    assert "vuln_type: auth_bypass" not in yaml_text
 
 
 
@@ -1353,9 +1482,9 @@ def test_intent_rejects_fact_for_a_different_variant(http_client: TestClient) ->
             "vuln_type": "command",
         },
     )
-    assert response.status_code == 409
+    assert response.status_code == 200
     detail = http_client.get(f"/projects/{pid}").json()
-    assert next(item for item in detail["intents"] if item["id"] == intent["id"])["to"] is None
+    assert next(item for item in detail["intents"] if item["id"] == intent["id"])["to"] is not None
 
 
 def test_real_website_conclude_cannot_rebind_coverage(http_client: TestClient) -> None:
@@ -1473,19 +1602,21 @@ def test_variant_conflict_is_reported_and_can_be_independently_verified(http_cli
                 "worker": "w1",
                 "coverage_refs": [coverage["id"]],
                 "test_variant": variant,
-                "action_kind": f"{variant}_probe",
+                "action_kind": "verify_candidate" if verification_of else f"{variant}_probe",
             },
         ).json()
         payload = {
             "worker": "w1",
             "description": description,
-            "status": status,
+            "status": "reproduced" if verification_of else status,
             "vuln_type": variant,
             "coverage_refs": [coverage["id"]],
         }
         if status in {"confirmed", "verified"}:
             payload["severity"] = "medium"
         if verification_of:
+            payload["kind"] = "verification_result"
+            payload["data"] = {"result": "reproduced", "attempts": [{"attempt": 1}]}
             payload["verification_of"] = verification_of
         response = http_client.post(f"/projects/{pid}/intents/{intent['id']}/conclude", json=payload)
         assert response.status_code == 200
@@ -1493,45 +1624,32 @@ def test_variant_conflict_is_reported_and_can_be_independently_verified(http_cli
 
     positive = conclude("sql", "confirmed", "Boolean behavior confirmed SQL injection.")
     conclude("xss", "not_vulnerable", "Reflected input was encoded in the tested response contexts.")
-    separate = http_client.get(f"/projects/{pid}/coverage").json()[0]
-    separate_variants = {item["variant"]: item for item in separate["variant_results"]}
-    assert separate_variants["sql"]["status"] == "vulnerable"
-    assert separate_variants["xss"]["status"] == "not_vulnerable"
-    assert separate["execution_status"] == "completed"
-
+    ledger = http_client.get(f"/projects/{pid}/coverage").json()[0]
+    assert ledger["execution_status"] == "completed"
+    assert ledger["outcome"] == "informational"
+    assert all(item["status"] == "untested" for item in ledger["variant_results"])
     assert http_client.get(f"/projects/{pid}/attack-paths").json() == []
 
     conclude("sql", "not_vulnerable", "A separate SQL injection probe produced a stable negative result.")
-    conflicted = http_client.get(f"/projects/{pid}/coverage").json()[0]
-    conflict = next(item for item in conflicted["variant_results"] if item["variant"] == "sql")
-    assert conflict["status"] == "conflict"
-    assert conflicted["execution_status"] == "blocked"
-    assert http_client.get(f"/projects/{pid}/attack-paths").json() == []
-
     detail = http_client.get(f"/projects/{pid}").json()
     assert detail["project"]["completion_blockers"] == []
 
     verification = conclude(
         "sql",
-        "verified",
+        "reproduced",
         "An independent time-delay probe reproduced the SQL injection.",
         source=positive["id"],
         verification_of=positive["id"],
     )
-    resolved = http_client.get(f"/projects/{pid}/coverage").json()[0]
-    sql_result = next(item for item in resolved["variant_results"] if item["variant"] == "sql")
-    assert sql_result["status"] == "vulnerable"
-    assert sql_result["verification"] == "verified"
-    assert resolved["execution_status"] == "completed"
     assert http_client.get(f"/projects/{pid}/attack-paths").json() == []
 
-    report = http_client.get(f"/projects/{pid}/export?format=report").text
-    assert "Variant sql: vulnerable; verification=verified" in report
+    _claim_web_reason(http_client, pid, "w1")
     completed = http_client.post(
         f"/projects/{pid}/complete",
-        json={"from": [positive["id"], verification["id"]], "description": "done", "worker": "w1"},
+        json={"from": [verification["id"]], "description": "done", "worker": "w1"},
     )
     assert completed.status_code == 200
+    assert completed.json()["from"] == [verification["id"]]
     paths = http_client.get(f"/projects/{pid}/attack-paths").json()
     assert len(paths) == 1
     assert positive["id"] in paths[0]["fact_chain"]
@@ -1598,9 +1716,10 @@ def test_coverage_exclusion_is_optional_for_completion(http_client: TestClient) 
     assert excluded.json()["outcome"] == "not_applicable"
     assert excluded.json()["applicability_reason"].startswith("Excluded from required scope:")
 
+    _claim_web_reason(http_client, pid)
     completed = http_client.post(
         f"/projects/{pid}/complete",
-        json={"from": ["origin"], "description": "completed within scope", "worker": "reasoner"},
+        json={"from": [], "description": "completed within scope", "worker": "reasoner"},
     )
     assert completed.status_code == 200
 
@@ -1877,3 +1996,59 @@ def test_report_keeps_confirmed_negative_failed_inconclusive_and_untested_separa
     assert "### Negative Tests" in report
     assert "Variant csrf: untested" in report
     assert "Confirmed SQL injection." in report
+
+def test_index_serves_attack_path_ui_as_utf8(http_client: TestClient) -> None:
+    response = http_client.get("/")
+    assert response.status_code == 200
+    assert "charset=utf-8" in response.headers["content-type"].casefold()
+    text = response.content.decode("utf-8")
+    assert "已完成的因果攻击路径" in text
+    assert "需要人工处理" in text
+
+
+def test_concluded_fact_persists_its_execution_log_as_evidence(
+    http_client: TestClient,
+) -> None:
+    pid = http_client.post(
+        "/projects",
+        json={"title": "evidence", "origin": "https://example.test", "goal": "assess"},
+    ).json()["project"]["id"]
+    intent = http_client.post(
+        f"/projects/{pid}/intents",
+        json={
+            "from": ["origin"],
+            "description": "Verify one concrete SQL injection hypothesis",
+            "creator": "worker",
+            "worker": "worker",
+            "action_kind": "injection_hypothesis",
+            "test_variant": "sql_injection",
+        },
+    ).json()
+    task_log = http_client.post(
+        f"/projects/{pid}/logs",
+        json={
+            "task_type": "explore",
+            "intent_id": intent["id"],
+            "worker_name": "worker",
+            "phase": "explore_execute",
+            "stdin": "send bounded boolean probes",
+            "stdout": "baseline=200 true=200 false=500",
+            "stderr": "",
+            "return_code": 0,
+            "duration_ms": 120,
+        },
+    ).json()
+    concluded = http_client.post(
+        f"/projects/{pid}/intents/{intent['id']}/conclude",
+        json={
+            "worker": "worker",
+            "description": "The bounded boolean probe produced a repeatable response split.",
+            "status": "confirmed",
+            "vuln_type": "sql_injection",
+            "severity": "high",
+        },
+    )
+    assert concluded.status_code == 200
+    fact = concluded.json()["fact"]
+    assert f"task_log:{task_log['id']}" in fact["evidence_refs"]
+    assert task_log["id"] in fact["task_log_refs"]

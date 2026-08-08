@@ -217,6 +217,151 @@ def test_reason_trigger_detects_new_fact() -> None:
     assert trigger is not None and "facts:2->3" in trigger
 
 
+def test_reason_trigger_new_fact_bypasses_backoff_from_older_graph() -> None:
+    loop = _bare_loop()
+    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(
+        fact_count=2, hint_count=0, open_intent_count=1
+    )
+    project = _project(facts=3, hints=0, open_intents=1)
+    project.project = project.project.model_copy(
+        update={"reason_next_retry_at": "2999-01-01T00:00:00Z"}
+    )
+
+    assert loop._reason_trigger(project) == "facts:2->3"
+
+
+def test_real_website_reason_trigger_detects_new_fact_with_open_intent() -> None:
+    """A completed Explore must return to Reason even when other Intents remain open."""
+    loop = _bare_loop()
+    loop.futures = {}
+    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(
+        fact_count=2, hint_count=0, open_intent_count=1
+    )
+    project = _project(facts=3, hints=0, open_intents=1)
+    project.project = project.project.model_copy(
+        update={"mode": "real_website", "phase": "explore", "planning_version": 3}
+    )
+
+    assert loop._reason_trigger(project) == "facts:2->3"
+
+
+def test_real_website_new_fact_dispatches_reason_before_v3_coverage(
+    monkeypatch,
+) -> None:
+    """V3 coverage generation must not pre-empt analysis of a newly written Fact."""
+    loop = _bare_loop()
+    loop.config = mock_config(
+        bootstrap=phase("complete"),
+        reason=phase("intent"),
+        explore=phase("fact"),
+    )
+    loop.container_manager = LocalContainerManager()
+    loop.futures = {}
+    loop._cleanup_pending = set()
+
+    project = _project(facts=3, hints=0, open_intents=1)
+    project.project = project.project.model_copy(
+        update={"mode": "real_website", "phase": "explore", "planning_version": 3}
+    )
+    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(
+        fact_count=2, hint_count=0, open_intent_count=1
+    )
+
+    class _Client:
+        def get_project(self, _project_id: str) -> ProjectDetail:
+            return project
+
+        def export_project(self, _project_id: str) -> str:
+            return "graph"
+
+    loop.client = _Client()
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        "skidc.dispatcher.scheduler.loop.ensure_coverage_work",
+        lambda *_args: calls.append(("coverage", None)) or 1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        loop,
+        "_dispatch_reason",
+        lambda _project, _graph, trigger: calls.append(("reason", trigger)) or True,
+    )
+
+    summary = ProjectSummary.model_validate(
+        {
+            "id": "proj_001",
+            "title": "t",
+            "status": "active",
+            "bootstrap_enabled": True,
+            "phase": "explore",
+            "mode": "real_website",
+            "created_at": "2025-01-01T00:00:00Z",
+            "fact_count": 3,
+            "intent_count": 1,
+            "working_intent_count": 0,
+            "unclaimed_intent_count": 1,
+            "hint_count": 0,
+        }
+    )
+
+    assert loop._try_dispatch_project(summary) is True
+    assert calls == [("reason", "facts:2->3")]
+
+
+def test_real_website_stable_graph_does_not_invoke_v3_coverage(monkeypatch) -> None:
+    """Surface indexing is read-only and must never manufacture scheduler work."""
+    loop = _bare_loop()
+    loop.config = mock_config(
+        bootstrap=phase("complete"),
+        reason=phase("intent"),
+        explore=phase("fact"),
+    )
+    loop.container_manager = LocalContainerManager()
+    loop.futures = {}
+    loop._cleanup_pending = set()
+
+    project = _project(facts=2, hints=0, open_intents=0)
+    project.project = project.project.model_copy(
+        update={"mode": "real_website", "phase": "explore", "planning_version": 3}
+    )
+    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(
+        fact_count=2, hint_count=0, open_intent_count=0
+    )
+
+    class _Client:
+        def get_project(self, _project_id: str) -> ProjectDetail:
+            return project
+
+    loop.client = _Client()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "skidc.dispatcher.scheduler.loop.ensure_coverage_work",
+        lambda *_args: calls.append("coverage") or 1,
+        raising=False,
+    )
+
+    summary = ProjectSummary.model_validate(
+        {
+            "id": "proj_001",
+            "title": "t",
+            "status": "active",
+            "bootstrap_enabled": True,
+            "phase": "explore",
+            "mode": "real_website",
+            "created_at": "2025-01-01T00:00:00Z",
+            "fact_count": 2,
+            "intent_count": 0,
+            "working_intent_count": 0,
+            "unclaimed_intent_count": 0,
+            "hint_count": 0,
+        }
+    )
+
+    assert loop._try_dispatch_project(summary) is False
+    assert calls == []
+
+
 def test_reason_trigger_detects_open_intents_drained_to_zero() -> None:
     loop = _bare_loop()
     loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(
@@ -241,6 +386,36 @@ def test_reason_trigger_does_not_run_when_graph_is_unchanged() -> None:
     )
 
     assert loop._reason_trigger(project) is None
+
+
+def test_completion_blocked_reason_is_recorded_as_failure_not_success() -> None:
+    loop = _bare_loop()
+    loop.worker_unhealthy_until = {}
+    loop.worker_rejected_until = {}
+    loop._log_state = {}
+    failed: list[tuple[str, str]] = []
+    succeeded: list[str] = []
+    loop._record_task_failure = lambda task, outcome: failed.append((task.project_id, outcome))
+    loop._record_reason_success = lambda task: succeeded.append(task.project_id)
+    project = _project(facts=2, hints=0, open_intents=0)
+
+    class _Client:
+        def get_project(self, _project_id: str) -> ProjectDetail:
+            return project
+
+    loop.client = _Client()
+
+    future: Future[str] = Future()
+    future.set_result("completion_blocked")
+    loop.futures = {
+        future: RunningTask("proj_001", "reason", "reasoner", TaskCancellation())
+    }
+
+    loop._reap_futures()
+
+    assert failed == [("proj_001", "completion_blocked")]
+    assert succeeded == []
+    assert loop.reason_checkpoints["proj_001"] == ReasonCheckpoint(2, 0, 0)
 
 # --------------------------------------------------------------------------- #
 # phase 8 scheduler/runtime reliability                                        #

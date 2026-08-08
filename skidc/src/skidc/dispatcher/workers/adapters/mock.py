@@ -80,12 +80,9 @@ if phase=="reason":
     if outcome=="complete":
         print(json.dumps({"accepted":True,"data":{"complete":{"from":from_ids,"description":f"mock complete from {from_ids[0]}"}}}, ensure_ascii=False))
     elif outcome=="intent":
-        count=random.randint(1,max(1,max_i))
-        intents=[]
-        for idx in range(count):
-            fi=[random.choice(fact_ids)] if fact_ids else []
-            intents.append({"from":fi,"description":f"mock intent {idx+1} from {fi[0] if fi else 'none'}"})
-        print(json.dumps({"accepted":True,"data":{"intents":intents}}, ensure_ascii=False))
+        fi=[random.choice(fact_ids)] if fact_ids else []
+        intent={"from":fi,"description":f"mock intent from {fi[0] if fi else 'none'}","action_kind":"surface_mapping"}
+        print(json.dumps({"accepted":True,"data":{"intent":intent}}, ensure_ascii=False))
     elif outcome=="noop":
         print(json.dumps({"accepted":True,"data":{}}, ensure_ascii=False))
     elif outcome=="rejected":
@@ -114,9 +111,20 @@ if phase=="bootstrap_conclude":
         print(json.dumps({"accepted":True,"data":{"complete":{"description":"mock invalid payload"}}}, ensure_ascii=False))
     raise SystemExit(0)
 
+
+if phase=="verify_execute":
+    if outcome in ("reproduced", "not_reproduced"):
+        label = prompt.get("intent_id") or phase
+        print(json.dumps({"accepted":True,"data":{
+            "result":outcome,
+            "description":f"mock {outcome} for {label}",
+        }}, ensure_ascii=False))
+    else:
+        print(json.dumps({"accepted":True,"data":{"result":"invalid"}}, ensure_ascii=False))
+    raise SystemExit(0)
 if outcome=="fact":
     label = prompt.get("intent_id") or phase
-    print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}","status":"not_vulnerable"}} , ensure_ascii=False))
+    print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}"}}, ensure_ascii=False))
 elif outcome=="rejected":
     print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
 else:

@@ -115,8 +115,22 @@ def _target_aware_recon_profile(origin: str, policy: ScopePolicy) -> ReconProfil
 def _expire_leases_for_read(conn, project_id: str | None = None) -> None:
     """Run lease maintenance without turning a read endpoint into a 500."""
     try:
-        expire_workers(conn, project_id)
-        expire_reason_leases(conn, project_id)
+        if project_id is not None:
+            row = conn.execute(
+                "SELECT mode FROM projects WHERE id = ?", (project_id,),
+            ).fetchone()
+            if row is None or row["mode"] != "real_website":
+                return
+            project_ids = [project_id]
+        else:
+            project_ids = [
+                row["id"] for row in conn.execute(
+                    "SELECT id FROM projects WHERE mode = 'real_website'"
+                ).fetchall()
+            ]
+        for active_project_id in project_ids:
+            expire_workers(conn, active_project_id)
+            expire_reason_leases(conn, active_project_id)
     except sqlite3.OperationalError as exc:
         if "locked" not in str(exc).casefold():
             raise
@@ -126,6 +140,7 @@ def _expire_leases_for_read(conn, project_id: str | None = None) -> None:
 @router.get("/projects", response_model=list[ProjectSummary])
 def list_projects():
     with get_conn() as conn:
+        _expire_leases_for_read(conn)
         rows = conn.execute("""
             SELECT p.*,
                 (SELECT COUNT(*) FROM facts WHERE project_id = p.id) AS fact_count,
@@ -228,6 +243,7 @@ def create_project(body: CreateProjectRequest):
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def get_project(project_id: str, view: Literal["full", "dispatch"] = "full"):
     with get_conn() as conn:
+        _expire_leases_for_read(conn, project_id)
         row = get_project_or_404(conn, project_id)
 
         facts = conn.execute(
@@ -278,7 +294,11 @@ def get_project(project_id: str, view: Literal["full", "dispatch"] = "full"):
             facts=[
                 fact_to_model(conn, fact, project_id)
                 if view == "full"
-                else fact_to_dispatch_model(fact, include_detail=fact["id"] in dispatch_detail_ids)
+                else fact_to_dispatch_model(
+                    fact,
+                    include_detail=fact["id"] in dispatch_detail_ids,
+                    preserve_description=row["mode"] == "real_website",
+                )
                 for fact in facts
             ],
             intents=build_intents(conn, project_id),
@@ -286,7 +306,12 @@ def get_project(project_id: str, view: Literal["full", "dispatch"] = "full"):
             attack_paths=attack_paths,
             coverage_items=build_coverage_items(conn, project_id, coverage_rows),
             surface_inventory=[
-                surface_inventory_to_model(surface) for surface in surface_rows
+                surface_inventory_to_model(
+                    surface,
+                    conn,
+                    include_coverage_summary=view == "full",
+                )
+                for surface in surface_rows
             ],
             hypotheses=build_hypotheses(conn, project_id),
         )
@@ -349,7 +374,7 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
             )
             clear_project_reason(conn, project_id)
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        return project_meta_from_row(updated)
+        return project_meta_from_row(updated, conn)
 
 
 def _advance_project_phase(conn, project_id: str) -> PhaseAdvanceResponse:
@@ -633,15 +658,14 @@ def stop_project_needs_attention(project_id: str, body: NeedsAttentionRequest):
 
 
 
+
+
 @router.post("/projects/{project_id}/complete", response_model=Intent)
 def complete_project(project_id: str, body: CompleteRequest):
     with get_conn() as conn:
-        check_project_active(conn, project_id)
+        project_row = check_project_active(conn, project_id)
         expire_workers(conn, project_id)
         expire_reason_leases(conn, project_id)
-        validate_facts_exist(conn, project_id, body.from_)
-        validate_goal_not_in_sources(body.from_)
-        validate_completion_source_integrity(conn, project_id, body.from_)
         reconcile_project_coverage(conn, project_id)
         try:
             validate_project_completion_allowed(conn, project_id)
@@ -654,7 +678,26 @@ def complete_project(project_id: str, body: CompleteRequest):
             )
             return JSONResponse(status_code=409, content={"detail": exc.detail})
 
+        project_row = get_project_or_404(conn, project_id)
+        validate_facts_exist(conn, project_id, body.from_)
+        validate_goal_not_in_sources(body.from_)
+        validate_completion_source_integrity(conn, project_id, body.from_)
+        if project_row["mode"] == "real_website" and project_row["reason_worker"] != body.worker:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "completion_requires_reason",
+                    "message": (
+                        "A real_website project can be completed only by the "
+                        "currently claimed Reason task."
+                    ),
+                },
+            )
+
+        if project_row["mode"] != "real_website" and not body.from_:
+            raise HTTPException(422, "Completion requires at least one source Fact")
         now = utcnow()
+        completion_sources = list(body.from_)
         iid = next_intent_id(conn, project_id)
 
         conn.execute(
@@ -665,7 +708,7 @@ def complete_project(project_id: str, body: CompleteRequest):
             """,
             (iid, project_id, body.description, body.worker, body.worker, now, now, now),
         )
-        for fid in body.from_:
+        for fid in completion_sources:
             conn.execute(
                 "INSERT INTO intent_sources (intent_id, project_id, fact_id) VALUES (?, ?, ?)",
                 (iid, project_id, fid),
@@ -693,7 +736,7 @@ def complete_project(project_id: str, body: CompleteRequest):
 
         return Intent(
             id=iid,
-            **{"from": body.from_},
+            **{"from": completion_sources},
             to="goal",
             description=body.description,
             creator=body.worker,
