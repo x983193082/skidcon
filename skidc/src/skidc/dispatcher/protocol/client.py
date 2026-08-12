@@ -210,6 +210,9 @@ class SkidcClient:
         suggested_tools: list[str] | None = None,
         coverage_refs: list[str] | None = None,
         hypothesis_id: str | None = None,
+        risk_level: str | None = None,
+        test_identity: str | None = None,
+        test_data_refs: list[str] | None = None,
     ) -> ApiResult:
         body: dict[str, Any] = {
             "from": from_ids,
@@ -226,6 +229,8 @@ class SkidcClient:
             ("action_kind", action_kind),
             ("test_variant", test_variant),
             ("priority", priority),
+            ("risk_level", risk_level),
+            ("test_identity", test_identity),
         ):
             if value is not None:
                 body[key] = value
@@ -237,6 +242,8 @@ class SkidcClient:
             body["coverage_refs"] = coverage_refs
         if hypothesis_id is not None:
             body["hypothesis_id"] = hypothesis_id
+        if test_data_refs is not None:
+            body["test_data_refs"] = test_data_refs
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents",

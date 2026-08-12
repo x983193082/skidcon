@@ -77,7 +77,7 @@ Severity levels: `critical` (full system compromise), `high` (significant data/a
 - During recon-to-explore handoff, prefer `explore_seed_deck.seeds` over a flat `intents` array so the attack surface map and seed deck are preserved as facts.
 - For Android targets, good intents focus on one concrete step: observe app state, log in, navigate a business flow, capture the related API request, compare two accounts, verify authorization behavior, or record a negative result.
 - `intent.from` and `complete.from` may only use ids from `Valid facts`.
-- Keep intents clear enough that an explore worker can execute them using `$ANDROID_MCP_URL`, adb-backed UI controls, and network history.
+- Keep intents clear enough that an explore worker can execute them using the authenticated `android-mcp` client, adb-backed UI controls, and network history. Never instruct a worker to construct authentication headers or read the credential file.
 - New intents must stay within Scope / Safety Constraints. Include structured `target`, `port`, `surface_type`, `action_kind`, `priority`, and `suggested_tools` whenever known.
 - **Severity assessment**: When facts confirm a vulnerability or exploitation path, include `attack_paths` with appropriate severity (`critical`/`high`/`medium`/`low`). Base severity on actual impact: data exposure, privilege escalation, business logic abuse.
 

@@ -77,13 +77,24 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
         behavior_key, _, _ = behavior_identity(surface)
         meta = behavior_meta.setdefault(
             behavior_key,
-            {"observation_count": 0, "surface_refs": [], "tested_surface_refs": []},
+            {
+                "observation_count": 0,
+                "surface_refs": [],
+                "tested_surface_refs": [],
+                "required_coverage_count": 0,
+                "completed_coverage_count": 0,
+                "profile_missing": False,
+            },
         )
         meta["observation_count"] += 1
         if surface.id not in meta["surface_refs"]:
             meta["surface_refs"].append(surface.id)
         if surface.id in tested_surface_refs:
             meta["tested_surface_refs"].append(surface.id)
+        meta["required_coverage_count"] += surface.required_coverage_count
+        meta["completed_coverage_count"] += surface.completed_coverage_count
+        if surface.required_coverage_count == 0:
+            meta["profile_missing"] = True
     all_behaviors = cluster_behaviors(planning_surfaces)
     importance_rank = {"critical": 2, "high": 1, "passive": 0}
     for item in all_behaviors:
@@ -94,7 +105,11 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
     ]
     open_behaviors = [
         item for item in important_behaviors
-        if not behavior_meta[item["behavior_key"]]["tested_surface_refs"]
+        if (
+            behavior_meta[item["behavior_key"]]["profile_missing"]
+            or behavior_meta[item["behavior_key"]]["completed_coverage_count"]
+            < behavior_meta[item["behavior_key"]]["required_coverage_count"]
+        )
     ]
     open_behaviors.sort(
         key=lambda item: (
@@ -173,6 +188,12 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
             "surface_refs": intent.surface_refs,
             "test_variant": intent.test_variant,
             "hypothesis_id": intent.hypothesis_id,
+            "risk_level": intent.risk_level,
+            "test_identity": intent.test_identity,
+            "test_data_refs": intent.test_data_refs,
+            "effect_state": intent.effect_state,
+            "requires_state_check": intent.requires_state_check,
+            "dispatch_deduplication_key": intent.work_key,
         }
         for intent in project.intents
         if intent.status == "open" and intent.to is None
@@ -208,6 +229,9 @@ def format_dispatch_graph(project: ProjectDetail, *, limit: int | None = None) -
             "observation_count": behavior_meta[item["behavior_key"]]["observation_count"],
             "evidence_fact_ids": item.get("evidence_fact_ids") or [],
             "surface_refs": behavior_meta[item["behavior_key"]]["surface_refs"],
+            "required_coverage_count": behavior_meta[item["behavior_key"]]["required_coverage_count"],
+            "completed_coverage_count": behavior_meta[item["behavior_key"]]["completed_coverage_count"],
+            "profile_missing": behavior_meta[item["behavior_key"]]["profile_missing"],
         }
         for item in behaviors
     ]
@@ -247,7 +271,10 @@ def format_coverage_summary(project: ProjectDetail, *, limit: int = 10) -> str:
         verdict = item.outcome or "pending"
         counts[item.execution_status] = counts.get(item.execution_status, 0) + 1
         counts[verdict] = counts.get(verdict, 0) + 1
-        if item.required and (item.execution_status != "completed" or verdict in {"pending", "inconclusive"}):
+        if item.required and (
+            item.execution_status != "completed"
+            or verdict not in {"vulnerable", "not_vulnerable", "not_applicable"}
+        ):
             unresolved.append(item)
     unresolved.sort(key=lambda item: (-(item.priority or 0), item.surface_group or "", item.id))
     blockers = [
@@ -257,6 +284,9 @@ def format_coverage_summary(project: ProjectDetail, *, limit: int = 10) -> str:
             "status": blocker.status,
             "priority": blocker.priority,
             "reason": blocker.reason,
+            "description": blocker.description,
+            "suggested_action": blocker.suggested_action,
+            "related_refs": blocker.related_refs,
         }
         for blocker in project.project.completion_blockers[:limit]
     ]
@@ -327,6 +357,12 @@ def format_scope_constraints(project: ProjectDetail) -> str:
             "passive_only": policy.passive_only,
             "allow_state_change": policy.allow_state_change,
             "allow_destructive": policy.allow_destructive,
+            "destructive_action_kinds": policy.destructive_action_kinds,
+            "destructive_test_identities": policy.destructive_test_identities,
+            "destructive_test_data_refs": policy.destructive_test_data_refs,
+            "destructive_forbidden_assets": policy.destructive_forbidden_assets,
+            "destructive_state_check_required": policy.destructive_state_check_required,
+            "destructive_recovery_procedure_ref": policy.destructive_recovery_procedure_ref,
         },
         "recon_profile": {
             "required_categories": profile.required_categories,

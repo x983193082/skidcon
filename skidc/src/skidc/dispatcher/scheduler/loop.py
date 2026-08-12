@@ -34,7 +34,7 @@ MAX_TASK_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = (5, 15, 60)
 BOOTSTRAP_INTENT_DESCRIPTION = "bootstrap"
 BOOTSTRAP_INTENT_CREATOR = "dispatcher.bootstrap"
-RETRYABLE_OUTCOMES = {"failed", "rejected"}
+RETRYABLE_OUTCOMES = {"failed", "rejected", "dependency_unavailable"}
 _RECON_INTENT_CATEGORY_HINTS: dict[str, tuple[str, ...]] = {
     "port_scan": ("port", "service", "nmap", "naabu", "tcp", "udp"),
     "subdomain": ("subdomain", "dns", "subfinder", "amass", "cname"),
@@ -112,6 +112,16 @@ class DispatcherLoop:
         self.project_cursor = 0
         self._settings_checked = False
         self._startup_healthchecks_checked = False
+
+    def _config_for_project(self, project: ProjectDetail) -> DispatchConfig:
+        return self.config.for_target_type(project.project.recon_profile.target_type)
+
+    def _worker_for_project(
+        self, project: ProjectDetail, worker_name: str,
+    ) -> WorkerConfig:
+        return self.config.worker_for_target(
+            project.project.recon_profile.target_type, worker_name,
+        )
 
     def close(self) -> None:
         if self.futures:
@@ -328,6 +338,8 @@ class DispatcherLoop:
     def _intent_is_dispatchable(self, intent: Intent) -> bool:
         if intent.status != "open":
             return False
+        if intent.requires_state_check:
+            return False
         if intent.next_retry_at is not None and intent.next_retry_at > utcnow():
             return False
         return True
@@ -387,6 +399,7 @@ class DispatcherLoop:
         if worker is None:
             self._log_changed(f"project:{project.project.id}:worker:reason", logging.INFO, "no worker available for reason project=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s", project.project.id, selection.blocked_busy, selection.blocked_unhealthy, selection.blocked_rejected)
             return False
+        worker = self._worker_for_project(project, worker.name)
         self._clear_log_state(f"project:{project.project.id}:worker:reason")
         claim = self.client.claim_reason(project.project.id, worker.name, trigger)
         detail = claim.data.get("detail") if isinstance(claim.data, dict) else None
@@ -409,7 +422,7 @@ class DispatcherLoop:
             return False
         try:
             future = self.executor.submit(
-                run_reason_task, self.config, self.client, self.container_manager,
+                run_reason_task, self._config_for_project(project), self.client, self.container_manager,
                 project, export_yaml, worker, cancellation := TaskCancellation(), trigger,
             )
         except Exception:
@@ -434,6 +447,7 @@ class DispatcherLoop:
         if worker is None:
             self._log_changed(f"project:{project.project.id}:worker:bootstrap", logging.INFO, "no worker available for bootstrap project=%s intent=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s", project.project.id, intent.id, selection.blocked_busy, selection.blocked_unhealthy, selection.blocked_rejected)
             return False
+        worker = self._worker_for_project(project, worker.name)
         self._clear_log_state(f"project:{project.project.id}:worker:bootstrap")
         claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
         if claim.status_code in (403, 409) or not claim.ok:
@@ -441,7 +455,7 @@ class DispatcherLoop:
             return False
         try:
             future = self.executor.submit(
-                run_bootstrap_task, self.config, self.client, self.container_manager,
+                run_bootstrap_task, self._config_for_project(project), self.client, self.container_manager,
                 project, intent, worker, cancellation := TaskCancellation(),
             )
         except Exception:
@@ -467,6 +481,7 @@ class DispatcherLoop:
         if worker is None:
             self._log_changed(f"project:{project.project.id}:worker:explore", logging.INFO, "no worker available for explore project=%s intent=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s", project.project.id, intent.id, selection.blocked_busy, selection.blocked_unhealthy, selection.blocked_rejected)
             return False
+        worker = self._worker_for_project(project, worker.name)
         self._clear_log_state(f"project:{project.project.id}:worker:explore")
         claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
         if claim.status_code in (403, 409) or not claim.ok:
@@ -474,7 +489,7 @@ class DispatcherLoop:
             return False
         try:
             future = self.executor.submit(
-                run_explore_task, self.config, self.client, self.container_manager,
+                run_explore_task, self._config_for_project(project), self.client, self.container_manager,
                 project, export_yaml, intent, worker, cancellation := TaskCancellation(),
             )
         except Exception:
@@ -507,6 +522,7 @@ class DispatcherLoop:
                 selection.blocked_rejected,
             )
             return False
+        worker = self._worker_for_project(project, worker.name)
         self._clear_log_state(f"project:{project.project.id}:worker:verify")
         claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
         if claim.status_code in (403, 409) or not claim.ok:
@@ -518,7 +534,7 @@ class DispatcherLoop:
             return False
         try:
             future = self.executor.submit(
-                run_verify_task, self.config, self.client, self.container_manager,
+                run_verify_task, self._config_for_project(project), self.client, self.container_manager,
                 project, export_yaml, intent, worker,
                 cancellation := TaskCancellation(),
             )
@@ -784,6 +800,18 @@ class DispatcherLoop:
             and self._project_running_task_count(project.project.id) > 0
         ):
             return None
+
+        gated_mutations = [
+            intent.id for intent in project.intents
+            if intent.status == "open" and intent.requires_state_check
+        ]
+        open_state_check = any(
+            intent.status == "open"
+            and str(intent.action_kind or "").strip().casefold().replace("-", "_") == "state_check"
+            for intent in project.intents
+        )
+        if gated_mutations and not open_state_check:
+            return "state_check_required:" + ",".join(gated_mutations[:5])
 
         checkpoint = self.reason_checkpoints.get(project.project.id)
         if checkpoint is None:

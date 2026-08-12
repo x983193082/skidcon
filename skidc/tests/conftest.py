@@ -193,6 +193,9 @@ class InProcessClient:
         suggested_tools: list[str] | None = None,
         coverage_refs: list[str] | None = None,
         hypothesis_id: str | None = None,
+        risk_level: str | None = None,
+        test_identity: str | None = None,
+        test_data_refs: list[str] | None = None,
     ) -> ApiResult:
         body: dict[str, Any] = {
             "from": from_ids,
@@ -209,6 +212,8 @@ class InProcessClient:
             ("action_kind", action_kind),
             ("test_variant", test_variant),
             ("priority", priority),
+            ("risk_level", risk_level),
+            ("test_identity", test_identity),
         ):
             if value is not None:
                 body[key] = value
@@ -220,6 +225,8 @@ class InProcessClient:
             body["coverage_refs"] = coverage_refs
         if hypothesis_id is not None:
             body["hypothesis_id"] = hypothesis_id
+        if test_data_refs is not None:
+            body["test_data_refs"] = test_data_refs
         return self._post(
             f"/projects/{project_id}/intents",
             body,
@@ -502,6 +509,7 @@ class LocalContainerManager:
 
     def __init__(self) -> None:
         self.writes: list[tuple[str, str, str]] = []
+        self.write_modes: list[int] = []
 
     def close(self) -> None:
         return None
@@ -524,8 +532,18 @@ class LocalContainerManager:
         assert kill_after_seconds == 5
         return LocalProcess(command, env)
 
-    def write_text_file(self, container_name: str, path: str, content: str) -> None:
+    def write_text_file(
+        self,
+        container_name: str,
+        path: str,
+        content: str,
+        *,
+        mode: int = 0o644,
+        uid: int = 0,
+        gid: int = 0,
+    ) -> None:
         self.writes.append((container_name, path, content))
+        self.write_modes.append(mode)
 
     def needs_completed_cleanup(self, _project_id: str) -> bool:
         return False

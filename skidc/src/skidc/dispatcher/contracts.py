@@ -101,6 +101,9 @@ _WEB_INTENT_FIELDS = frozenset(
         "priority",
         "suggested_tools",
         "coverage_refs",
+        "risk_level",
+        "test_identity",
+        "test_data_refs",
     }
 )
 
@@ -133,11 +136,27 @@ def _normalize_web_reason_intent(intent: object) -> dict[str, Any]:
     if not isinstance(action_kind, str) or not action_kind.strip():
         raise ValueError("Web Intent action_kind is required")
     action_kind = action_kind.strip().casefold().replace("-", "_")
-    if action_kind not in {"surface_mapping", "security_test", "verify"}:
+    risk_level = normalized.get("risk_level", "standard")
+    if risk_level not in {"standard", "high", "irreversible"}:
+        raise ValueError("intent.risk_level must be standard, high, or irreversible")
+    if action_kind not in {"surface_mapping", "security_test", "verify", "state_check"} and risk_level == "standard":
         raise ValueError(
-            "Web Intent action_kind must be surface_mapping, security_test, or verify"
+            "A custom Web Intent action_kind requires high or irreversible risk_level"
         )
     normalized["action_kind"] = action_kind
+    if "risk_level" in intent:
+        normalized["risk_level"] = risk_level
+    if risk_level in {"high", "irreversible"}:
+        test_identity = normalized.get("test_identity")
+        test_data_refs = normalized.get("test_data_refs")
+        if not isinstance(test_identity, str) or not test_identity.strip():
+            raise ValueError("high-risk intent.test_identity is required")
+        if not isinstance(test_data_refs, list) or not test_data_refs or not all(
+            isinstance(ref, str) and ref.strip() for ref in test_data_refs
+        ):
+            raise ValueError("high-risk intent.test_data_refs must contain references")
+        normalized["test_identity"] = test_identity.strip()
+        normalized["test_data_refs"] = list(dict.fromkeys(ref.strip() for ref in test_data_refs))
     surface_ref = normalized.get("surface_ref")
     raw_surface_refs = normalized.get("surface_refs")
     if raw_surface_refs is None:
@@ -479,6 +498,7 @@ def _validate_web_verify_requests(value: Any) -> list[dict[str, Any]]:
 
 def validate_explore_payload(
     payload: dict[str, Any], *, fact_only: bool = False, allow_surfaces: bool = False,
+    action_kind: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
@@ -489,6 +509,11 @@ def validate_explore_payload(
         if data == {"no_result": True}:
             return "no_result", None
         allowed_fields = {"description", "tested_surface_refs", "verify"}
+        normalized_action = str(action_kind or "").strip().casefold().replace("-", "_")
+        if normalized_action == "state_check":
+            allowed_fields.add("state_check")
+        elif "state_check" in data:
+            raise ValueError("only state_check Intents may submit state_check data")
         if allow_surfaces:
             allowed_fields.add("surfaces")
         required_fields = {"description"}
@@ -498,6 +523,30 @@ def validate_explore_payload(
         if not isinstance(description, str) or not description.strip():
             raise ValueError("description is required")
         result: dict[str, Any] = {"description": description.strip()}
+        if "state_check" in data:
+            if normalized_action != "state_check":
+                raise ValueError("only state_check Intents may submit state_check data")
+            raw_check = data["state_check"]
+            if not isinstance(raw_check, dict) or set(raw_check) != {
+                "mutation_intent_id", "observed_state", "evidence_refs",
+            }:
+                raise ValueError("state_check must contain mutation_intent_id, observed_state, and evidence_refs")
+            mutation_id = raw_check.get("mutation_intent_id")
+            observed_state = raw_check.get("observed_state")
+            evidence_refs = raw_check.get("evidence_refs")
+            if not isinstance(mutation_id, str) or not mutation_id.strip():
+                raise ValueError("state_check.mutation_intent_id is required")
+            if observed_state not in {"applied", "not_applied", "unknown"}:
+                raise ValueError("state_check.observed_state is invalid")
+            if not isinstance(evidence_refs, list) or not evidence_refs or not all(
+                isinstance(ref, str) and ref.strip() for ref in evidence_refs
+            ):
+                raise ValueError("state_check.evidence_refs must contain references")
+            result["state_check"] = {
+                "mutation_intent_id": mutation_id.strip(),
+                "observed_state": observed_state,
+                "evidence_refs": list(dict.fromkeys(ref.strip() for ref in evidence_refs)),
+            }
         if "tested_surface_refs" in data:
             result["tested_surface_refs"] = _validate_web_surface_refs(
                 data["tested_surface_refs"], "tested_surface_refs",

@@ -127,17 +127,127 @@ worker 的 **`type`** 选择*智能体 CLI 循环*；worker 的 **`env`** 选择
 
 ---
 
-## Android MCP 桥接
+## Android Docker Lab（WSL2）
 
-Skidc 内置 Android 控制桥接，用于移动应用安全测试。它是一个轻量级 FastAPI 服务，
-将 ADB 命令封装为 HTTP 端点，使渗透测试智能体能够与 Android 模拟器或真机交互。
+Skidc 内置了面向 WSL2 内部 Docker Engine 的 Android 安全测试环境。Android 流程不会
+替换 Web 流程：同一条启动命令会同时运行 Web Server、Dispatcher、隔离的 Emulator 和
+带认证的 Bridge；Dispatcher 根据项目目标类型决定 worker 获得哪一组 Prompt 和工具。
 
-### 启动桥接
+| 组件 | 作用 |
+|------|------|
+| `skidc-server` | 前端、项目 API、Fact-Intent 图谱、证据和报告 |
+| `skidc-dispatcher` | 选择 Android Prompt，并调度隔离 worker |
+| `android-emulator` | 使用 KVM 加速的 Android 11 测试设备 |
+| `android-bridge` | 带认证的 ADB、状态观测和受限 APK 静态分析接口 |
 
-```powershell
-cd skidc
-uv run skidc android-mcp --device-id emulator-5554 --host 127.0.0.1 --port 8765
+### 运行条件
+
+- WSL2 发行版内部已经安装并启动 Docker Engine，且可使用 Docker Compose v2。
+- WSL2 中能够看到 `/dev/kvm`；本项目不会在 KVM 不可用时悄悄退回到低速软件模拟。
+- WSL2 可见内存至少 14 GiB，Docker 存储至少有 30 GiB 可用空间。
+- 本机端口 `8000` 和 `8765` 未被占用，其中 `8765` 只绑定到回环地址。
+- 本地 `dispatch.yaml` 中已经填写可用的模型 API Key。该文件不会被 Git 跟踪；
+  不要手工填写 Android Bridge Token，脚本会自动生成并以只读 Secret 方式挂载。
+
+### 首次启动
+
+在 WSL2 中进入仓库根目录，按顺序执行：
+
+```bash
+# 1. 首次创建本地调度配置，然后把模型占位符替换为真实 API Key。
+[ -e dispatch.yaml ] || cp dispatch_android.example.yaml dispatch.yaml
+nano dispatch.yaml
+# Dispatcher 在 Compose 容器内运行，须在 dispatch.yaml 中设置：
+# server: http://skidc-server:8000
+# 然后把所选 worker 的模型 API Key 占位符替换为真实值。
+
+# 2. 检查 WSL2、KVM、Docker、内存、磁盘和 Bridge 端口。
+./scripts/android-lab.sh doctor
+
+# 3. 从当前已提交代码构建 skidc-app、skidc-worker 和 skidc-android-bridge。
+./scripts/android-lab.sh build
+
+# 4. 生成本地 ADB 密钥、Bridge Bearer Token 和 APK 素材目录。
+./scripts/android-lab.sh init
+
+# 5. 一次启动 Web Server、Dispatcher、Android Emulator 和 Android Bridge。
+./scripts/android-lab.sh up
+
+# 6. 检查状态，直到四个服务均为 Up，两个 Android 服务均为 healthy。
+./scripts/android-lab.sh status
+
+# 7. 验证 Server、Bridge 认证、ADB、截图、UI 树和 worker 客户端调用。
+./scripts/android-lab.sh smoke
 ```
+
+首次 `up` 会下载体积较大的 Emulator 镜像。如果镜像仓库连接不稳定，可先单独拉取后重试：
+
+```bash
+docker pull us-docker.pkg.dev/android-emulator-268719/images/30-google-x64-no-metrics:30.1.2
+```
+
+`smoke` 不会等待尚未启动完成的 Emulator。如果 `status` 显示 `health: starting`，请等到
+`healthy` 后再执行一次 `smoke`。
+
+通常运行根目录就是当前仓库。如果从 Git worktree 执行脚本，但要复用另一个目录中的
+`dispatch.yaml`、凭据、APK 和已有容器，请在 `init`、`up`、`status`、`smoke`、`down`
+之前设置对应的 WSL 绝对路径：
+
+```bash
+export ANDROID_LAB_RUNTIME_ROOT=/mnt/d/path/to/skidcon-skidc
+```
+
+脚本会检查 Compose 所有权；如果已有的 `skidc-server` 或 `skidc-dispatcher` 属于另一个
+运行根目录，脚本会拒绝复用，避免再次出现同名容器冲突。
+
+### 发起 Android 安全评估
+
+1. 把经过授权的 APK 放入运行根目录的素材目录：
+
+   ```bash
+   android_runtime_root=${ANDROID_LAB_RUNTIME_ROOT:-"$PWD"}
+   cp /mnt/c/path/to/demo.apk "$android_runtime_root/datas/android-artifacts/demo.apk"
+   ```
+
+   如果没有设置 `ANDROID_LAB_RUNTIME_ROOT`，这里会自动使用
+   `./datas/android-artifacts/`。
+
+2. 打开 <http://127.0.0.1:8000>，点击“新建项目”，选择“真实网站模式”，再把“目标类型”
+   设为“Android”。当前 Android 复用带安全边界和 RECON 的项目表单，真正决定路由的是
+   `recon_profile.target_type: android`，并不是把 APK 当作网站处理。
+3. 填写已授权目标。“初始状态”中的 APK 路径必须使用 Bridge 容器可见路径：
+
+   ```text
+   APK: /artifacts/demo.apk
+   Package: com.example.demo
+   Device: Docker Android Emulator
+   Test accounts: user_a / user_b
+   Authorization: 仅允许测试该 APK、包名、模拟器和上述账号
+   ```
+
+4. 填写评估目标并创建项目。Dispatcher 会选择 Android Prompt，只在该 Android worker
+   内配置 Bridge 凭据，然后运行 Fact-Intent 闭环；Web、API、CTF 项目继续使用默认 Prompt，
+   不会获得 Android Bridge 凭据。
+
+Android 流程把受限静态分析（`aapt`、`apktool`、`jadx`）和动态观测、受控操作结合起来：
+安装并启动应用，读取 Activity 与 UI 状态，采集截图和 Logcat，操作控件，测试移动 API
+Behavior，独立 Verify 候选并把证据写入 Fact。静态结果只是线索，必须得到运行时证据后
+才能作为已复现发现。
+
+### 常用操作
+
+| 命令 | 作用 |
+|------|------|
+| `./scripts/android-lab.sh doctor` | 只读检查宿主环境前置条件 |
+| `./scripts/android-lab.sh build` | 重新构建 App、worker 和 Bridge 镜像 |
+| `./scripts/android-lab.sh init` | 创建缺失的本地凭据和 APK 目录 |
+| `./scripts/android-lab.sh up` | 同时启动 Web、Dispatcher、Emulator 和 Bridge |
+| `./scripts/android-lab.sh status` | 查看四个服务及其健康状态 |
+| `./scripts/android-lab.sh smoke` | 验证带认证的完整控制链路 |
+| `./scripts/android-lab.sh down` | 停止 Lab，并保留绑定挂载的项目数据 |
+
+拉取了会影响镜像的代码后重新执行 `build`；正常关闭后直接执行 `up` 即可。`init` 可以重复
+执行，但不会覆盖一组已经完整存在的密钥和 Token。
 
 ### 端点概览
 
@@ -148,38 +258,37 @@ uv run skidc android-mcp --device-id emulator-5554 --host 127.0.0.1 --port 8765
 | 输入控制 | `POST /input/tap`, `/input/text`, `/input/swipe`, `/input/back`, `/input/home`, `/input/key` |
 | 观测 | `GET /observe/ui`, `/observe/activity`, `/observe/screenshot`, `POST /observe/logcat` |
 | 网络抓包 | `GET /network/history`, `POST /network/events`, `DELETE /network/history` |
+| APK 静态分析 | `POST /reverse/analyze`, `GET /reverse/reports`, `DELETE /reverse/reports` |
+
+`/reverse/analyze` 保留受限 ZIP/字符串基线，并在临时工作区中调用 Bridge 镜像内的
+`aapt`、`apktool` 和 `jadx`。响应包含 `analysis_level`、各工具的 `tool_runs`、包名与 SDK
+信息、Manifest 安全配置、导出组件、Deep Link，以及带相对 `evidence_ref` 的有界
+`code_findings`。单个工具失败不会抹掉其他结果，静态发现仍需动态证据确认。
 
 ### 配置 Android 目标
 
-使用 `dispatch_android.example.yaml` 并配置两个关键设置：
+使用 `dispatch_android.example.yaml`，或在现有 `dispatch.yaml` 中加入：
 
 ```yaml
 runtime:
-  prompt_group: "android"
+  prompt_group: "default"
+  target_prompt_groups:
+    android: "android"
 
-common_env:
-  ANDROID_MCP_URL: "http://127.0.0.1:8765"
+android_bridge:
+  url: "http://127.0.0.1:8765"
+  token_file: "/run/secrets/android_mcp_token"
+  worker_token_file: "/run/skidc/android-mcp-token"
+  readiness_timeout: 15
 ```
 
-创建项目时，在 `origin` 中描述 Android 目标：
+不要把 token 值写入 `dispatch.yaml`、Prompt 或 worker 环境。`android-lab.sh`
+加载 `docker-compose.android.yaml`，把同一 secret 只读挂载给 Dispatcher 与 Bridge；
+Dispatcher 仅为 Android 项目写入 worker 内的 `0600` 凭据文件。
 
-```
-APK: D:\targets\demo.apk
-Package: com.example.demo
-Device: emulator-5554
-Test accounts: user_a / user_b
-```
-
-Android 提示组引导 worker 在 `explore` 任务中使用桥接并报告结构化发现：
-
-```json
-{
-  "description": "以 user_a 登录后，订单详情 API /api/order/detail?order_id=1001 返回完整订单数据，无所有权校验",
-  "scope": "mobile_api",
-  "vuln_type": "idor",
-  "severity": "high"
-}
-```
+当前边界：`/network/history` 保存的是外部代理或 Addon 导入的事件，系统尚不会自动启动
+mitmproxy、安装 CA 或处理证书固定；Frida 端点目前提供脚本元数据并保存外部产生的观测，
+尚不会自动启动 Frida Server 或注入应用进程。
 
 完整桥接文档请参阅 [ANDROID_MCP.md](ANDROID_MCP.md)。
 
@@ -225,12 +334,13 @@ skidc\
 
 ### 前置条件
 
-- **操作系统**: Windows 10/11（WSL2 后端）、macOS 或 Linux
-- **Docker Desktop** >= 4.10（Windows 上使用 WSL2；支持 `C:\` 绑定挂载）
+- **操作系统**：Windows 10/11 + WSL2、macOS 或 Linux
+- **Docker Engine + Docker Compose v2**。Docker Desktop 不是必需条件；上文 Android
+  Docker Lab 面向直接运行在 WSL2 内的 Docker Engine。
 - **Python >= 3.12** 和 [uv](https://docs.astral.sh/uv/)——仅在 `uv run skidc serve / dispatch` 时需要；**仅使用 Docker Compose 则不需要**
-- Windows 用户：**C 盘至少 8 GB 可用空间**（WSL2 将 Docker 的 ext4.vhdx 存储在此处）
+- Android Lab 还要求 KVM、**WSL2 可见内存至少 14 GiB**、**Docker 存储至少 30 GiB 可用**
 
-### 方式 A — Docker Compose（推荐；无需 Python）
+### 方式 A — 使用 Docker Compose 运行 Web/API/CTF（无需 Python）
 
 ```powershell
 # 1. 构建 worker 镜像（Kali + claude-code + codex）。约 5-15 分钟，约 4.6 GB。
@@ -238,7 +348,7 @@ docker build -t skidc-worker:latest -f container/Dockerfile container
 
 # 2. 从模板创建调度器配置，然后填入 LLM 密钥。
 copy dispatch.example.yaml dispatch.yaml
-notepad dispatch.yaml                  # 填入 ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY
+notepad dispatch.yaml                  # 设置 server: http://skidc-server:8000，并填写模型 API Key
 
 # 3. 构建应用镜像并启动所有服务。
 docker compose up -d --build
@@ -264,6 +374,9 @@ curl http://127.0.0.1:8000/projects
 ```
 
 打开 http://127.0.0.1:8000 查看仪表板。
+
+如果需要同时启动 Web 与 Android 能力，请使用上文完整的
+[Android Docker Lab](#android-docker-labwsl2) 操作流程。
 
 ### 方式 B — 直接使用 `uv`（开发模式；应用绕过 Docker，worker 仍使用 Docker）
 

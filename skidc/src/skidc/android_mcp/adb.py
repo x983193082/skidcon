@@ -4,6 +4,7 @@ import base64
 import re
 import subprocess
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -64,6 +65,10 @@ class AdbController:
             "device_id": self.device_id,
             "devices": self.devices(),
         }
+
+    def boot_completed(self) -> bool:
+        result = self._adb_shell("getprop", "sys.boot_completed")
+        return result.stdout.strip() == "1"
 
     def install_apk(self, apk_path: Path, reinstall: bool = True) -> dict[str, str]:
         if not apk_path.exists() or not apk_path.is_file():
@@ -148,6 +153,22 @@ class AdbController:
         bounded = max(1, min(lines, 2000))
         result = self._adb("logcat", "-d", "-t", str(bounded))
         return {"lines": result.stdout}
+
+    def set_http_proxy(self, host: str, port: int) -> dict[str, str | int]:
+        try:
+            address = ip_address(host.strip("[]"))
+        except ValueError:
+            proxy_host = host
+        else:
+            proxy_host = f"[{address}]" if address.version == 6 else str(address)
+        proxy = f"{proxy_host}:{port}"
+        self._adb_shell("settings", "put", "global", "http_proxy", proxy)
+        return {"status": "proxy_set", "host": host, "port": port}
+
+    def clear_http_proxy(self) -> dict[str, str]:
+        self._adb_shell("settings", "put", "global", "http_proxy", ":0")
+        self._adb_shell("settings", "delete", "global", "http_proxy")
+        return {"status": "proxy_cleared"}
 
     def _adb_shell(self, *args: str, timeout: int | None = None) -> CommandResult:
         return self._adb("shell", *args, timeout=timeout)

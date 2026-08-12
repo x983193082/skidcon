@@ -8,11 +8,14 @@ but are written fresh against Skidc's own implementation."""
 from __future__ import annotations
 
 from concurrent.futures import Future
+import io
+import tarfile
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from skidc.dispatcher.config import DispatchConfig, WorkerConfig
+from skidc.dispatcher.config import AndroidBridgeConfig, DispatchConfig, WorkerConfig
 from skidc.dispatcher.models import ReasonCheckpoint, RunningTask
 from skidc.dispatcher.runtime.cancellation import TaskCancellation
 from skidc.dispatcher.runtime.containers import ContainerManager
@@ -20,6 +23,9 @@ from skidc.dispatcher.runtime.startup_healthcheck import StartupHealthcheckResul
 from skidc.dispatcher.scheduler.loop import DispatcherLoop
 from skidc.dispatcher.scheduler.worker_select import choose_worker
 from skidc.dispatcher.tasks.common import format_worker_input
+from skidc.dispatcher.tasks.common import prepare_android_bridge
+from skidc.dispatcher.runtime.process import ProcessResult
+from skidc.dispatcher.protocol.client import ApiResult
 from skidc.server.models import Fact, Hint, Intent, ProjectDetail, ProjectMeta, ProjectSummary
 from tests.conftest import InProcessClient, LocalContainerManager, make_loop, mock_config, phase
 
@@ -94,6 +100,133 @@ def test_text_file_archive_normalizes_dot_segment() -> None:
     archive_path, blob = ContainerManager._text_file_archive("/foo/./bar.txt", "x")
     assert archive_path == "/foo"
     assert blob
+
+
+def test_text_file_archive_applies_explicit_secret_mode() -> None:
+    _, blob = ContainerManager._text_file_archive(
+        "/run/skidc/android-mcp-token",
+        "secret-token\n",
+        mode=0o600,
+        uid=1000,
+        gid=1000,
+    )
+
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:") as archive:
+        token = archive.getmember("skidc/android-mcp-token")
+
+    assert token.mode == 0o600
+    assert token.uid == 1000
+    assert token.gid == 1000
+
+
+@pytest.mark.parametrize("mode", [-1, 0, 0o1000])
+def test_text_file_archive_rejects_invalid_mode(mode: int) -> None:
+    with pytest.raises(ValueError, match="mode"):
+        ContainerManager._text_file_archive("/tmp/token", "x", mode=mode)
+
+
+class _PreparationProcess:
+    def __init__(self, result: ProcessResult) -> None:
+        self.result = result
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def communicate(self, timeout: float | None) -> ProcessResult:
+        assert self.started
+        assert timeout == 17
+        return self.result
+
+
+class _PreparationContainerManager:
+    def __init__(self, result: ProcessResult) -> None:
+        self.result = result
+        self.writes: list[tuple[str, str, str, int, int, int]] = []
+        self.execs: list[tuple[str, dict[str, str], list[str], int | None]] = []
+
+    def write_text_file(
+        self,
+        container_name: str,
+        path: str,
+        content: str,
+        *,
+        mode: int = 0o644,
+        uid: int = 0,
+        gid: int = 0,
+    ) -> None:
+        self.writes.append((container_name, path, content, mode, uid, gid))
+
+    def build_exec_process(
+        self,
+        container_name: str,
+        env: dict[str, str],
+        command: list[str],
+        timeout_seconds: int | None = None,
+        kill_after_seconds: int = 5,
+    ) -> _PreparationProcess:
+        assert kill_after_seconds == 5
+        self.execs.append((container_name, env, command, timeout_seconds))
+        return _PreparationProcess(self.result)
+
+
+def test_prepare_android_bridge_provisions_secret_and_checks_readiness(tmp_path) -> None:
+    token_file = tmp_path / "android_mcp_token"
+    token_file.write_text("secret-token\n", encoding="utf-8")
+    config = SimpleNamespace(
+        android_bridge=SimpleNamespace(
+            token_file=str(token_file),
+            worker_token_file="/run/skidc/android-mcp-token",
+            readiness_timeout=2,
+        )
+    )
+    worker = _worker("android", priority=0).model_copy(
+        update={
+            "env": {
+                "ANDROID_MCP_URL": "http://127.0.0.1:8765",
+                "ANDROID_MCP_TOKEN_FILE": "/run/skidc/android-mcp-token",
+            }
+        }
+    )
+    manager = _PreparationContainerManager(
+        ProcessResult(returncode=0, stdout='{"ready":true}', stderr="")
+    )
+
+    result = prepare_android_bridge(config, manager, "worker-1", worker)
+
+    assert result is not None and result.returncode == 0
+    assert manager.writes == [
+        ("worker-1", "/run/skidc/android-mcp-token", "secret-token\n", 0o600, 1000, 1000)
+    ]
+    assert manager.execs == [
+        (
+            "worker-1",
+            worker.env,
+            ["android-mcp", "GET", "/health/ready"],
+            2,
+        )
+    ]
+    assert "secret-token" not in repr(manager.execs)
+
+
+def test_prepare_android_bridge_skips_non_android_worker_without_reading_secret() -> None:
+    config = SimpleNamespace(
+        android_bridge=SimpleNamespace(
+            token_file="/missing/token",
+            worker_token_file="/run/skidc/android-mcp-token",
+            readiness_timeout=2,
+        )
+    )
+    worker = _worker("web", priority=0)
+    manager = _PreparationContainerManager(
+        ProcessResult(returncode=0, stdout="", stderr="")
+    )
+
+    result = prepare_android_bridge(config, manager, "worker-1", worker)
+
+    assert result is None
+    assert manager.writes == []
+    assert manager.execs == []
 
 
 def test_worker_input_log_summarizes_operation_without_prompt_body() -> None:
@@ -190,6 +323,71 @@ def _bare_loop() -> DispatcherLoop:
     loop = DispatcherLoop.__new__(DispatcherLoop)
     loop.reason_checkpoints = {}
     return loop
+
+
+def test_dispatcher_selects_prompt_config_from_project_target_type() -> None:
+    config = mock_config(
+        bootstrap=phase("complete"),
+        reason=phase("intent"),
+        explore=phase("fact"),
+    )
+    config.runtime.target_prompt_groups["android"] = "android"
+    loop = _bare_loop()
+    loop.config = config
+    project = _project(facts=0, hints=0, open_intents=0)
+
+    project.project.recon_profile.target_type = "android"
+    assert loop._config_for_project(project).runtime.prompt_group == "android"
+
+    project.project.recon_profile.target_type = "domain"
+    assert loop._config_for_project(project).runtime.prompt_group == "mock"
+    assert loop.config.runtime.prompt_group == "mock"
+
+
+def test_android_explore_submission_receives_target_local_worker(tmp_path) -> None:
+    config = mock_config(
+        bootstrap=phase("complete"), reason=phase("intent"), explore=phase("fact"),
+    )
+    config.runtime.target_prompt_groups["android"] = "android"
+    config.android_bridge = AndroidBridgeConfig(
+        url="http://127.0.0.1:8765",
+        token_file=str(tmp_path / "android_mcp_token"),
+    )
+    loop = _bare_loop()
+    loop.config = config
+    loop.futures = {}
+    loop.worker_unhealthy_until = {}
+    loop.worker_rejected_until = {}
+    loop.startup_unhealthy_workers = set()
+    loop.runtime_project_ids = set()
+    loop._log_state = {}
+    loop.container_manager = object()
+
+    class _Client:
+        def heartbeat(self, _project_id: str, _intent_id: str, _worker: str) -> ApiResult:
+            return ApiResult(200, {})
+
+    class _Executor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def submit(self, *args: object) -> Future[str]:
+            self.calls.append(args)
+            return Future()
+
+    loop.client = _Client()
+    loop.executor = _Executor()
+    project = _project(facts=1, hints=0, open_intents=1)
+    project.project.recon_profile.target_type = "android"
+    intent = project.intents[0]
+
+    assert loop._dispatch_explore(project, "graph", intent) is True
+
+    submitted_worker = loop.executor.calls[0][7]
+    assert isinstance(submitted_worker, WorkerConfig)
+    assert submitted_worker.env["ANDROID_MCP_URL"] == "http://127.0.0.1:8765"
+    assert submitted_worker.env["ANDROID_MCP_TOKEN_FILE"] == "/run/skidc/android-mcp-token"
+    assert "ANDROID_MCP_URL" not in config.workers[0].env
 
 
 def test_reason_trigger_initial_when_no_checkpoint() -> None:
@@ -416,6 +614,29 @@ def test_completion_blocked_reason_is_recorded_as_failure_not_success() -> None:
     assert failed == [("proj_001", "completion_blocked")]
     assert succeeded == []
     assert loop.reason_checkpoints["proj_001"] == ReasonCheckpoint(2, 0, 0)
+
+
+def test_android_dependency_failure_is_project_retryable_not_worker_unhealthy() -> None:
+    loop = _bare_loop()
+    loop.worker_unhealthy_until = {}
+    loop.worker_rejected_until = {}
+    loop._log_state = {}
+    failed: list[tuple[str, str]] = []
+    loop._record_task_failure = lambda task, outcome: failed.append((task.project_id, outcome))
+
+    future: Future[str] = Future()
+    future.set_result("dependency_unavailable")
+    loop.futures = {
+        future: RunningTask(
+            "android-project", "explore", "shared-worker", TaskCancellation(),
+            intent_id="i001",
+        )
+    }
+
+    loop._reap_futures()
+
+    assert failed == [("android-project", "dependency_unavailable")]
+    assert "shared-worker" not in loop.worker_unhealthy_until
 
 # --------------------------------------------------------------------------- #
 # phase 8 scheduler/runtime reliability                                        #

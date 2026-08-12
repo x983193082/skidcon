@@ -38,3 +38,46 @@ services:
         condition: service_healthy
     restart: unless-stopped
     command: ["uv", "run", "skidc", "dispatch", "--config", "dispatch.yaml"]
+
+  android-emulator:
+    image: us-docker.pkg.dev/android-emulator-268719/images/30-google-x64-no-metrics:30.1.2
+    profiles: ["android"]
+    devices:
+      - /dev/kvm:/dev/kvm
+    environment:
+      ADBKEY: "${ANDROID_ADBKEY:-}"
+      EMULATOR_PARAMS: "-no-window -no-audio -no-boot-anim -memory 3072 -cores 4"
+    shm_size: 2gb
+    mem_limit: 5g
+    cpus: 4
+    networks: [android-lab]
+    restart: unless-stopped
+
+  android-bridge:
+    image: skidc-android-bridge:latest
+    pull_policy: never
+    profiles: ["android"]
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./datas/android-artifacts:/artifacts:ro
+      - ./datas/android-lab/adb:/var/lib/skidc/android-adb:ro
+    environment:
+      ANDROID_EMULATOR_SERIAL: "android-emulator:5555"
+      ADB_VENDOR_KEYS: "/var/lib/skidc/android-adb"
+    depends_on:
+      android-emulator:
+        condition: service_started
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 256
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+      - /var/lib/skidc:size=128m,uid=10001,gid=10001
+    networks: [android-lab]
+    restart: unless-stopped
+
+networks:
+  android-lab:
+    driver: bridge

@@ -3,6 +3,7 @@ import json
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
+from pydantic import ValidationError
 from skidc.dispatcher.coverage_profile import normalize_surface_entry
 from skidc.planning import is_surface_mapping_intent
 
@@ -19,6 +20,7 @@ from skidc.server.models import (
     RecordIntentExecutionRequest,
     UpsertSurfaceInventoryRequest,
     TaskFailureRequest,
+    StateCheckResult,
 )
 from skidc.server.services import (
     bind_coverage_intent,
@@ -36,6 +38,7 @@ from skidc.server.services import (
     next_intent_id,
     project_meta_from_row,
     reconcile_fact_coverage,
+    reconcile_web_fact_coverage,
     reconcile_project_attack_paths,
     upsert_surface_inventory_record,
     utcnow,
@@ -44,6 +47,7 @@ from skidc.server.services import (
     validate_facts_exist,
     validate_intent_creator_worker,
     validate_intent_scope,
+    validate_high_risk_intent_authorization,
     validate_goal_not_in_sources,
 )
 
@@ -194,6 +198,36 @@ def create_intent(project_id: str, body: CreateIntentRequest):
             path=body.path,
             action_kind=requested_action or action_kind,
         )
+        if project.mode == "real_website":
+            validate_high_risk_intent_authorization(
+                project.scope_policy,
+                action_kind=action_kind,
+                path=body.path,
+                risk_level=body.risk_level,
+                test_identity=body.test_identity,
+                test_data_refs=body.test_data_refs,
+            )
+            if body.risk_level in {"high", "irreversible"} and work_key is None:
+                identity = json.dumps(
+                    {
+                        "action_kind": action_kind,
+                        "target": body.target,
+                        "port": body.port,
+                        "path": body.path,
+                        "test_identity": body.test_identity,
+                        "test_data_refs": sorted(body.test_data_refs),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                work_key = "high-risk:" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+                existing_work = conn.execute(
+                    """SELECT * FROM intents
+                       WHERE project_id = ? AND work_key = ? AND status = 'open'""",
+                    (project_id, work_key),
+                ).fetchone()
+                if existing_work is not None:
+                    return intent_to_model(conn, existing_work, project_id)
 
         now = utcnow()
         iid = next_intent_id(conn, project_id)
@@ -202,8 +236,9 @@ def create_intent(project_id: str, body: CreateIntentRequest):
             """
             INSERT OR IGNORE INTO intents (
                 id, project_id, to_fact_id, description, creator, worker, last_heartbeat_at, created_at, concluded_at,
-                target, port, path, surface_type, surface_ref, surface_refs, action_kind, test_variant, priority, suggested_tools, status, work_key, hypothesis_id
-            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                target, port, path, surface_type, surface_ref, surface_refs, action_kind, test_variant, priority, suggested_tools, status, work_key, hypothesis_id,
+                risk_level, test_identity, test_data_refs
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
             """,
             (
                 iid,
@@ -225,6 +260,9 @@ def create_intent(project_id: str, body: CreateIntentRequest):
                 json.dumps(body.suggested_tools),
                 work_key,
                 body.hypothesis_id,
+                body.risk_level,
+                body.test_identity,
+                json.dumps(body.test_data_refs, ensure_ascii=False),
             ),
         )
         if inserted.rowcount == 0:
@@ -278,6 +316,9 @@ def create_intent(project_id: str, body: CreateIntentRequest):
             work_key=work_key,
             coverage_refs=body.coverage_refs,
             hypothesis_id=body.hypothesis_id,
+            risk_level=body.risk_level,
+            test_identity=body.test_identity,
+            test_data_refs=body.test_data_refs,
         )
 
 
@@ -406,7 +447,14 @@ def record_conclusion_failure(
         row = get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)
         attempts = int(row["conclusion_attempt_count"] or 0) + 1
         now = utcnow()
-        if attempts >= 3:
+        real_web = project_row["mode"] == "real_website"
+        uncertain_mutation = (
+            real_web
+            and project_meta_from_row(project_row).scope_policy.destructive_state_check_required
+            and str(row["risk_level"] or "standard") in {"high", "irreversible"}
+        )
+        exhausted = not real_web and attempts >= 3
+        if exhausted:
             conn.execute(
                 """UPDATE intents SET conclusion_attempt_count = ?, conclusion_last_error = ?,
                    worker = NULL, last_heartbeat_at = NULL, last_worker = ?, next_retry_at = NULL,
@@ -442,18 +490,23 @@ def record_conclusion_failure(
         else:
             conn.execute(
                 """UPDATE intents SET conclusion_attempt_count = ?, conclusion_last_error = ?,
-                   worker = NULL, last_heartbeat_at = NULL, last_worker = ?, next_retry_at = ?
+                   worker = NULL, last_heartbeat_at = NULL, last_worker = ?, next_retry_at = ?,
+                   dead_lettered_at = NULL, status = 'open', commit_status = 'pending',
+                   effect_state = CASE WHEN ? THEN 'unknown' ELSE effect_state END,
+                   requires_state_check = CASE WHEN ? THEN 1 ELSE requires_state_check END
                    WHERE project_id = ? AND id = ? AND execution_status = 'succeeded'""",
                 (
                     attempts,
                     body.error[:2000],
                     body.worker,
                     now,
+                    int(uncertain_mutation),
+                    int(uncertain_mutation),
                     project_id,
                     intent_id,
                 ),
             )
-        if project_row["mode"] == "real_website" and attempts >= 3:
+        if real_web:
             conn.execute(
                 """UPDATE coverage_items
                    SET execution_status = 'queued', status = 'untested',
@@ -517,6 +570,30 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         intent_row = get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)
         intent_variant = str(intent_row["test_variant"] or "").strip()
         action_kind = str(intent_row["action_kind"] or "").strip().casefold()
+        raw_state_check = body.data.get("state_check")
+        state_check_result: StateCheckResult | None = None
+        if action_kind == "state_check":
+            if raw_state_check is None:
+                raise HTTPException(422, "state_check Intent requires structured state_check data")
+            try:
+                state_check_result = StateCheckResult.model_validate(raw_state_check)
+            except ValidationError as exc:
+                raise HTTPException(422, f"Invalid state_check result: {exc.errors()}") from exc
+            mutation_row = conn.execute(
+                "SELECT * FROM intents WHERE project_id = ? AND id = ?",
+                (project_id, state_check_result.mutation_intent_id),
+            ).fetchone()
+            if mutation_row is None:
+                raise HTTPException(404, "State-check mutation Intent not found")
+            if not bool(mutation_row["requires_state_check"]):
+                raise HTTPException(409, "Mutation Intent is not awaiting a state check")
+            if any(
+                mutation_row[field] != intent_row[field]
+                for field in ("target", "port", "path")
+            ):
+                raise HTTPException(409, "State-check Intent target must match the mutation Intent")
+        elif raw_state_check is not None:
+            raise HTTPException(422, "Only a state_check Intent may submit state_check data")
         verify_intent = project.mode == "real_website" and _is_verify_action(action_kind)
         fact_only = project.mode == "real_website" and not verify_intent
         mapping_intent = is_surface_mapping_intent(
@@ -536,15 +613,14 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             tested_surface_refs = list(dict.fromkeys(
                 surface_id.strip() for surface_id in tested_surface_refs
             ))
+            if "tested_surface_refs" in body.data:
+                body.data["tested_surface_refs"] = tested_surface_refs
             if mapping_intent and tested_surface_refs:
                 raise HTTPException(409, "surface_mapping cannot mark Surfaces tested")
-            if action_kind == "security_test":
-                if not tested_surface_refs and len(assigned_surface_refs) == 1:
-                    tested_surface_refs = list(assigned_surface_refs)
-                    body.data["tested_surface_refs"] = tested_surface_refs
-                if not assigned_surface_refs or not tested_surface_refs:
+            if action_kind == "security_test" and tested_surface_refs:
+                if not assigned_surface_refs:
                     raise HTTPException(
-                        409, "security_test requires assigned and tested Surface refs"
+                        409, "security_test tested Surface refs require an assignment"
                     )
                 if any(
                     surface_id not in assigned_surface_refs
@@ -743,24 +819,50 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                 dead_lettered_at = NULL,
                 status = 'concluded',
                 execution_status = 'succeeded',
-                commit_status = 'committed'
+                commit_status = 'committed',
+                effect_state = CASE
+                    WHEN risk_level IN ('high', 'irreversible') THEN 'applied'
+                    ELSE effect_state
+                END,
+                requires_state_check = 0
             WHERE id = ? AND project_id = ?
             """,
             (fid, body.worker, now, now, intent_id, project_id),
         )
+        if state_check_result is not None:
+            if state_check_result.observed_state == "not_applied":
+                conn.execute(
+                    """UPDATE intents SET effect_state = 'not_applied',
+                       requires_state_check = 0, worker = NULL,
+                       last_heartbeat_at = NULL, next_retry_at = NULL,
+                       execution_status = 'pending', commit_status = 'pending'
+                       WHERE project_id = ? AND id = ? AND status = 'open'""",
+                    (project_id, state_check_result.mutation_intent_id),
+                )
+            elif state_check_result.observed_state == "applied":
+                conn.execute(
+                    """UPDATE intents SET effect_state = 'applied',
+                       requires_state_check = 0, to_fact_id = ?, worker = NULL,
+                       last_heartbeat_at = NULL, concluded_at = ?, next_retry_at = NULL,
+                       status = 'concluded', execution_status = 'succeeded',
+                       commit_status = 'committed'
+                       WHERE project_id = ? AND id = ? AND status = 'open'""",
+                    (fid, now, project_id, state_check_result.mutation_intent_id),
+                )
+            else:
+                conn.execute(
+                    """UPDATE intents SET effect_state = 'unknown',
+                       requires_state_check = 1, worker = NULL,
+                       last_heartbeat_at = NULL
+                       WHERE project_id = ? AND id = ? AND status = 'open'""",
+                    (project_id, state_check_result.mutation_intent_id),
+                )
         if project.mode == "real_website":
-            # Coverage is only an execution ledger in real_website mode. A
-            # concluded Intent proves the assigned check ran; it does not let
-            # the server classify the Fact as vulnerable or safe.
-            conn.execute(
-                """UPDATE coverage_items
-                   SET execution_status = 'completed', status = 'informational',
-                       outcome = 'informational', evidence_ref = ?, updated_at = ?
-                   WHERE project_id = ? AND id IN (
-                       SELECT coverage_id FROM coverage_intents
-                       WHERE project_id = ? AND intent_id = ?
-                   )""",
-                (fid, now, project_id, project_id, intent_id),
+            reconcile_web_fact_coverage(
+                conn,
+                project_id,
+                fid,
+                intent_id=intent_id,
             )
         else:
             reconcile_fact_coverage(

@@ -90,6 +90,11 @@ class Intent(BaseModel):
     conclusion_attempt_count: int = 0
     conclusion_last_error: str | None = None
     commit_status: Literal["pending", "committed"] = "pending"
+    risk_level: Literal["standard", "high", "irreversible"] = "standard"
+    test_identity: str | None = None
+    test_data_refs: list[str] = Field(default_factory=list)
+    effect_state: Literal["not_started", "unknown", "applied", "not_applied"] = "not_started"
+    requires_state_check: bool = False
 
     model_config = {"populate_by_name": True}
 
@@ -514,6 +519,12 @@ class ScopePolicy(BaseModel):
 
     allow_state_change: bool = True
     allow_destructive: bool = False
+    destructive_action_kinds: list[str] = Field(default_factory=list)
+    destructive_test_identities: list[str] = Field(default_factory=list)
+    destructive_test_data_refs: list[str] = Field(default_factory=list)
+    destructive_forbidden_assets: list[str] = Field(default_factory=list)
+    destructive_state_check_required: bool = True
+    destructive_recovery_procedure_ref: str | None = None
 
 class ReconProfile(BaseModel):
     target_type: Literal["domain", "ip", "api", "android", "mixed"] = "domain"
@@ -702,12 +713,15 @@ class CreateIntentRequest(BaseModel):
     suggested_tools: list[str] = Field(default_factory=list)
     coverage_refs: list[str] = Field(default_factory=list)
     hypothesis_id: str | None = None
+    risk_level: Literal["standard", "high", "irreversible"] = "standard"
+    test_identity: str | None = None
+    test_data_refs: list[str] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}
 
     @field_validator(
         "description", "creator", "worker", "path", "surface_ref",
-        "test_variant", "hypothesis_id",
+        "test_variant", "hypothesis_id", "test_identity",
     )
     @classmethod
     def validate_non_empty_text(cls, value: str | None) -> str | None:
@@ -738,6 +752,30 @@ class CreateIntentRequest(BaseModel):
     @classmethod
     def validate_surface_refs(cls, value: list[str]) -> list[str]:
         return _clean_id_list(value, "surface ids")
+
+    @field_validator("test_data_refs")
+    @classmethod
+    def validate_test_data_refs(cls, value: list[str]) -> list[str]:
+        return _clean_id_list(value, "test data references")
+
+
+class StateCheckResult(BaseModel):
+    mutation_intent_id: str
+    observed_state: Literal["applied", "not_applied", "unknown"]
+    evidence_refs: list[str] = Field(min_length=1)
+
+    @field_validator("mutation_intent_id")
+    @classmethod
+    def validate_mutation_intent_id(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def validate_evidence_refs(cls, value: list[str]) -> list[str]:
+        return _clean_id_list(value, "evidence references")
 
 
 class HeartbeatRequest(BaseModel):

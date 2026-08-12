@@ -26,6 +26,15 @@ from tests.conftest import (
     mock_config,
     phase,
 )
+from tests.support.web_assessment import (
+    claim_intent,
+    claim_reason,
+    conclude_intent,
+    create_intent,
+    create_real_web_project,
+    create_required_coverage,
+    create_surface,
+)
 
 
 def test_bootstrap_completes_project_end_to_end(http_client: TestClient) -> None:
@@ -233,8 +242,8 @@ def test_failed_attempt_fact_can_be_followed_by_alternate_work_with_full_trace(
     ).json()["fact"]
     assert fact["status"] is None and fact["vuln_type"] is None and fact["result_class"] is None
     ledger = http_client.get(f"/projects/{project_id}/coverage").json()[0]
-    assert ledger["execution_status"] == "completed"
-    assert ledger["outcome"] == "informational"
+    assert ledger["execution_status"] == "untested"
+    assert ledger["outcome"] is None
 
     verify_intent = http_client.post(
         f"/projects/{project_id}/intents",
@@ -901,3 +910,157 @@ def test_verify_not_reproduced_uses_three_attempts_and_does_not_block_complete(
     }
     paths = http_client.get(f"/projects/{project_id}/attack-paths").json()
     assert all(result.id not in path["fact_chain"] for path in paths)
+
+
+def _create_mock_real_web_project(
+    http_client: TestClient,
+) -> tuple[str, dict, list[str]]:
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(
+        http_client, project_id, fingerprint="surface-session", method="GET",
+        path="/session", params=[], surface_type="route", traits={"auth": True},
+    )
+    coverage_ids = [
+        create_required_coverage(
+            http_client, project_id, surface, family=family, variant=variant,
+        )["id"]
+        for family, variant in (
+            ("identity_auth", "authentication_flow"),
+            ("session_csrf", "csrf_state_change"),
+        )
+    ]
+    return project_id, surface, coverage_ids
+
+
+def _reason_complete(
+    http_client: TestClient,
+    project_id: str,
+    *,
+    from_ids: list[str],
+):
+    claim_reason(http_client, project_id)
+    response = http_client.post(
+        f"/projects/{project_id}/complete",
+        json={
+            "from": from_ids,
+            "description": "All required assessment work has terminal evidence.",
+            "worker": "reasoner",
+        },
+    )
+    if response.status_code != 200:
+        released = http_client.post(
+            f"/projects/{project_id}/reason/release",
+            json={"worker": "reasoner"},
+        )
+        assert released.status_code == 200
+    return response
+
+
+def _conclude_all_required_mock_coverage(
+    http_client: TestClient,
+    project_id: str,
+    surface: dict,
+    coverage_ids: list[str],
+) -> tuple[str, str]:
+    first = create_intent(
+        http_client, project_id, surface=surface,
+        coverage_ids=[coverage_ids[0]], test_variant="authentication_flow",
+    )
+    claim_intent(http_client, project_id, first["id"])
+    candidate = conclude_intent(
+        http_client, project_id, first["id"],
+        description="Candidate authentication impact requires Verify.",
+        data={
+            "tested_surface_refs": [surface["id"]],
+            "verify_request": "Reproduce candidate authentication impact.",
+            "verify_requests": [{
+                "claim": "Reproduce candidate authentication impact.",
+                "surface_refs": [surface["id"]],
+                "evidence_refs": [],
+            }],
+        },
+    )["fact"]
+    verify = create_intent(
+        http_client, project_id, surface=surface,
+        coverage_ids=[coverage_ids[0]], action_kind="verify",
+        test_variant="authentication_flow", from_ids=[candidate["id"]],
+    )
+
+    second = create_intent(
+        http_client, project_id, surface=surface,
+        coverage_ids=[coverage_ids[1]], test_variant="csrf_state_change",
+    )
+    claim_intent(http_client, project_id, second["id"])
+    conclude_intent(
+        http_client, project_id, second["id"],
+        description="CSRF controls rejected the tested cross-origin requests.",
+        data={"tested_surface_refs": [surface["id"]]},
+    )
+    return candidate["id"], verify["id"]
+
+
+def _mock_web_loop(http_client: TestClient, *, verify_result: str):
+    client = InProcessClient(http_client)
+    containers = LocalContainerManager()
+    loop = make_loop(
+        mock_config(
+            bootstrap=phase("complete"), reason=phase("complete"),
+            explore=phase("fact"), verify=phase(verify_result),
+        ),
+        client,
+        containers,
+    )
+    return client, containers, loop
+
+
+def _run_required_coverage_and_verify(
+    http_client: TestClient,
+    *,
+    verify_result: str,
+):
+    project_id, surface, coverage_ids = _create_mock_real_web_project(http_client)
+    premature = _reason_complete(http_client, project_id, from_ids=[])
+    assert premature.status_code == 409
+    candidate_id, verify_intent_id = _conclude_all_required_mock_coverage(
+        http_client, project_id, surface, coverage_ids,
+    )
+    client, _containers, loop = _mock_web_loop(
+        http_client, verify_result=verify_result,
+    )
+    try:
+        dispatch_and_wait(loop)
+        after_verify = client.get_project(project_id)
+        verification = next(
+            fact for fact in after_verify.facts
+            if fact.verification_of == candidate_id
+        )
+        assert verification.status == verify_result
+        assert len(verification.data["attempts"]) == 3
+        dispatch_and_wait(loop)
+        completed = client.get_project(project_id)
+    finally:
+        loop.close()
+    return completed, verification, verify_intent_id
+
+
+def test_web_assessment_completes_only_after_all_required_coverage_and_verify(
+    http_client: TestClient,
+) -> None:
+    completed, verification, _verify_intent_id = _run_required_coverage_and_verify(
+        http_client, verify_result="reproduced",
+    )
+    assert verification.status == "reproduced"
+    assert completed.project.status == "completed"
+    assert completed.project.completion_blockers == []
+
+
+def test_zero_finding_web_assessment_completes_with_empty_completion_sources(
+    http_client: TestClient,
+) -> None:
+    completed, verification, _verify_intent_id = _run_required_coverage_and_verify(
+        http_client, verify_result="not_reproduced",
+    )
+    assert verification.status == "not_reproduced"
+    assert completed.project.status == "completed"
+    completion = next(intent for intent in completed.intents if intent.to == "goal")
+    assert completion.from_ == []

@@ -8,6 +8,120 @@ from fastapi.testclient import TestClient
 from skidc.server import db
 from skidc.server.db import get_conn
 from skidc.server.services import reconcile_project_coverage
+from tests.support.web_assessment import (
+    claim_intent,
+    conclude_intent,
+    coverage_by_id,
+    create_intent,
+    create_real_web_project,
+    create_required_coverage,
+    create_surface,
+)
+
+
+def test_explicit_web_test_without_candidate_is_negative_terminal(http_client):
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(http_client, project_id)
+    coverage = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="identity_auth",
+        variant="authentication_flow",
+    )
+    intent = create_intent(
+        http_client,
+        project_id,
+        surface=surface,
+        coverage_ids=[coverage["id"]],
+    )
+    claim_intent(http_client, project_id, intent["id"])
+    concluded = conclude_intent(
+        http_client,
+        project_id,
+        intent["id"],
+        description="Authentication bypass probes were rejected.",
+        data={"tested_surface_refs": [f" {surface['id']} ", surface["id"]]},
+    )
+    assert concluded["fact"]["data"]["tested_surface_refs"] == [surface["id"]]
+    item = coverage_by_id(http_client, project_id, coverage["id"])
+    assert item["execution_status"] == "completed"
+    assert item["outcome"] == "not_vulnerable"
+
+
+def _candidate_coverage_with_verify(http_client, *, result: str) -> dict:
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(http_client, project_id)
+    coverage = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="identity_auth",
+        variant="authentication_flow",
+    )
+    explore = create_intent(
+        http_client,
+        project_id,
+        surface=surface,
+        coverage_ids=[coverage["id"]],
+    )
+    claim_intent(http_client, project_id, explore["id"])
+    candidate = conclude_intent(
+        http_client,
+        project_id,
+        explore["id"],
+        description="Candidate authentication bypass requires independent reproduction.",
+        data={
+            "tested_surface_refs": [surface["id"]],
+            "verify_request": "Reproduce the authentication bypass.",
+            "verify_requests": [{
+                "claim": "Reproduce the authentication bypass.",
+                "surface_refs": [surface["id"]],
+                "evidence_refs": [],
+            }],
+        },
+    )["fact"]
+    pending = coverage_by_id(http_client, project_id, coverage["id"])
+    assert pending["execution_status"] == "testing"
+    assert pending["outcome"] is None
+
+    verify = create_intent(
+        http_client,
+        project_id,
+        surface=surface,
+        coverage_ids=[coverage["id"]],
+        action_kind="verify",
+        test_variant="authentication_flow",
+        from_ids=[candidate["id"]],
+    )
+    claim_intent(http_client, project_id, verify["id"], worker="verifier")
+    conclude_intent(
+        http_client,
+        project_id,
+        verify["id"],
+        worker="verifier",
+        description=f"Independent verification result: {result}.",
+        status=result,
+        verification_of=candidate["id"],
+        parent_fact=candidate["id"],
+        kind="verification_result",
+        data={"result": result, "attempts": []},
+        evidence_refs=[f"task_log:verify-{result}"],
+        coverage_refs=[coverage["id"]],
+    )
+    return coverage_by_id(http_client, project_id, coverage["id"])
+
+
+def test_candidate_coverage_waits_for_every_terminal_verify(http_client):
+    completed = _candidate_coverage_with_verify(http_client, result="not_reproduced")
+    assert completed["execution_status"] == "completed"
+    assert completed["outcome"] == "not_vulnerable"
+
+
+def test_reproduced_candidate_makes_coverage_vulnerable(http_client):
+    completed = _candidate_coverage_with_verify(http_client, result="reproduced")
+    assert completed["execution_status"] == "completed"
+    assert completed["outcome"] == "vulnerable"
 
 def _claim_web_reason(http: TestClient, project_id: str, worker: str = "reasoner") -> None:
     response = http.post(
@@ -397,8 +511,9 @@ def test_surface_inventory_upsert_and_profile_coverage_fields(http_client: TestC
         f"/projects/{pid}/coverage",
         json={
             "item_type": "vuln_class",
-            "description": "auth:/admin/login.php x identity_auth (anonymous)",
-            "surface_group": "auth:/admin/login.php",
+                "description": "auth:/admin/login.php x identity_auth (anonymous)",
+                "surface_group": "auth:/admin/login.php",
+                "surface_fingerprint": surface_payload["fingerprint"],
             "test_family": "identity_auth",
             "test_variants": ["default_credentials", "auth_bypass"],
             "auth_context": "anonymous",
@@ -425,6 +540,8 @@ def test_surface_inventory_upsert_and_profile_coverage_fields(http_client: TestC
             "creator": "reasoner",
             "coverage_refs": [item["id"]],
             "test_variant": "auth_bypass",
+            "action_kind": "security_test",
+            "surface_ref": first.json()["id"],
         },
     )
     assert intent.status_code == 201
@@ -442,16 +559,17 @@ def test_surface_inventory_upsert_and_profile_coverage_fields(http_client: TestC
             "description": "Authentication checks completed without a bypass.",
             "status": "not_vulnerable",
             "vuln_type": "auth_bypass",
+            "data": {"tested_surface_refs": [first.json()["id"]]},
         },
     )
     assert resolved.status_code == 200
     resolved_item = http_client.get(f"/projects/{pid}/coverage").json()[0]
-    assert resolved_item["status"] == "informational"
+    assert resolved_item["status"] == "untested"
     variants = {result["variant"]: result for result in resolved_item["variant_results"]}
-    assert variants["auth_bypass"]["status"] == "untested"
+    assert variants["auth_bypass"]["status"] == "not_vulnerable"
     assert variants["default_credentials"]["status"] == "untested"
-    assert resolved_item["execution_status"] == "completed"
-    assert resolved_item["outcome"] == "informational"
+    assert resolved_item["execution_status"] == "untested"
+    assert resolved_item["outcome"] is None
 
     detail = http_client.get(f"/projects/{pid}").json()
     assert len(detail["surface_inventory"]) == 1
@@ -517,7 +635,8 @@ def test_surface_test_status_completes_on_terminal_negative_coverage(
             "description": "Run concrete negative SQL injection probes.",
             "creator": "reasoner",
             "test_variant": "sql",
-            "action_kind": "injection_hypothesis",
+            "action_kind": "security_test",
+            "surface_ref": surface.json()["id"],
             "coverage_refs": [coverage_id],
         },
     ).json()
@@ -536,6 +655,7 @@ def test_surface_test_status_completes_on_terminal_negative_coverage(
             "status": "not_vulnerable",
             "vuln_type": "sql",
             "coverage_refs": [coverage_id],
+            "data": {"tested_surface_refs": [surface.json()["id"]]},
         },
     )
     assert concluded.status_code == 200
@@ -1571,7 +1691,7 @@ def test_fact_verification_reference_is_persisted(http_client: TestClient) -> No
     yaml_text = http_client.get(f"/projects/{pid}/export?format=yaml").text
     assert f"verification_of: {original['id']}" in yaml_text
 
-def test_variant_conflict_is_reported_and_can_be_independently_verified(http_client: TestClient) -> None:
+def test_variant_results_wait_for_independent_verification(http_client: TestClient) -> None:
     pid = http_client.post(
         "/projects",
         json={"title": "variants", "origin": "https://example.test/", "goal": "g", "mode": "real_website",
@@ -1579,6 +1699,10 @@ def test_variant_conflict_is_reported_and_can_be_independently_verified(http_cli
     ).json()["project"]["id"]
     advanced = http_client.post(f"/projects/{pid}/phase/advance", json={})
     assert advanced.status_code == 200 and advanced.json()["advanced"]
+    surface = create_surface(
+        http_client, pid, fingerprint="surface-search", method="GET",
+        path="/search", params=["q"], traits={"has_input": True},
+    )
     coverage = http_client.post(
         f"/projects/{pid}/coverage",
         json={
@@ -1586,8 +1710,12 @@ def test_variant_conflict_is_reported_and_can_be_independently_verified(http_cli
             "path": "/search",
             "param": "q",
             "description": "Search parameter security checks",
+            "surface_group": surface["surface_group"],
+            "surface_fingerprint": surface["fingerprint"],
             "test_family": "injection",
             "test_variants": ["sql", "xss"],
+            "auth_context": surface["auth_context"],
+            "required": True,
             "priority": 8,
         },
     ).json()
@@ -1602,7 +1730,9 @@ def test_variant_conflict_is_reported_and_can_be_independently_verified(http_cli
                 "worker": "w1",
                 "coverage_refs": [coverage["id"]],
                 "test_variant": variant,
-                "action_kind": "verify_candidate" if verification_of else f"{variant}_probe",
+                "action_kind": "verify" if verification_of else "security_test",
+                "surface_ref": surface["id"],
+                "surface_refs": [surface["id"]],
             },
         ).json()
         payload = {
@@ -1611,13 +1741,23 @@ def test_variant_conflict_is_reported_and_can_be_independently_verified(http_cli
             "status": "reproduced" if verification_of else status,
             "vuln_type": variant,
             "coverage_refs": [coverage["id"]],
+            "data": {"tested_surface_refs": [surface["id"]]},
         }
         if status in {"confirmed", "verified"}:
             payload["severity"] = "medium"
+            payload["data"].update({
+                "verify_request": "Independently reproduce the candidate.",
+                "verify_requests": [{
+                    "claim": "Independently reproduce the candidate.",
+                    "surface_refs": [surface["id"]],
+                    "evidence_refs": [],
+                }],
+            })
         if verification_of:
             payload["kind"] = "verification_result"
             payload["data"] = {"result": "reproduced", "attempts": [{"attempt": 1}]}
             payload["verification_of"] = verification_of
+            payload["evidence_refs"] = ["task_log:manual-verification"]
         response = http_client.post(f"/projects/{pid}/intents/{intent['id']}/conclude", json=payload)
         assert response.status_code == 200
         return response.json()["fact"]
@@ -1625,14 +1765,12 @@ def test_variant_conflict_is_reported_and_can_be_independently_verified(http_cli
     positive = conclude("sql", "confirmed", "Boolean behavior confirmed SQL injection.")
     conclude("xss", "not_vulnerable", "Reflected input was encoded in the tested response contexts.")
     ledger = http_client.get(f"/projects/{pid}/coverage").json()[0]
-    assert ledger["execution_status"] == "completed"
-    assert ledger["outcome"] == "informational"
-    assert all(item["status"] == "untested" for item in ledger["variant_results"])
+    assert ledger["execution_status"] == "testing"
+    assert ledger["outcome"] is None
+    assert {item["variant"]: item["status"] for item in ledger["variant_results"]} == {
+        "sql": "informational", "xss": "not_vulnerable",
+    }
     assert http_client.get(f"/projects/{pid}/attack-paths").json() == []
-
-    conclude("sql", "not_vulnerable", "A separate SQL injection probe produced a stable negative result.")
-    detail = http_client.get(f"/projects/{pid}").json()
-    assert detail["project"]["completion_blockers"] == []
 
     verification = conclude(
         "sql",
@@ -1641,20 +1779,12 @@ def test_variant_conflict_is_reported_and_can_be_independently_verified(http_cli
         source=positive["id"],
         verification_of=positive["id"],
     )
+    ledger = http_client.get(f"/projects/{pid}/coverage").json()[0]
+    assert ledger["execution_status"] == "completed"
+    assert ledger["outcome"] == "vulnerable"
     assert http_client.get(f"/projects/{pid}/attack-paths").json() == []
 
-    _claim_web_reason(http_client, pid, "w1")
-    completed = http_client.post(
-        f"/projects/{pid}/complete",
-        json={"from": [verification["id"]], "description": "done", "worker": "w1"},
-    )
-    assert completed.status_code == 200
-    assert completed.json()["from"] == [verification["id"]]
-    paths = http_client.get(f"/projects/{pid}/attack-paths").json()
-    assert len(paths) == 1
-    assert positive["id"] in paths[0]["fact_chain"]
-    assert verification["id"] in paths[0]["fact_chain"]
-    assert paths[0]["fact_chain"][-1] == "goal"
+    assert verification["verification_of"] == positive["id"]
 
 
 def test_verification_rejects_a_different_variant(http_client: TestClient) -> None:
@@ -1827,7 +1957,7 @@ def test_legacy_duplicate_profile_coverage_merges_idempotently(
     assert items[0]["test_variants"] == ["command", "sql"]
 
 
-def test_reconcile_tolerates_legacy_variant_mismatch_on_existing_binding(
+def test_reconcile_does_not_infer_legacy_variant_evidence_from_binding(
     http_client: TestClient,
 ) -> None:
     pid = http_client.post(
@@ -1882,7 +2012,8 @@ def test_reconcile_tolerates_legacy_variant_mismatch_on_existing_binding(
 
     item = http_client.get(f"/projects/{pid}/coverage").json()[0]
     assert item["intent_ids"] == [intent["id"]]
-    assert concluded.json()["fact"]["id"] in item["evidence_fact_ids"]
+    assert concluded.json()["fact"]["id"] not in item["evidence_fact_ids"]
+    assert item["execution_status"] == "untested"
 
 
 def test_project_list_and_detail_ignore_legacy_attack_path_rows(
@@ -2052,3 +2183,142 @@ def test_concluded_fact_persists_its_execution_log_as_evidence(
     fact = concluded.json()["fact"]
     assert f"task_log:{task_log['id']}" in fact["evidence_refs"]
     assert task_log["id"] in fact["task_log_refs"]
+
+
+def _mixed_web_assessment_project(http_client: TestClient) -> str:
+    created = http_client.post(
+        "/projects",
+        json={
+            "title": "mixed report assessment",
+            "origin": "https://example.test/",
+            "goal": "assess",
+            "mode": "real_website",
+            "bootstrap_enabled": False,
+            "scope_policy": {
+                "allowed_targets": ["example.test"],
+                "allowed_ports": [443],
+                "allow_destructive": True,
+                "destructive_action_kinds": ["delete_test_record"],
+                "destructive_test_identities": ["test-admin"],
+                "destructive_test_data_refs": ["record:test-42"],
+                "destructive_state_check_required": True,
+            },
+            "recon_profile": {"required_categories": []},
+        },
+    )
+    assert created.status_code == 201
+    project_id = created.json()["project"]["id"]
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE projects SET planning_version = 3, phase = 'explore' WHERE id = ?",
+            (project_id,),
+        )
+
+    surface = create_surface(http_client, project_id)
+    coverage = [
+        create_required_coverage(
+            http_client, project_id, surface, family=family, variant=variant,
+        )
+        for family, variant in (
+            ("identity_auth", "authentication_flow"),
+            ("session_csrf", "csrf_state_change"),
+            ("injection", "sql_injection"),
+            ("business_logic", "workflow_invariant"),
+        )
+    ]
+    retrying = create_intent(
+        http_client, project_id, surface=surface,
+        coverage_ids=[coverage[2]["id"]], test_variant="sql_injection",
+    )
+    claim_intent(http_client, project_id, retrying["id"])
+    assert http_client.post(
+        f"/projects/{project_id}/intents/{retrying['id']}/failure",
+        json={
+            "worker": "executor", "error": "tool transport failed",
+            "max_attempts": 3, "backoff_seconds": 60,
+        },
+    ).status_code == 200
+
+    for index, result in enumerate(("reproduced", "not_reproduced")):
+        variant = coverage[index]["test_variants"][0]
+        explore = create_intent(
+            http_client, project_id, surface=surface,
+            coverage_ids=[coverage[index]["id"]], test_variant=variant,
+        )
+        claim_intent(http_client, project_id, explore["id"])
+        candidate = conclude_intent(
+            http_client, project_id, explore["id"],
+            description=f"Candidate for {result}",
+            data={
+                "tested_surface_refs": [surface["id"]],
+                "verify_request": f"verify {result}",
+                "verify_requests": [{
+                    "claim": f"verify {result}",
+                    "surface_refs": [surface["id"]],
+                    "evidence_refs": [],
+                }],
+            },
+        )["fact"]
+        verify = create_intent(
+            http_client, project_id, surface=surface,
+            coverage_ids=[coverage[index]["id"]], action_kind="verify",
+            test_variant=variant, from_ids=[candidate["id"]],
+        )
+        claim_intent(http_client, project_id, verify["id"], worker="verifier")
+        conclude_intent(
+            http_client, project_id, verify["id"], worker="verifier",
+            description=f"Verify result: {result}", status=result,
+            verification_of=candidate["id"], parent_fact=candidate["id"],
+            kind="verification_result", data={"result": result, "attempts": []},
+            evidence_refs=[f"task_log:{result}"],
+            coverage_refs=[coverage[index]["id"]],
+        )
+
+    mapped = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"], "description": "Map health endpoint only.",
+            "creator": "reasoner", "action_kind": "surface_mapping",
+            "test_variant": "surface_mapping",
+        },
+    ).json()
+    claim_intent(http_client, project_id, mapped["id"])
+    mapped_fact = conclude_intent(
+        http_client, project_id, mapped["id"],
+        description="Mapped health endpoint without security testing.",
+    )["fact"]
+    create_surface(
+        http_client, project_id, fingerprint="surface-health", method="GET",
+        path="/health", params=[], traits={"static": True},
+        source_fact_id=mapped_fact["id"],
+    )
+
+    high_risk = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"],
+            "description": "Authorized disposable record deletion.",
+            "creator": "reasoner", "target": "example.test", "port": 443,
+            "path": "/test-records/42", "action_kind": "delete_test_record",
+            "risk_level": "high", "test_identity": "test-admin",
+            "test_data_refs": ["record:test-42"],
+        },
+    )
+    assert high_risk.status_code == 201
+    return project_id
+
+
+def test_web_report_separates_behavior_coverage_verify_and_retry(http_client):
+    project_id = _mixed_web_assessment_project(http_client)
+    report = http_client.get(f"/projects/{project_id}/export?format=report").text
+
+    assert "## Behavior Coverage" in report
+    assert "Required Coverage: 4" in report
+    assert "Completed Coverage: 2" in report
+    assert "## Retrying Coverage" in report
+    assert "## Reproduced Findings" in report
+    assert "## Not Reproduced Candidates" in report
+    assert "## Authorized High-Risk Tests" in report
+    assert "Mapped-only Surfaces tested: 0" in report
+    assert "dispatch deduplication key" in report
+    assert "target idempotency key" not in report

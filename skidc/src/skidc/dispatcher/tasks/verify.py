@@ -21,6 +21,7 @@ from skidc.dispatcher.tasks.common import (
     cancel_reason,
     did_timeout,
     format_worker_input,
+    prepare_android_bridge,
     preview,
     run_worker_process,
     save_task_log,
@@ -36,6 +37,20 @@ LOG = logging.getLogger(__name__)
 def is_verify_intent(intent: Intent) -> bool:
     action = str(intent.action_kind or "").strip().casefold().replace("-", "_")
     return action == "verify" or action.startswith("verify_") or action.startswith("verification")
+
+
+def _terminal_verify_result(
+    attempt_records: list[dict[str, object]],
+    required_negative_attempts: int,
+) -> str | None:
+    if any(record.get("result") == "reproduced" for record in attempt_records):
+        return "reproduced"
+    valid_negative_count = sum(
+        1 for record in attempt_records if record.get("result") == "not_reproduced"
+    )
+    if valid_negative_count >= required_negative_attempts:
+        return "not_reproduced"
+    return None
 
 
 def run_verify_task(
@@ -74,6 +89,18 @@ def run_verify_task(
     evidence_refs: list[str] = []
 
     try:
+        bridge_ready = prepare_android_bridge(
+            config, container_manager, container_name, worker,
+            lease=lease, cancellation=cancellation,
+        )
+        if bridge_ready is not None and bridge_ready.returncode != 0:
+            LOG.warning(
+                "Android Bridge unavailable project=%s intent=%s worker=%s",
+                project.project.id, intent.id, worker.name,
+            )
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "cancelled" if cancel_reason(bridge_ready, cancellation) else "dependency_unavailable"
+
         for attempt_number in range(1, config.tasks.verify.max_attempts + 1):
             if cancellation.is_cancelled:
                 best_effort_release(client, project.project.id, intent.id, worker.name)
@@ -165,7 +192,7 @@ def run_verify_task(
                 attempt_records.append(
                     {
                         "attempt": attempt_number,
-                        "result": "not_reproduced",
+                        "result": "runtime_failure",
                         "description": (
                             "worker timeout" if did_timeout(process)
                             else f"worker command failed with code {process.returncode}"
@@ -189,7 +216,7 @@ def run_verify_task(
                 attempt_records.append(
                     {
                         "attempt": attempt_number,
-                        "result": "not_reproduced",
+                        "result": "invalid_output",
                         "description": f"invalid Verify output: {exc}",
                     }
                 )
@@ -205,11 +232,17 @@ def run_verify_task(
                     "description": data["description"],
                 }
             )
-        reproduced_attempts = [
-            record for record in attempt_records if record["result"] == "reproduced"
-        ]
-        if reproduced_attempts:
-            final_result = "reproduced"
+        final_result = _terminal_verify_result(
+            attempt_records,
+            required_negative_attempts=config.tasks.verify.max_attempts,
+        )
+        if final_result is None:
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "failed"
+        if final_result == "reproduced":
+            reproduced_attempts = [
+                record for record in attempt_records if record["result"] == "reproduced"
+            ]
             last_description = str(reproduced_attempts[-1]["description"])
             description = (
                 f"The candidate security impact was reproduced in "
@@ -217,8 +250,10 @@ def run_verify_task(
                 f"independent attempts. Last successful observation: {last_description}"
             )
         else:
-            final_result = "not_reproduced"
-            last_description = str(attempt_records[-1]["description"])
+            negative_attempts = [
+                record for record in attempt_records if record["result"] == "not_reproduced"
+            ]
+            last_description = str(negative_attempts[-1]["description"])
             description = (
                 f"Three independent attempts did not reproduce the candidate finding. "
                 f"Last observation: {last_description}"
@@ -288,6 +323,7 @@ def _conclude_verify(
             "data": {"result": result, "attempts": attempts},
             "parent_fact_ids": list(intent.from_),
             "evidence_refs": evidence_refs,
+            "coverage_refs": list(intent.coverage_refs),
             "confidence": 1.0,
             "created_by": worker.name,
         },

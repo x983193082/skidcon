@@ -38,6 +38,7 @@ from skidc.dispatcher.tasks.common import (
     cancel_reason,
     did_timeout,
     format_worker_input,
+    prepare_android_bridge,
     preview,
     run_healthcheck,
     run_worker_process,
@@ -67,6 +68,9 @@ _WEB_REASON_PLANNING_RULES = '''# Web Planning Rules
 - A Fact with data.verify_request is an unverified candidate. It must receive a Verify Intent before Complete.
 - Treat a newly established CAPTCHA capability or authenticated/privileged session as a milestone. Create the next authenticated work from that Fact, reuse its saved authentication artifact, and prioritize mapping or testing the newly reachable authenticated Surfaces.
 - Do not fold CAPTCHA setup, login success, and unrelated authenticated-page testing into one Intent.
+- High-risk work is allowed only when action_kind, test_identity, and every test_data_ref exactly match the project destructive allow-list. Include risk_level=high or irreversible explicitly; never infer authorization from prose.
+- An Intent with requires_state_check=true must not be redispatched. First create one read-only action_kind=state_check Intent for the same target/path; it must return mutation_intent_id, observed_state, and non-empty evidence_refs.
+- work_key is a dispatch deduplication key only. It does not make the target operation idempotent.
 '''
 
 
@@ -114,6 +118,17 @@ def run_reason_task(
             return "success"
         container_name = container_manager.ensure_running(project.project.id)
 
+        bridge_ready = prepare_android_bridge(
+            config, container_manager, container_name, worker,
+            lease=lease, cancellation=cancellation,
+        )
+        if bridge_ready is not None and bridge_ready.returncode != 0:
+            LOG.warning(
+                "Android Bridge unavailable project=%s worker=%s",
+                project.project.id, worker.name,
+            )
+            return "cancelled" if cancel_reason(bridge_ready, cancellation) else "dependency_unavailable"
+
         if task_healthcheck_enabled(config):
             healthcheck = run_healthcheck(
                 container_manager,
@@ -141,6 +156,12 @@ def run_reason_task(
             if intent.to is None and intent.status == "open"
         ]
         allowed_fact_ids = [fact.id for fact in project.facts if fact.id != "goal"]
+        completion_fact_ids = [
+            fact.id for fact in project.facts
+            if fact.kind == "verification_result"
+            and fact.status == "reproduced"
+            and fact.verification_of
+        ]
         reason_max_intents = (
             min(2, config.tasks.reason.max_intents)
             if project.project.mode == "real_website"
@@ -171,6 +192,11 @@ def run_reason_task(
                     phase="reason_execute",
                 ),
                 "fact_ids": format_fact_ids(allowed_fact_ids),
+                "completion_fact_ids": (
+                    format_fact_ids(completion_fact_ids)
+                    if project.project.mode == "real_website"
+                    else "null"
+                ),
                 "open_intents": format_open_intents(open_intents),
                 "max_intents": str(reason_max_intents),
             },
@@ -326,14 +352,23 @@ def run_reason_task(
             )
             use_hypothesis_planner = (
                 project.project.mode == "real_website"
-                and project.project.planning_version == 2
+                and project.project.planning_version >= 2
                 and (project.project.phase == "explore" or recon_complete)
             )
-            intent_batch = [] if defer_to_baseline or use_hypothesis_planner else data
+            state_check_batch = [
+                item for item in data
+                if _clean_signature_text(item.get("action_kind")) == "state_check"
+            ]
+            intent_batch = (
+                [] if defer_to_baseline
+                else state_check_batch if use_hypothesis_planner
+                else data
+            )
             signatures = _existing_intent_signatures(project)
             for raw_intent_data in intent_batch:
                 intent_data = _bind_matching_surface(project, raw_intent_data)
-                intent_data = _bind_matching_coverage(project, intent_data)
+                if _clean_signature_text(intent_data.get("action_kind")) != "state_check":
+                    intent_data = _bind_matching_coverage(project, intent_data)
                 signature = _intent_signature_from_data(project, intent_data)
                 if signature in signatures:
                     LOG.info(
@@ -361,6 +396,9 @@ def run_reason_task(
                     priority=_optional_int(intent_data, "priority"),
                     suggested_tools=_optional_str_list(intent_data, "suggested_tools"),
                     coverage_refs=coverage_refs,
+                    risk_level=_optional_str(intent_data, "risk_level"),
+                    test_identity=_optional_str(intent_data, "test_identity"),
+                    test_data_refs=_optional_str_list(intent_data, "test_data_refs"),
                 )
                 if response.status_code == 403:
                     LOG.info("project became inactive during reason intent create project=%s worker=%s created=%s", project.project.id, worker.name, created)
@@ -450,7 +488,7 @@ def run_reason_task(
             return "success"
 
         LOG.info("reason finished without graph change project=%s worker=%s execute_ms=%s total_ms=%s", project.project.id, worker.name, execute_ms, total_ms)
-        if project.project.planning_version == 2 and project.project.phase == "explore":
+        if project.project.planning_version >= 2 and project.project.phase == "explore":
             created = ensure_coverage_work(client, client.get_project(project.project.id), worker.name)
             if created:
                 return "success"
@@ -784,6 +822,12 @@ def _profile_unprofiled_surfaces(
     for surface in project.surface_inventory:
         if surface.fingerprint in known or surface.traits.get("out_of_scope_support"):
             continue
+        evidence_refs = {
+            ref for ref in [surface.source_fact_id, *surface.evidence_fact_ids]
+            if ref and ref not in {"origin", "goal"}
+        }
+        if not evidence_refs:
+            continue
         items = build_web_coverage_profile(
             surface.model_dump(), source_fact_id=surface.source_fact_id
         )
@@ -881,7 +925,7 @@ def _create_agent_hypothesis_work(
     action_tokens = set(_clean_signature_text(action_kind).replace("-", "_").split("_"))
     destructive = (
         bool(action_tokens & _DESTRUCTIVE_ACTION_TOKENS)
-        or _clean_signature_text(data.get("risk_level")) == "destructive"
+        or _clean_signature_text(data.get("risk_level")) in {"destructive", "high", "irreversible"}
     )
     if destructive and not project.project.scope_policy.allow_destructive:
         LOG.warning("V3 destructive intent rejected project=%s action=%s", project.project.id, action_kind)
@@ -959,6 +1003,13 @@ def _create_agent_hypothesis_work(
             or _BASELINE_TOOLS.get(family, ["curl"])
         ),
     }
+    if destructive:
+        requested_risk = _clean_signature_text(data.get("risk_level"))
+        intent_payload["risk_level"] = (
+            "irreversible" if requested_risk == "irreversible" else "high"
+        )
+        intent_payload["test_identity"] = _optional_str(data, "test_identity")
+        intent_payload["test_data_refs"] = _optional_str_list(data, "test_data_refs") or []
     surface_ids = [
         item.id
         for item in project.surface_inventory
@@ -1493,11 +1544,6 @@ def ensure_coverage_work(
     project: ProjectDetail,
     worker_name: str,
 ) -> int:
-    if project.project.planning_version >= 3:
-        # planning_version=3 is retained for stored-project compatibility, but
-        # its runtime role is now limited to read-only Surface indexing. Reason
-        # is the only component allowed to create semantic work.
-        return 0
     if project.project.planning_version == 2:
         return _ensure_hypothesis_work(client, project, worker_name)
     project = _profile_unprofiled_surfaces(client, project, worker_name)
@@ -1557,6 +1603,23 @@ def ensure_coverage_work(
                 ),
                 None,
             )
+            if surface_ref is None:
+                LOG.warning(
+                    "required Coverage has no matching Surface project=%s coverage=%s fingerprint=%s",
+                    project.project.id,
+                    item.id,
+                    item.surface_fingerprint,
+                )
+                continue
+            surface = next(
+                entry for entry in project.surface_inventory if entry.id == surface_ref
+            )
+            evidence_refs = {
+                ref for ref in [surface.source_fact_id, *surface.evidence_fact_ids]
+                if ref and ref not in {"origin", "goal"}
+            }
+            if not evidence_refs:
+                continue
             response = client.create_intent(
                 project.project.id,
                 [source],
@@ -1567,7 +1630,8 @@ def ensure_coverage_work(
                 path=item.path,
                 surface_type=item.surface_class,
                 surface_ref=surface_ref,
-                action_kind=f"{item.test_family}_probe",
+                surface_refs=[surface_ref],
+                action_kind="security_test",
                 test_variant=variant,
                 priority=item.priority,
                 suggested_tools=_BASELINE_TOOLS.get(item.test_family, ["curl"]),
@@ -1621,13 +1685,6 @@ def _transition_to_explore_with_baseline(
         return -2
 
     refreshed = client.get_project(project.project.id)
-    if refreshed.project.planning_version >= 3:
-        LOG.info(
-            "phase transition project=%s from=recon to=explore without automatic work",
-            project.project.id,
-        )
-        return 0
-
     created = ensure_coverage_work(client, refreshed, worker_name)
     LOG.info(
         "phase transition project=%s from=recon to=explore baseline_intents=%s",

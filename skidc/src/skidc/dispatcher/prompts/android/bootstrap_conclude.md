@@ -15,7 +15,7 @@ Return only one raw JSON object. Output nothing else. The JSON must be valid.
 
 # Rules
 - `fact.description` must state confirmed, objective results only.
-- Include bridge evidence names when useful, such as current activity, visible screen text, or network request index.
+- Include bridge evidence names when useful, such as current activity, visible screen text, or network request event_id.
 - Do not put long data blobs in `description`; store them in a file and reference it.
 
 # Context

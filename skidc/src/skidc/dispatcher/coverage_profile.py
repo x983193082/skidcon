@@ -174,7 +174,13 @@ def normalize_surface_entry(
 
 
 def build_web_coverage_profile(surface: dict, *, source_fact_id: str | None = None, intent_id: str | None = None) -> list[dict]:
-    traits = surface.get("traits") or {}
+    surface = dict(surface)
+    traits = dict(surface.get("traits") or {})
+    if surface.get("params"):
+        traits.setdefault("has_input", True)
+    if str(surface.get("method") or "GET").upper() not in {"GET", "HEAD", "OPTIONS"}:
+        traits.setdefault("writes", True)
+    surface["traits"] = traits
     if traits.get("out_of_scope_support"):
         return []
     if traits.get("support_service"):
@@ -221,6 +227,14 @@ def build_profile_for_surfaces(surfaces: list[dict], *, source_fact_id: str | No
             previous["roles"] = sorted(set(previous["roles"]) | set(item["roles"]))
             previous["priority"] = max(previous["priority"], item["priority"])
     return list(items.values())
+
+
+def expected_required_coverage_specs(surfaces: list[dict]) -> list[dict]:
+    """Return the deterministic required Surface Coverage identities."""
+    return [
+        item for item in build_profile_for_surfaces(surfaces)
+        if item.get("required") and item.get("disposition") == "required"
+    ]
 
 
 def bind_profile_to_intent(items: list[dict], seed: dict, intent_id: str, *, limit: int = 1) -> list[dict]:

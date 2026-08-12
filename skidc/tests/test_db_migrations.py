@@ -175,6 +175,10 @@ def test_legacy_database_migrates_and_backfills_idempotently(tmp_path, monkeypat
         intent = migrated.execute("SELECT * FROM intents WHERE id = 'i001'").fetchone()
         assert intent["status"] == "concluded"
         assert intent["test_variant"] == "weak_credentials"
+        assert intent["risk_level"] == "standard"
+        assert json.loads(intent["test_data_refs"]) == []
+        assert intent["effect_state"] == "not_started"
+        assert intent["requires_state_check"] == 0
 
         coverage = migrated.execute("SELECT * FROM coverage_items WHERE id = 'cov001'").fetchone()
         assert coverage["test_family"] == "support_service"

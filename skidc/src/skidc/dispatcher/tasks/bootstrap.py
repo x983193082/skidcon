@@ -19,6 +19,7 @@ from skidc.dispatcher.tasks.common import (
     cancel_reason,
     did_timeout,
     format_worker_input,
+    prepare_android_bridge,
     project_allows_conclude_fallback,
     preview,
     run_healthcheck,
@@ -50,6 +51,18 @@ def run_bootstrap_task(
     lease.start()
     try:
         container_name = container_manager.ensure_running(project.project.id)
+
+        bridge_ready = prepare_android_bridge(
+            config, container_manager, container_name, worker,
+            lease=lease, cancellation=cancellation,
+        )
+        if bridge_ready is not None and bridge_ready.returncode != 0:
+            LOG.warning(
+                "Android Bridge unavailable project=%s intent=%s worker=%s",
+                project.project.id, intent.id, worker.name,
+            )
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "cancelled" if cancel_reason(bridge_ready, cancellation) else "dependency_unavailable"
 
         if task_healthcheck_enabled(config):
             healthcheck = run_healthcheck(
@@ -173,6 +186,18 @@ def _try_conclude_fallback(
         return "failed"
 
     container_name = container_manager.ensure_running(project.project.id)
+
+    bridge_ready = prepare_android_bridge(
+        config, container_manager, container_name, worker,
+        lease=lease, cancellation=cancellation,
+    )
+    if bridge_ready is not None and bridge_ready.returncode != 0:
+        LOG.warning(
+            "Android Bridge unavailable before bootstrap conclusion project=%s intent=%s worker=%s",
+            project.project.id, intent.id, worker.name,
+        )
+        best_effort_release(client, project.project.id, intent.id, worker.name)
+        return "cancelled" if cancel_reason(bridge_ready, cancellation) else "dependency_unavailable"
 
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "bootstrap_conclude.md"),

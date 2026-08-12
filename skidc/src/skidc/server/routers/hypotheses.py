@@ -32,6 +32,7 @@ from skidc.server.services import (
     validate_facts_exist,
     validate_goal_not_in_sources,
     validate_intent_creator_worker,
+    validate_high_risk_intent_authorization,
     validate_intent_scope,
 )
 
@@ -147,6 +148,15 @@ def materialize_hypothesis_work(
             path=intent.path,
             action_kind=intent.action_kind,
         )
+        if project.mode == "real_website":
+            validate_high_risk_intent_authorization(
+                project.scope_policy,
+                action_kind=intent.action_kind,
+                path=intent.path,
+                risk_level=intent.risk_level,
+                test_identity=intent.test_identity,
+                test_data_refs=intent.test_data_refs,
+            )
         if set(intent.from_) != set(hypothesis.trigger_fact_ids):
             raise HTTPException(409, "Intent and Hypothesis must use the same Fact basis")
         if intent.coverage_refs or intent.hypothesis_id:
@@ -350,9 +360,10 @@ def materialize_hypothesis_work(
                     id, project_id, to_fact_id, description, creator, worker,
                     last_heartbeat_at, created_at, concluded_at, target, port, path,
                     surface_type, surface_ref, action_kind, test_variant, priority, suggested_tools,
-                    status, work_key, hypothesis_id
+                    status, work_key, hypothesis_id, risk_level, test_identity,
+                    test_data_refs
                 ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          'open', ?, ?)""",
+                          'open', ?, ?, ?, ?, ?)""",
                 (
                     intent_id,
                     project_id,
@@ -372,6 +383,9 @@ def materialize_hypothesis_work(
                     json.dumps(intent.suggested_tools),
                     work_key,
                     hypothesis_id,
+                    intent.risk_level,
+                    intent.test_identity,
+                    json.dumps(intent.test_data_refs, ensure_ascii=False),
                 ),
             )
             for fact_id in intent.from_:

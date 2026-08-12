@@ -21,7 +21,7 @@ Normal return:
 
 # Rules
 - `description` must be an objective conclusion. A negative result is still valid.
-- Include concise evidence such as current activity, visible UI text, account used, or network request index if already observed.
+- Include concise evidence such as current activity, visible UI text, account used, or network request event_id if already observed.
 - Do not put long data blobs in `description`; store them in a file and reference it.
 
 # Context

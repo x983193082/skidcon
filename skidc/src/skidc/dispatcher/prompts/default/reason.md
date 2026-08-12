@@ -36,7 +36,7 @@ No new work:
 - Surface records are indexes, not vulnerability evidence.
 - `index_status=indexed` means only that the Behavior is present in the inventory; it never means tested.
 - Every Behavior shown in `behaviors` is an open critical/high-priority frontier item. Do not complete while `behavior_coverage.open` is greater than zero.
-- A Behavior closes only after a concluded `security_test` Fact explicitly records one of its assigned Surface ids in `tested_surface_refs`. Tested items leave the frontier and the next batch is shown automatically.
+- A high-value Behavior closes only when every applicable required Coverage row for all of its Surfaces has terminal evidence (`vulnerable`, `not_vulnerable`, or `not_applicable`). An explicit `tested_surface_refs` entry is test evidence, but never closes missing or unfinished Coverage by itself.
 - Do not create one Intent per URL mechanically and do not combine unrelated security mechanisms.
 - Stay within Scope constraints.
 
