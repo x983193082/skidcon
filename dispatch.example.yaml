@@ -27,9 +27,22 @@ runtime:
   worker_healthcheck: "startup_only"
   # Prompt set loaded from skidc/dispatcher/prompts/<group>/.
   prompt_group: "default"
+  # Android targets selected in the UI use the Android prompt set. Domain, IP,
+  # API, mixed, CTF, and real-website Web projects keep the default prompt set.
+  target_prompt_groups:
+    android: "android"
   server_timeout: 15
   dispatch_view_timeout: 15
   project_detail_timeout: 60
+
+# Used only after a project is resolved as an Android target. The bearer token
+# remains a Docker secret mounted into the Dispatcher and is copied into the
+# project worker as a mode-0600 file immediately before each Android task.
+android_bridge:
+  url: "http://127.0.0.1:8765"
+  token_file: "/run/secrets/android_mcp_token"
+  worker_token_file: "/run/skidc/android-mcp-token"
+  readiness_timeout: 15
 
 tasks:
   bootstrap:

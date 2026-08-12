@@ -11,8 +11,13 @@
 
 server: "http://127.0.0.1:8000"
 
-common_env:
-  ANDROID_MCP_URL: "http://127.0.0.1:8765"
+common_env: {}
+
+android_bridge:
+  url: "http://127.0.0.1:8765"
+  token_file: "/run/secrets/android_mcp_token"
+  worker_token_file: "/run/skidc/android-mcp-token"
+  readiness_timeout: 15
 
 runtime:
   interval: 3
@@ -21,7 +26,9 @@ runtime:
   max_project_workers: 2
   healthcheck_timeout: 20
   worker_healthcheck: "startup_only"
-  prompt_group: "android"
+  prompt_group: "default"
+  target_prompt_groups:
+    android: "android"
   server_timeout: 15
   dispatch_view_timeout: 15
   project_detail_timeout: 60
@@ -45,7 +52,7 @@ container:
 workers:
   - name: "android_codex_qwen"
     type: "codex"
-    task_types: [bootstrap, reason, explore]
+    task_types: [bootstrap, reason, verify, explore]
     max_running: 1
     priority: 0
     env:

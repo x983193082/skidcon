@@ -20,6 +20,15 @@ from skidc.dispatcher.tasks.reason import (
 )
 from skidc.server.db import get_conn
 from tests.conftest import InProcessClient
+from tests.support.web_assessment import (
+    claim_intent,
+    claim_reason,
+    conclude_intent,
+    create_intent,
+    create_real_web_project,
+    create_required_coverage,
+    create_surface,
+)
 
 def _claim_reason(http: TestClient, project_id: str, worker: str = "reasoner") -> None:
     response = http.post(
@@ -27,6 +36,145 @@ def _claim_reason(http: TestClient, project_id: str, worker: str = "reasoner") -
         json={"worker": worker, "trigger": "test completion"},
     )
     assert response.status_code == 200
+
+
+def test_web_conclusion_without_explicit_tested_refs_does_not_test_surface(http_client):
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(http_client, project_id)
+    coverage = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="identity_auth",
+        variant="authentication_flow",
+    )
+    intent = create_intent(
+        http_client,
+        project_id,
+        surface=surface,
+        coverage_ids=[coverage["id"]],
+    )
+    claim_intent(http_client, project_id, intent["id"])
+    concluded = conclude_intent(
+        http_client,
+        project_id,
+        intent["id"],
+        description="CAPTCHA prerequisite confirmed; testing is incomplete.",
+    )
+    assert "tested_surface_refs" not in concluded["fact"]["data"]
+    current = http_client.get(f"/projects/{project_id}/surfaces").json()[0]
+    assert current["graph_testing_status"] == "not_tested"
+
+
+def test_important_behavior_requires_every_required_surface_coverage(http_client):
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(
+        http_client,
+        project_id,
+        fingerprint="surface-session",
+        method="GET",
+        path="/session",
+        params=[],
+        surface_type="route",
+        traits={"auth": True},
+    )
+    first = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="identity_auth",
+        variant="authentication_flow",
+    )
+    second = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="session_csrf",
+        variant="csrf_state_change",
+    )
+    intent = create_intent(
+        http_client,
+        project_id,
+        surface=surface,
+        coverage_ids=[first["id"]],
+        test_variant="authentication_flow",
+    )
+    claim_intent(http_client, project_id, intent["id"])
+    conclude_intent(
+        http_client,
+        project_id,
+        intent["id"],
+        description="Authentication checks produced a clean negative result.",
+        data={"tested_surface_refs": [surface["id"]]},
+    )
+    claim_reason(http_client, project_id)
+    response = http_client.post(
+        f"/projects/{project_id}/complete",
+        json={"from": [], "description": "premature", "worker": "reasoner"},
+    )
+    assert response.status_code == 409
+    blockers = response.json()["detail"]["blockers"]
+    assert [item["ref"] for item in blockers if item["kind"] == "coverage"] == [
+        second["id"]
+    ]
+
+
+def test_high_value_behavior_with_missing_profile_is_blocked(http_client):
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(
+        http_client,
+        project_id,
+        fingerprint="surface-session",
+        method="GET",
+        path="/session",
+        params=[],
+        surface_type="route",
+        traits={"auth": True},
+    )
+    blockers = http_client.get(
+        f"/projects/{project_id}?view=full"
+    ).json()["project"]["completion_blockers"]
+    assert any(
+        item["kind"] == "coverage"
+        and item["status"] == "profile_missing"
+        and surface["id"] in item["related_refs"]
+        for item in blockers
+    )
+
+
+def test_informational_does_not_complete_required_surface_coverage(http_client):
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(
+        http_client,
+        project_id,
+        fingerprint="surface-session",
+        method="GET",
+        path="/session",
+        params=[],
+        surface_type="route",
+        traits={"auth": True},
+    )
+    coverage = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="identity_auth",
+        variant="authentication_flow",
+    )
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE surface_inventory SET planning_status='assessed' "
+            "WHERE project_id=? AND id=?",
+            (project_id, surface["id"]),
+        )
+        conn.execute(
+            "UPDATE coverage_items SET execution_status='completed', outcome='informational' "
+            "WHERE project_id=? AND id=?",
+            (project_id, coverage["id"]),
+        )
+    current = http_client.get(f"/projects/{project_id}/surfaces").json()[0]
+    assert current["completed_coverage_count"] == 0
+    assert current["test_status"] != "completed"
 
 
 
@@ -128,7 +276,7 @@ def test_recon_reason_drops_model_supplied_coverage_category(http_client: TestCl
     assert "coverage_refs" not in sanitized
 
 
-def test_v2_planner_records_limitations_without_blocking_completion(
+def test_v2_planner_keeps_failed_required_work_retryable_and_blocks_completion(
     http_client: TestClient,
 ) -> None:
     project_id = _create_real_project(http_client)
@@ -174,20 +322,22 @@ def test_v2_planner_records_limitations_without_blocking_completion(
             json={"worker": "worker", "error": "bounded execution failed", "max_attempts": 1},
         )
         assert failed.status_code == 200
-        assert failed.json()["status"] == "concluded"
-        assert failed.json()["to"] is not None
+        assert failed.json()["status"] == "open"
+        assert failed.json()["to"] is None
+        assert failed.json()["dead_lettered_at"] is None
     failed_intent = planned.intents[0]
 
     detail = client.get_project(project_id)
     failed_hypothesis = next(
         item for item in detail.hypotheses if item.id == failed_intent.hypothesis_id
     )
-    assert failed_hypothesis.status == "inconclusive"
+    assert failed_hypothesis.status == "planned"
     assert client.claim_reason(project_id, "reasoner", "bounded work exhausted").ok
     completed = client.complete(
-        project_id, [], "bounded failures remain limitations, not completion blockers", "reasoner",
+        project_id, [], "required work has not produced evidence", "reasoner",
     )
-    assert completed.ok
+    assert not completed.ok
+    assert completed.status_code == 409
 
 
 def test_work_identity_deduplicates_primary_but_allows_explicit_verification(
@@ -317,11 +467,11 @@ def test_v3_pending_function_gets_one_mapping_intent_and_result_fact(
         },
     )
     assert failed.status_code == 200
-    assert failed.json()["status"] == "concluded"
+    assert failed.json()["status"] == "open"
     detail = client.get_project(project_id)
-    assert failed.json()["to"] is not None
-    assert failed.json()["dead_lettered_at"] is not None
-    assert len(detail.facts) == 3
+    assert failed.json()["to"] is None
+    assert failed.json()["dead_lettered_at"] is None
+    assert len(detail.facts) == 2
 
 def test_v3_ignores_legacy_surface_and_coverage_without_fact_evidence(
     http_client: TestClient,
@@ -484,7 +634,7 @@ def test_function_mapping_is_informational_not_a_security_finding(
     detail = http_client.get(f"/projects/{project_id}").json()
     coverage = next(item for item in detail["coverage_items"] if item["id"] == coverage_id)
     assert coverage["outcome"] == "informational"
-    assert coverage["variant_results"][0]["status"] == "untested"
+    assert coverage["variant_results"][0]["status"] == "informational"
 
     historical = http_client.post(
         f"/projects/{project_id}/facts",
@@ -710,7 +860,7 @@ def test_v3_dispatch_graph_uses_compact_behavior_view(
     }
 
 
-def test_v3_behavior_frontier_rolls_after_explicit_security_test(
+def test_v3_behavior_frontier_does_not_close_without_required_coverage_profile(
     http_client: TestClient,
 ) -> None:
     project_id = _create_real_project(http_client, planning_version=3)
@@ -786,16 +936,22 @@ def test_v3_behavior_frontier_rolls_after_explicit_security_test(
     assert concluded.status_code == 200
 
     second = json.loads(format_dispatch_graph(client.get_project(project_id)))
-    assert second["behavior_coverage"]["closed"] == 1
-    assert second["behavior_coverage"]["open"] == 44
+    assert second["behavior_coverage"]["closed"] == 0
+    assert second["behavior_coverage"]["open"] == 45
     assert second["behavior_coverage"]["frontier_count"] == 40
-    assert tested_behavior["behavior_key"] not in {
+    assert tested_behavior["behavior_key"] in {
         item["behavior_key"] for item in second["behaviors"]
     }
-    assert second["behavior_coverage"]["frontier_revision"] != first["behavior_coverage"]["frontier_revision"]
+    current = next(
+        item for item in second["behaviors"]
+        if item["behavior_key"] == tested_behavior["behavior_key"]
+    )
+    assert current["profile_missing"] is True
+    assert current["required_coverage_count"] == 0
+    assert second["behavior_coverage"]["frontier_revision"] == first["behavior_coverage"]["frontier_revision"]
 
 
-def test_v3_completion_requires_explicit_important_behavior_test(
+def test_v3_completion_requires_materialized_behavior_coverage(
     http_client: TestClient,
 ) -> None:
     project_id = _create_real_project(http_client, planning_version=3)
@@ -825,41 +981,13 @@ def test_v3_completion_requires_explicit_important_behavior_test(
         json={"from": [], "description": "done", "worker": "reasoner"},
     )
     assert blocked.status_code == 409
-    behavior_blockers = [
+    coverage_blockers = [
         item for item in blocked.json()["detail"]["blockers"]
-        if item["kind"] == "behavior"
+        if item["kind"] == "coverage"
     ]
-    assert len(behavior_blockers) == 1
-    assert behavior_blockers[0]["status"] == "open"
-
-    intent = http_client.post(
-        f"/projects/{project_id}/intents",
-        json={
-            "from": [evidence_fact_id],
-            "description": "test admin settings authorization and input handling",
-            "creator": "reasoner",
-            "action_kind": "security_test",
-            "surface_refs": [surface["id"]],
-        },
-    ).json()
-    assert http_client.post(
-        f"/projects/{project_id}/intents/{intent['id']}/heartbeat",
-        json={"worker": "tester"},
-    ).status_code == 200
-    assert http_client.post(
-        f"/projects/{project_id}/intents/{intent['id']}/conclude",
-        json={
-            "worker": "tester",
-            "description": "The assigned settings Behavior was tested.",
-            "data": {"tested_surface_refs": [surface["id"]]},
-        },
-    ).status_code == 200
-
-    completed = http_client.post(
-        f"/projects/{project_id}/complete",
-        json={"from": [], "description": "important Behaviors closed", "worker": "reasoner"},
-    )
-    assert completed.status_code == 200
+    assert coverage_blockers
+    assert all(item["status"] == "profile_missing" for item in coverage_blockers)
+    assert all(surface["id"] in item["related_refs"] for item in coverage_blockers)
 
 
 def test_v3_web_dispatch_graph_keeps_complete_fact_description(
@@ -932,13 +1060,27 @@ def test_web_fact_keeps_its_execution_log_as_traceable_evidence(
     http_client: TestClient,
 ) -> None:
     project_id = _create_real_project(http_client)
+    surface = http_client.post(
+        f'/projects/{project_id}/surfaces',
+        json={
+            'fingerprint': 'traceable-login',
+            'surface_group': 'traceable login',
+            'target': 'example.test',
+            'port': 443,
+            'method': 'POST',
+            'path_template': '/login',
+            'surface_type': 'form',
+            'source_fact_id': 'origin',
+        },
+    ).json()
     intent = http_client.post(
         f'/projects/{project_id}/intents',
         json={
             'from': ['origin'],
             'description': 'test one authentication outcome',
             'creator': 'reasoner',
-            'action_kind': 'auth_probe',
+            'action_kind': 'security_test',
+            'surface_ref': surface['id'],
         },
     ).json()
     intent_id = intent['id']
@@ -969,7 +1111,11 @@ def test_web_fact_keeps_its_execution_log_as_traceable_evidence(
     )
     concluded = http_client.post(
         f'/projects/{project_id}/intents/{intent_id}/conclude',
-        json={'worker': 'explorer', 'description': description},
+        json={
+            'worker': 'explorer',
+            'description': description,
+            'data': {'tested_surface_refs': [surface['id']]},
+        },
     )
     assert concluded.status_code == 200
     fact = concluded.json()['fact']
@@ -1140,6 +1286,7 @@ def test_surface_graph_state_uses_exact_surface_ref_across_api_ui_and_report(
         json={
             'worker': 'explorer',
             'description': 'The login form authentication behavior was tested.',
+            'data': {'tested_surface_refs': [surface_ids['/login']]},
         },
     )
     assert tested.status_code == 200
@@ -1175,8 +1322,10 @@ def test_surface_graph_state_uses_exact_surface_ref_across_api_ui_and_report(
     ) in report
 
     index = http_client.get('/').text
-    assert 'surface.graph_discovery_status' in index
-    assert 'surface.graph_testing_status' in index
+    assert 'surface.required_coverage_count' in index
+    assert 'surface.completed_coverage_count' in index
+    assert 'surface.test_status' in index
+    assert 'surface.graph_testing_status' not in index
     assert 'factIds.includes(intent.to)' not in index
 
     with get_conn() as conn:
@@ -1466,3 +1615,167 @@ def test_destructive_intent_requires_explicit_scope_authorization(http_client: T
 
     assert response.status_code == 400
     assert "destructive" in response.json()["detail"]
+
+
+def _create_authorized_mutation_project(http_client: TestClient) -> str:
+    response = http_client.post(
+        "/projects",
+        json={
+            "title": "authorized mutation state check",
+            "origin": "https://example.test/",
+            "goal": "assess authorized disposable test data",
+            "mode": "real_website",
+            "bootstrap_enabled": False,
+            "scope_policy": {
+                "allowed_targets": ["example.test"],
+                "allowed_ports": [443],
+                "allow_destructive": True,
+                "destructive_action_kinds": ["delete_test_record"],
+                "destructive_test_identities": ["test-admin"],
+                "destructive_test_data_refs": ["record:test-42"],
+                "destructive_forbidden_assets": ["/production/billing"],
+                "destructive_state_check_required": True,
+                "destructive_recovery_procedure_ref": "runbook:test-data-restore",
+            },
+            "recon_profile": {"required_categories": []},
+        },
+    )
+    assert response.status_code == 201
+    project_id = response.json()["project"]["id"]
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE projects SET planning_version = 3, phase = 'explore' WHERE id = ?",
+            (project_id,),
+        )
+    return project_id
+
+
+def _create_high_risk_intent(
+    http_client: TestClient,
+    project_id: str,
+    **overrides,
+) -> object:
+    payload = {
+        "from": ["origin"],
+        "description": "Delete the authorized disposable test record once.",
+        "creator": "reasoner",
+        "target": "example.test",
+        "port": 443,
+        "path": "/test-records/42",
+        "action_kind": "delete_test_record",
+        "test_variant": "workflow_invariant",
+        "risk_level": "high",
+        "test_identity": "test-admin",
+        "test_data_refs": ["record:test-42"],
+    }
+    payload.update(overrides)
+    return http_client.post(f"/projects/{project_id}/intents", json=payload)
+
+
+def test_high_risk_intent_requires_exact_allow_list_authorization(http_client: TestClient) -> None:
+    project_id = _create_authorized_mutation_project(http_client)
+
+    allowed = _create_high_risk_intent(http_client, project_id)
+    assert allowed.status_code == 201
+    assert allowed.json()["risk_level"] == "high"
+    assert allowed.json()["test_data_refs"] == ["record:test-42"]
+
+    wrong_action = _create_high_risk_intent(
+        http_client, project_id, action_kind="drop_database",
+    )
+    assert wrong_action.status_code == 400
+    wrong_identity = _create_high_risk_intent(
+        http_client, project_id, test_identity="production-admin",
+    )
+    assert wrong_identity.status_code == 400
+    missing_data = _create_high_risk_intent(
+        http_client, project_id, test_data_refs=[],
+    )
+    assert missing_data.status_code == 400
+    forbidden = _create_high_risk_intent(
+        http_client, project_id, path="/production/billing/invoices",
+    )
+    assert forbidden.status_code == 400
+
+    with get_conn() as conn:
+        policy = json.loads(
+            conn.execute(
+                "SELECT scope_policy FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()["scope_policy"]
+        )
+        policy["destructive_action_kinds"] = []
+        conn.execute(
+            "UPDATE projects SET scope_policy = ? WHERE id = ?",
+            (json.dumps(policy), project_id),
+        )
+    revoked_claim = http_client.post(
+        f"/projects/{project_id}/intents/{allowed.json()['id']}/heartbeat",
+        json={"worker": "executor"},
+    )
+    assert revoked_claim.status_code == 400
+
+
+def test_uncertain_mutation_is_gated_until_structured_state_check(http_client: TestClient) -> None:
+    project_id = _create_authorized_mutation_project(http_client)
+    mutation_response = _create_high_risk_intent(http_client, project_id)
+    assert mutation_response.status_code == 201
+    mutation = mutation_response.json()
+    claim_intent(http_client, project_id, mutation["id"])
+
+    failed = http_client.post(
+        f"/projects/{project_id}/intents/{mutation['id']}/failure",
+        json={
+            "worker": "executor",
+            "error": "connection lost after submit",
+            "max_attempts": 3,
+            "backoff_seconds": 0,
+        },
+    )
+    assert failed.status_code == 200
+    assert failed.json()["effect_state"] == "unknown"
+    assert failed.json()["requires_state_check"] is True
+
+    gated = http_client.post(
+        f"/projects/{project_id}/intents/{mutation['id']}/heartbeat",
+        json={"worker": "executor"},
+    )
+    assert gated.status_code == 409
+
+    state_check_response = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": ["origin"],
+            "description": f"Read target state for uncertain mutation {mutation['id']}.",
+            "creator": "reasoner",
+            "target": mutation["target"],
+            "port": mutation["port"],
+            "path": mutation["path"],
+            "action_kind": "state_check",
+            "test_variant": "read_after_uncertain_mutation",
+            "risk_level": "standard",
+        },
+    )
+    assert state_check_response.status_code == 201
+    state_check = state_check_response.json()
+    claim_intent(http_client, project_id, state_check["id"], worker="observer")
+    checked = conclude_intent(
+        http_client,
+        project_id,
+        state_check["id"],
+        worker="observer",
+        description="The disposable test record still exists.",
+        data={
+            "state_check": {
+                "mutation_intent_id": mutation["id"],
+                "observed_state": "not_applied",
+                "evidence_refs": ["task_log:state-check-1"],
+            }
+        },
+    )
+    assert checked["fact"]["data"]["state_check"]["observed_state"] == "not_applied"
+
+    reclaimed = http_client.post(
+        f"/projects/{project_id}/intents/{mutation['id']}/heartbeat",
+        json={"worker": "executor"},
+    )
+    assert reclaimed.status_code == 200

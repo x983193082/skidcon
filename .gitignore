@@ -43,7 +43,11 @@ CLAUDE.md
 .codegraph/
 .codex/
 
+# Local Git worktrees
+/.worktrees/
+
 # Local implementation plans and remediation notes
 /plans/
+/docs/superpowers/
 *_PLAN.md
 *_REMEDIATION.md

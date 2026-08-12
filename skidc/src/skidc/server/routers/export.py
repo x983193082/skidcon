@@ -4,7 +4,11 @@ from datetime import datetime
 import json
 import yaml
 
-from skidc.planning import is_surface_mapping_intent
+from skidc.planning import (
+    behavior_identity,
+    behavior_importance,
+    is_surface_mapping_intent,
+)
 from skidc.server.db import get_conn
 from skidc.server.services import (
     build_completed_attack_paths,
@@ -14,6 +18,7 @@ from skidc.server.services import (
     assessment_limitations,
     fact_to_model,
     get_project_or_404,
+    surface_inventory_to_model,
 )
 
 router = APIRouter(tags=["export"])
@@ -274,6 +279,122 @@ def _web_intent_is_mapping(intent) -> bool:
     )
 
 
+_TERMINAL_WEB_COVERAGE_OUTCOMES = {
+    "vulnerable", "not_vulnerable", "not_applicable",
+}
+
+
+def _format_behavior_coverage(surfaces, coverage_models: dict) -> list[str]:
+    """Group normalized Surface Coverage by Behavior with evidence-only counts."""
+    groups: dict[str, dict] = {}
+    for surface in surfaces:
+        behavior_key = surface.behavior_key or behavior_identity(surface)[0]
+        importance = behavior_importance(surface)
+        if importance not in {"critical", "high"}:
+            continue
+        group = groups.setdefault(
+            behavior_key,
+            {"surface": surface, "importance": importance, "coverage": []},
+        )
+        group["coverage"].extend(
+            item for item in coverage_models.values()
+            if item.surface_fingerprint == surface.fingerprint
+            and item.required
+            and item.disposition == "required"
+            and item.applicability_status != "not_applicable"
+        )
+
+    required_total = 0
+    completed_total = 0
+    lines: list[str] = []
+    for behavior_key, group in sorted(groups.items()):
+        surface = group["surface"]
+        coverage = list({item.id: item for item in group["coverage"]}.values())
+        completed = [
+            item for item in coverage
+            if item.execution_status == "completed"
+            and item.outcome in _TERMINAL_WEB_COVERAGE_OUTCOMES
+        ]
+        retrying = [
+            item for item in coverage
+            if item.execution_status in {"queued", "testing", "blocked"}
+        ]
+        remaining = [item.id for item in coverage if item not in completed]
+        required_total += len(coverage)
+        completed_total += len(completed)
+        endpoint = " ".join(
+            value for value in (surface.method, surface.path_template or surface.target)
+            if value
+        ) or surface.surface_group
+        lines.extend([
+            f"### {endpoint}", "",
+            f"- Behavior: {behavior_key}",
+            f"- Importance: {group['importance']}",
+            f"- Auth context: {surface.auth_context}",
+            f"- Required Coverage: {len(coverage)}",
+            f"- Completed Coverage: {len(completed)}",
+            f"- Retrying Coverage: {len(retrying)}",
+            f"- Remaining Coverage IDs: {_inline_list(remaining)}",
+            "",
+        ])
+    summary = [
+        f"- Required Coverage: {required_total}",
+        f"- Completed Coverage: {completed_total}",
+    ]
+    if not lines:
+        lines.append("No high-value Behavior Coverage was recorded.")
+    return [*summary, "", *lines]
+
+
+def _format_authorized_high_risk_tests(intents, facts, scope_policy: dict) -> list[str]:
+    high_risk = [
+        intent for intent in intents
+        if str(_row_get(intent, "risk_level") or "standard") in {"high", "irreversible"}
+    ]
+    if not high_risk:
+        return ["No authorized high-risk Intent was recorded."]
+    state_checks: dict[str, list[dict]] = {}
+    for fact in facts:
+        payload = _json_object(_row_get(fact, "data"))
+        check = payload.get("state_check")
+        if isinstance(check, dict) and check.get("mutation_intent_id"):
+            state_checks.setdefault(str(check["mutation_intent_id"]), []).append({
+                "observed_state": check.get("observed_state"),
+                "evidence_refs": check.get("evidence_refs") or [],
+            })
+    allowed_actions = {
+        str(value).strip().casefold().replace("-", "_")
+        for value in (scope_policy.get("destructive_action_kinds") or [])
+    }
+    allowed_identities = set(scope_policy.get("destructive_test_identities") or [])
+    allowed_data = set(scope_policy.get("destructive_test_data_refs") or [])
+    lines: list[str] = []
+    for intent in high_risk:
+        data_refs = _json_list(_row_get(intent, "test_data_refs"))
+        action = str(_row_get(intent, "action_kind") or "")
+        normalized_action = action.strip().casefold().replace("-", "_")
+        identity = str(_row_get(intent, "test_identity") or "")
+        authorized = (
+            normalized_action in allowed_actions
+            and identity in allowed_identities
+            and bool(data_refs)
+            and set(data_refs).issubset(allowed_data)
+        )
+        checks = state_checks.get(str(intent["id"]), [])
+        lines.extend([
+            f"### {intent['id']}", "",
+            f"- Action kind: {action or '-'}",
+            f"- Authorization summary: exact_allow_list={'yes' if authorized else 'no'}; test_data_refs={len(data_refs)}",
+            f"- dispatch deduplication key: {_row_get(intent, 'work_key') or '-'}",
+            f"- Effect state: {_row_get(intent, 'effect_state') or 'not_started'}",
+            f"- Requires state check: {bool(_row_get(intent, 'requires_state_check') or 0)}",
+            f"- State-check result: {_inline_list([str(item.get('observed_state') or 'unknown') for item in checks])}",
+            f"- Evidence refs: {_inline_list([str(ref) for item in checks for ref in item['evidence_refs']])}",
+            "",
+        ])
+    return lines
+
+
 def _export_timeline(conn, project_id: str) -> str:
     proj, facts, hints, intents, sources_by_intent, _attack_paths = _load_project_data(conn, project_id)
 
@@ -337,6 +458,7 @@ def _export_web_fact_graph_report(
         for item in build_coverage_items(conn, project_id, coverage_items)
     }
     surfaces = _load_surface_inventory(conn, project_id)
+    surface_models = [surface_inventory_to_model(surface, conn) for surface in surfaces]
     producers_by_fact: dict[str, list] = {}
     for intent in intents:
         if intent["to_fact_id"]:
@@ -449,7 +571,48 @@ def _export_web_fact_graph_report(
     else:
         report.append("No hypotheses were recorded.")
 
-    report.extend(["", "## Test Results", "", "## Independently Reproduced Security Findings", ""])
+    report.extend(["", "## Behavior Coverage", ""])
+    report.extend(_format_behavior_coverage(surface_models, coverage_models))
+    tested_surface_ids = {
+        str(surface_id)
+        for fact in execution_facts
+        for surface_id in (_json_object(_row_get(fact, "data")).get("tested_surface_refs") or [])
+        if isinstance(surface_id, str)
+    }
+    required_fingerprints = {
+        item.surface_fingerprint for item in coverage_models.values()
+        if item.required and item.disposition == "required" and item.surface_fingerprint
+    }
+    mapped_only_ids = {
+        surface.id for surface in surface_models
+        if surface.fingerprint not in required_fingerprints
+    }
+    report.append(
+        f"- Mapped-only Surfaces tested: {len(mapped_only_ids & tested_surface_ids)}"
+    )
+
+    intent_by_id = {str(item["id"]): item for item in intents}
+    retrying_coverage = [
+        item for item in coverage_models.values()
+        if item.execution_status in {"queued", "testing", "blocked"}
+        or any(
+            (_row_get(intent_by_id.get(intent_id), "attempt_count") or 0) > 0
+            and _row_get(intent_by_id.get(intent_id), "status") == "open"
+            for intent_id in item.intent_ids
+            if intent_id in intent_by_id
+        )
+    ]
+    report.extend(["", "## Retrying Coverage", ""])
+    if retrying_coverage:
+        for item in retrying_coverage:
+            report.append(
+                f"- {item.id}: execution_status={item.execution_status}; "
+                f"outcome={item.outcome or '-'}; intents={_inline_list(item.intent_ids)}"
+            )
+    else:
+        report.append("No Coverage is currently retrying.")
+
+    report.extend(["", "## Test Results", "", "## Reproduced Findings", ""])
     if reproduced_findings:
         for fact in reproduced_findings:
             title = str(fact["summary"] or fact["description"] or fact["id"]).splitlines()[0]
@@ -465,7 +628,7 @@ def _export_web_fact_graph_report(
     else:
         report.append("No reproduced Verification Fact was recorded.")
 
-    report.extend(["", "## Executed Tests Without Reproduction", ""])
+    report.extend(["", "## Not Reproduced Candidates", ""])
     if not_reproduced:
         for fact in not_reproduced:
             producer_ids = [item["id"] for item in producers_by_fact.get(fact["id"], [])]
@@ -510,7 +673,7 @@ def _export_web_fact_graph_report(
     else:
         report.append("No mapping or recon Facts were recorded.")
 
-    report.extend(["", "## Surface Coverage", ""])
+    report.extend(["", "## Surface Mapping Audit", ""])
     if surface_states:
         for surface, graph_state, fact_ids in surface_states:
             endpoint = " ".join(
@@ -523,6 +686,9 @@ def _export_web_fact_graph_report(
             )
     else:
         report.append("No Surface records were recorded.")
+
+    report.extend(["", "## Authorized High-Risk Tests", ""])
+    report.extend(_format_authorized_high_risk_tests(intents, facts, scope_policy))
 
     report.extend(["", "## Untested And Limited Items", ""])
     untested_surfaces = [
@@ -549,7 +715,7 @@ def _export_web_fact_graph_report(
         report.append(
             "Structured recon is in progress. This phase gate is graph progress, not a list of security findings."
         )
-    report.append("Coverage, Surface, and Hypothesis records are audit context and do not create attack paths or block completion.")
+    report.append("Coverage, Surface, and Hypothesis records are audit context; required non-terminal Behavior Coverage blocks completion.")
     visible_limitations = [
         item for item in limitations
         if not (proj["status"] == "active" and (_row_get(proj, "phase") or "explore") == "recon" and item.kind == "reason" and item.ref == "project-phase")
@@ -910,7 +1076,7 @@ def _format_coverage_ledger(items, coverage_models: dict) -> list[str]:
         item for item in items
         if bool(item["required"])
         and item["execution_status"] == "completed"
-        and item["outcome"] in ("vulnerable", "not_vulnerable", "informational")
+        and item["outcome"] in _TERMINAL_WEB_COVERAGE_OUTCOMES
     ]
     if terminal:
         lines.extend(["", "Completed coverage:"])
@@ -919,7 +1085,7 @@ def _format_coverage_ledger(items, coverage_models: dict) -> list[str]:
 
     excluded = [
         item for item in items
-        if not bool(item["required"]) or item["outcome"] == "not_applicable"
+        if not bool(item["required"])
     ]
     if excluded:
         lines.extend(["", "Optional or not-applicable coverage:"])

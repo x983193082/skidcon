@@ -53,6 +53,23 @@ Bridge API endpoints (curl from inside container):
 | `GET /observe/screenshot` | Screenshot (base64) |
 | `GET /observe/activity` | Current Activity |
 | `POST /observe/logcat` | System logs |
+| `POST /network/import` | Import JSON, JSON array, or JSONL proxy evidence |
+| `POST /network/proxy/set` | Configure the device HTTP proxy |
+| `POST /network/proxy/clear` | Clear the device HTTP proxy |
+| `POST /reverse/analyze` | Run bounded APK ZIP/string inspection inside the configured artifact root |
+| `GET /reverse/reports` | Read recent APK inspection reports for one `assessment_id` |
+| `GET /frida/scripts` | List runtime-observation template metadata |
+| `POST /frida/observations` | Store externally obtained Frida evidence |
+| `GET /lab/profiles` | List mobile lab profile metadata |
+
+`/reverse/analyze` does not run a full decompiler, and `/frida/observations`
+does not execute Frida. Treat both as evidence intake or analysis aids, not as
+proof that a vulnerability was reproduced.
+
+Start the bridge with `--artifact-root PATH` (or set
+`ANDROID_MCP_ARTIFACT_ROOT`) to define the only directory from which
+`/reverse/analyze` may read APK files. Reverse reports and Frida observations
+require an `assessment_id` and are retained independently per assessment.
 
 ## Knowledge bases (offline)
 

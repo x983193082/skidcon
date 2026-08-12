@@ -208,8 +208,19 @@ class ContainerManager:
         argv.extend(command)
         return ManagedProcess(container, argv, env)
 
-    def write_text_file(self, container_name: str, path: str, content: str) -> None:
-        archive_path, archive = self._text_file_archive(path, content)
+    def write_text_file(
+        self,
+        container_name: str,
+        path: str,
+        content: str,
+        *,
+        mode: int = 0o644,
+        uid: int = 0,
+        gid: int = 0,
+    ) -> None:
+        archive_path, archive = self._text_file_archive(
+            path, content, mode=mode, uid=uid, gid=gid,
+        )
         container = self._require_container(container_name)
         try:
             ok = container.put_archive(archive_path, archive)
@@ -261,7 +272,18 @@ class ContainerManager:
         return status_code == 409 or "is already in use" in explanation
 
     @staticmethod
-    def _text_file_archive(path: str, content: str) -> tuple[str, bytes]:
+    def _text_file_archive(
+        path: str,
+        content: str,
+        *,
+        mode: int = 0o644,
+        uid: int = 0,
+        gid: int = 0,
+    ) -> tuple[str, bytes]:
+        if not isinstance(mode, int) or mode <= 0 or mode > 0o777:
+            raise ValueError(f"container file mode must be between 0o001 and 0o777: {mode!r}")
+        if not isinstance(uid, int) or uid < 0 or not isinstance(gid, int) or gid < 0:
+            raise ValueError("container file uid and gid must be non-negative integers")
         target = PurePosixPath(path)
         if not target.is_absolute() or target.name in ("", ".", ".."):
             raise ValueError(f"container file path must be absolute: {path}")
@@ -289,6 +311,8 @@ class ContainerManager:
             file_name = "/".join(archive_parts)
             info = tarfile.TarInfo(file_name)
             info.size = len(payload)
-            info.mode = 0o644
+            info.mode = mode
+            info.uid = uid
+            info.gid = gid
             archive.addfile(info, io.BytesIO(payload))
         return archive_path, stream.getvalue()

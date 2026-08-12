@@ -78,7 +78,11 @@ if phase=="reason":
     max_i=prompt.get("max_intents",3)
     from_ids=[random.choice(fact_ids)] if fact_ids else []
     if outcome=="complete":
-        print(json.dumps({"accepted":True,"data":{"complete":{"from":from_ids,"description":f"mock complete from {from_ids[0]}"}}}, ensure_ascii=False))
+        completion_ids=prompt.get("completion_fact_ids")
+        if isinstance(completion_ids,list):
+            from_ids=completion_ids
+        source_text=from_ids[0] if from_ids else "no reproduced findings"
+        print(json.dumps({"accepted":True,"data":{"complete":{"from":from_ids,"description":f"mock complete from {source_text}"}}}, ensure_ascii=False))
     elif outcome=="intent":
         fi=[random.choice(fact_ids)] if fact_ids else []
         intent={"from":fi,"description":f"mock intent from {fi[0] if fi else 'none'}","action_kind":"surface_mapping"}

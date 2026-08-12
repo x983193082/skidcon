@@ -18,6 +18,7 @@ from skidc.dispatcher.tasks.common import (
     cancel_reason,
     did_timeout,
     format_worker_input,
+    prepare_android_bridge,
     project_allows_conclude_fallback,
     preview,
     run_healthcheck,
@@ -69,6 +70,7 @@ def _validate_explore_result(
         allow_surfaces=real_web and is_surface_mapping_intent(
             intent.action_kind, intent.test_variant,
         ),
+        action_kind=intent.action_kind if real_web else None,
     )
     kind, data = result
     if not real_web or kind != "fact" or data is None:
@@ -93,21 +95,18 @@ def _validate_explore_result(
     if str(intent.action_kind or "").strip().casefold() != "security_test":
         return result
 
-    if not tested and len(assigned) == 1:
-        tested = list(assigned)
-        data["tested_surface_refs"] = tested
-    if not assigned or not tested:
-        raise ValueError("security_test requires assigned and tested Surface refs")
-    unexpected = [surface_id for surface_id in tested if surface_id not in assigned]
-    if unexpected:
-        raise ValueError(f"tested_surface_refs were not assigned: {', '.join(unexpected)}")
+    if tested:
+        if not assigned:
+            raise ValueError("security_test tested Surface refs require an assignment")
+        unexpected = [surface_id for surface_id in tested if surface_id not in assigned]
+        if unexpected:
+            raise ValueError(f"tested_surface_refs were not assigned: {', '.join(unexpected)}")
     for request in verify_requests:
         request_refs = list(request.get("surface_refs") or [])
-        if not request_refs and len(tested) == 1:
-            request_refs = list(tested)
-            request["surface_refs"] = request_refs
-        if not request_refs or any(surface_id not in tested for surface_id in request_refs):
-            raise ValueError("Verify candidates must reference tested Surfaces")
+        if not tested or not request_refs or any(
+            surface_id not in tested for surface_id in request_refs
+        ):
+            raise ValueError("Verify candidates must reference explicitly tested Surfaces")
     return kind, data
 
 
@@ -128,6 +127,18 @@ def run_explore_task(
     lease.start()
     try:
         container_name = container_manager.ensure_running(project.project.id)
+
+        bridge_ready = prepare_android_bridge(
+            config, container_manager, container_name, worker,
+            lease=lease, cancellation=cancellation,
+        )
+        if bridge_ready is not None and bridge_ready.returncode != 0:
+            LOG.warning(
+                "Android Bridge unavailable project=%s intent=%s worker=%s",
+                project.project.id, intent.id, worker.name,
+            )
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "cancelled" if cancel_reason(bridge_ready, cancellation) else "dependency_unavailable"
 
         if task_healthcheck_enabled(config):
             healthcheck = run_healthcheck(
@@ -445,6 +456,17 @@ def _try_conclude_fallback(
 
     container_name = container_manager.ensure_running(project_id)
 
+    bridge_ready = prepare_android_bridge(
+        config, container_manager, container_name, worker,
+        lease=lease, cancellation=cancellation,
+    )
+    if bridge_ready is not None and bridge_ready.returncode != 0:
+        LOG.warning(
+            "Android Bridge unavailable before explore conclusion project=%s intent=%s worker=%s",
+            project_id, intent.id, worker.name,
+        )
+        return conclusion_failed("Android Bridge readiness check failed")
+
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "explore_conclude.md"),
         {
@@ -599,6 +621,7 @@ def _write_explore_conclusion(
             test_variant=intent.test_variant,
             priority=intent.priority,
             suggested_tools=list(intent.suggested_tools),
+            coverage_refs=list(intent.coverage_refs),
         )
         if not response.ok:
             LOG.warning(
@@ -614,12 +637,15 @@ def _normalize_observed_surfaces(project: ProjectDetail, data: dict) -> dict:
     normalized = dict(data)
     verify_requests = normalized.pop("verify_requests", None)
     tested_surface_refs = normalized.pop("tested_surface_refs", None)
+    state_check = normalized.pop("state_check", None)
     fact_data = dict(normalized.get("data") or {})
     if isinstance(tested_surface_refs, list):
         fact_data["tested_surface_refs"] = list(tested_surface_refs)
     if isinstance(verify_requests, list) and verify_requests:
         fact_data["verify_requests"] = [dict(item) for item in verify_requests]
         fact_data["verify_request"] = str(verify_requests[0].get("claim") or "")
+    if isinstance(state_check, dict):
+        fact_data["state_check"] = dict(state_check)
     if fact_data:
         normalized["data"] = fact_data
     raw_surfaces = data.get("observed_surfaces")

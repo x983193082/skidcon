@@ -1,0 +1,3 @@
+/scripts/*.sh text eol=lf
+/container/**/*.sh text eol=lf
+/container/android-mcp text eol=lf

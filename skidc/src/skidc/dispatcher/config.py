@@ -4,7 +4,9 @@ from decimal import Decimal, InvalidOperation
 import json
 from importlib import resources
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -43,7 +45,7 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
     "mock": {
-        "reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
+        "reason.md": ("{fact_ids}", "{completion_fact_ids}", "{open_intents}", "{max_intents}"),
         "explore.md": ("{intent_id}",),
         "explore_conclude.md": ("{intent_id}",),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
@@ -155,9 +157,59 @@ class RuntimeConfig(BaseModel):
     healthcheck_timeout: int = Field(gt=0)
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
     prompt_group: str = Field(min_length=1)
+    target_prompt_groups: dict[str, str] = Field(default_factory=dict)
     server_timeout: float = Field(default=15.0, gt=0)
     project_detail_timeout: float = Field(default=60.0, gt=0)
     dispatch_view_timeout: float = Field(default=15.0, gt=0)
+
+
+class AndroidBridgeConfig(BaseModel):
+    """Dispatcher-side Android Bridge settings.
+
+    ``token_file`` is readable only by the dispatcher.  Workers receive the
+    token through a mode-0600 file at ``worker_token_file``; the secret itself
+    is deliberately never copied into their environment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    token_file: str
+    worker_token_file: str = "/run/skidc/android-mcp-token"
+    readiness_timeout: int = Field(default=15, gt=0, le=120)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Android Bridge URL must be an absolute HTTP(S) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Android Bridge URL must not contain credentials")
+        if parsed.query:
+            raise ValueError("Android Bridge URL must not contain query parameters")
+        if parsed.fragment:
+            raise ValueError("Android Bridge URL must not contain a fragment")
+        if parsed.path not in {"", "/"}:
+            raise ValueError("Android Bridge URL must not contain a path")
+        return value.rstrip("/")
+
+    @field_validator("token_file")
+    @classmethod
+    def validate_token_file(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Android Bridge token_file must not be empty")
+        return value
+
+    @field_validator("worker_token_file")
+    @classmethod
+    def validate_worker_token_file(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if not path.is_absolute() or path.name in {"", ".", ".."}:
+            raise ValueError("worker_token_file must be an absolute POSIX path")
+        if any(part in {"", ".", ".."} for part in path.parts[1:]):
+            raise ValueError("worker_token_file must be an absolute POSIX path")
+        return value
 
 
 class WorkerConfig(BaseModel):
@@ -197,6 +249,7 @@ class DispatchConfig(BaseModel):
     runtime: RuntimeConfig
     tasks: TasksConfig
     container: ContainerConfig
+    android_bridge: AndroidBridgeConfig | None = None
     common_env: dict[str, str] = Field(default_factory=dict)
     workers: list[WorkerConfig]
 
@@ -239,14 +292,68 @@ class DispatchConfig(BaseModel):
             raise ValueError("workers must not be empty")
         if self.runtime.max_project_workers > self.runtime.max_workers:
             raise ValueError("max_project_workers cannot exceed max_workers")
+        android_prompt_group = self.runtime.target_prompt_groups.get("android")
+        if android_prompt_group and self.android_bridge is None:
+            raise ValueError("Android prompt route requires android_bridge configuration")
+        if self.android_bridge is not None and not android_prompt_group:
+            raise ValueError("android_bridge requires an Android prompt route")
         return self
 
     @classmethod
     def load(cls, path: Path) -> "DispatchConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
-        validate_prompt_resources(config.runtime.prompt_group)
+        prompt_groups = {
+            config.runtime.prompt_group,
+            *config.runtime.target_prompt_groups.values(),
+        }
+        for prompt_group in sorted(prompt_groups):
+            validate_prompt_resources(prompt_group)
         return config
+
+    def for_target_type(self, target_type: str) -> "DispatchConfig":
+        """Return target-local prompt and capability settings.
+
+        Android Bridge connection metadata is injected only for Android tasks.
+        The bearer token is intentionally absent: it is provisioned as a file
+        immediately before an Android task executes.
+        """
+        prompt_group = self.runtime.target_prompt_groups.get(
+            target_type,
+            self.runtime.prompt_group,
+        )
+        android_bridge = self.android_bridge if target_type == "android" else None
+        if prompt_group == self.runtime.prompt_group and android_bridge is None:
+            return self
+        workers = self.workers
+        if android_bridge is not None:
+            workers = [
+                worker.model_copy(
+                    update={
+                        "env": {
+                            **worker.env,
+                            "ANDROID_MCP_URL": android_bridge.url,
+                            "ANDROID_MCP_TOKEN_FILE": android_bridge.worker_token_file,
+                        }
+                    }
+                )
+                for worker in self.workers
+            ]
+        return self.model_copy(
+            update={
+                "runtime": self.runtime.model_copy(
+                    update={"prompt_group": prompt_group}
+                ),
+                "workers": workers,
+            }
+        )
+
+    def worker_for_target(self, target_type: str, worker_name: str) -> WorkerConfig:
+        """Resolve the selected worker from the target-local configuration."""
+        target_config = self.for_target_type(target_type)
+        return next(
+            worker for worker in target_config.workers if worker.name == worker_name
+        )
 
 
 def validate_prompt_resources(prompt_group: str) -> None:

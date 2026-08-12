@@ -1,0 +1,10 @@
+services:
+  skidc-dispatcher:
+    secrets: [android_mcp_token]
+
+  android-bridge:
+    secrets: [android_mcp_token]
+
+secrets:
+  android_mcp_token:
+    file: ./datas/android-lab/secrets/android_mcp_token

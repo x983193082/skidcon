@@ -74,8 +74,35 @@ def dispatch(config_path: Path, once: bool, startup_healthcheck_only: bool, log_
 @click.option("--adb-path", default="adb", show_default=True, help="Path to adb executable")
 @click.option("--device-id", default=None, help="ADB device id, e.g. emulator-5554")
 @click.option("--timeout", default=20, show_default=True, help="ADB command timeout in seconds")
+@click.option(
+    "--artifact-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Directory containing APK artifacts allowed for reverse analysis",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(
+        path_type=Path,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    required=True,
+    help="Read-only file containing the Android Bridge bearer token",
+)
 @click.option("--log-level", default="info", show_default=True, help="Uvicorn log level")
-def android_mcp(host: str, port: int, adb_path: str, device_id: str | None, timeout: int, log_level: str):
+def android_mcp(
+    host: str,
+    port: int,
+    adb_path: str,
+    device_id: str | None,
+    timeout: int,
+    artifact_root: Path | None,
+    token_file: Path,
+    log_level: str,
+):
     """Start the Android MCP Bridge — HTTP control surface for emulator/app targets.
 
     Launches a FastAPI server that wraps ADB commands (install, tap, screenshot,
@@ -86,5 +113,11 @@ def android_mcp(host: str, port: int, adb_path: str, device_id: str | None, time
     """
     from skidc.android_mcp.app import app, configure
 
-    configure(adb_path=adb_path, device_id=device_id, timeout=timeout)
+    configure(
+        adb_path=adb_path,
+        device_id=device_id,
+        timeout=timeout,
+        artifact_root=artifact_root,
+        token_file=token_file,
+    )
     uvicorn.run(app, host=host, port=port, log_level=log_level.lower())

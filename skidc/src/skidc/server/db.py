@@ -115,6 +115,11 @@ CREATE TABLE IF NOT EXISTS intents (
     conclusion_attempt_count INTEGER NOT NULL DEFAULT 0,
     conclusion_last_error TEXT,
     commit_status TEXT NOT NULL DEFAULT 'pending',
+    risk_level TEXT NOT NULL DEFAULT 'standard',
+    test_identity TEXT,
+    test_data_refs TEXT NOT NULL DEFAULT '[]',
+    effect_state TEXT NOT NULL DEFAULT 'not_started',
+    requires_state_check INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (id, project_id)
 );
 CREATE TABLE IF NOT EXISTS intent_sources (
@@ -441,6 +446,11 @@ _INTENT_ADDED_COLUMNS = {
     "conclusion_attempt_count": "INTEGER NOT NULL DEFAULT 0",
     "conclusion_last_error": "TEXT",
     "commit_status": "TEXT NOT NULL DEFAULT 'pending'",
+    "risk_level": "TEXT NOT NULL DEFAULT 'standard'",
+    "test_identity": "TEXT",
+    "test_data_refs": "TEXT NOT NULL DEFAULT '[]'",
+    "effect_state": "TEXT NOT NULL DEFAULT 'not_started'",
+    "requires_state_check": "INTEGER NOT NULL DEFAULT 0",
 }
 
 _TASK_LOG_ADDED_COLUMNS = {

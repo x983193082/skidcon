@@ -6,6 +6,7 @@ import shlex
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from skidc.dispatcher.config import DispatchConfig, WorkerConfig
 from skidc.dispatcher.protocol.client import SkidcClient
@@ -61,6 +62,72 @@ def communicate_timeout(timeout_seconds: int, grace_seconds: int = PROCESS_COMMU
 
 def task_healthcheck_enabled(config: DispatchConfig) -> bool:
     return config.runtime.worker_healthcheck == "startup_and_task"
+
+
+def prepare_android_bridge(
+    config: DispatchConfig,
+    container_manager: ContainerManager,
+    container_name: str,
+    worker: WorkerConfig,
+    *,
+    lease: HeartbeatLease | None = None,
+    cancellation: TaskCancellation | None = None,
+) -> ProcessResult | None:
+    """Provision and verify the Android Bridge for one Android worker task.
+
+    Non-Android workers have no Bridge environment metadata and return without
+    touching the dispatcher-side secret.  The readiness request runs through
+    the same client and environment the agent will use.
+    """
+    bridge_url = worker.env.get("ANDROID_MCP_URL")
+    worker_token_file = worker.env.get("ANDROID_MCP_TOKEN_FILE")
+    if not bridge_url and not worker_token_file:
+        return None
+    if not bridge_url or not worker_token_file or config.android_bridge is None:
+        return ProcessResult(
+            returncode=78,
+            stdout="",
+            stderr="Android Bridge worker configuration is incomplete",
+        )
+
+    try:
+        token_content = Path(config.android_bridge.token_file).read_text(encoding="utf-8")
+    except OSError:
+        return ProcessResult(
+            returncode=78,
+            stdout="",
+            stderr="Android Bridge credential file is unavailable",
+        )
+    token = token_content.strip()
+    if (
+        not token
+        or token_content.count("\n") > 1
+        or not re.fullmatch(r"[A-Za-z0-9._~-]+", token)
+    ):
+        return ProcessResult(
+            returncode=78,
+            stdout="",
+            stderr="Android Bridge credential file is invalid",
+        )
+
+    container_manager.write_text_file(
+        container_name,
+        worker_token_file,
+        token_content,
+        mode=0o600,
+        uid=1000,
+        gid=1000,
+    )
+    return run_worker_process(
+        container_manager,
+        container_name,
+        worker,
+        ["android-mcp", "GET", "/health/ready"],
+        phase="android_bridge_ready",
+        timeout_seconds=config.android_bridge.readiness_timeout,
+        lease=lease,
+        cancellation=cancellation,
+    )
 
 
 def write_graph_snapshot_reference(

@@ -14,6 +14,103 @@ from tests.conftest import (
     mock_config,
     phase,
 )
+from tests.support.web_assessment import (
+    claim_intent,
+    create_intent,
+    create_real_web_project,
+    create_required_coverage,
+    create_surface,
+)
+
+
+def test_real_web_failure_never_creates_failure_fact_or_dead_letters(http_client):
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(http_client, project_id)
+    coverage = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="identity_auth",
+        variant="authentication_flow",
+    )
+    intent = create_intent(
+        http_client,
+        project_id,
+        surface=surface,
+        coverage_ids=[coverage["id"]],
+    )
+    original_fact_count = len(
+        http_client.get(f"/projects/{project_id}").json()["facts"]
+    )
+    for attempt in range(5):
+        claim_intent(http_client, project_id, intent["id"])
+        failed = http_client.post(
+            f"/projects/{project_id}/intents/{intent['id']}/failure",
+            json={
+                "worker": "executor",
+                "error": f"synthetic failure {attempt}",
+                "max_attempts": 3,
+                "backoff_seconds": 0,
+            },
+        )
+        assert failed.status_code == 200
+        assert failed.json()["status"] == "open"
+        assert failed.json()["to"] is None
+        assert failed.json()["dead_lettered_at"] is None
+    detail = http_client.get(f"/projects/{project_id}").json()
+    assert len(detail["facts"]) == original_fact_count
+
+
+def test_real_web_conclusion_failure_remains_retryable_without_failure_fact(http_client):
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(http_client, project_id)
+    coverage = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="identity_auth",
+        variant="authentication_flow",
+    )
+    intent = create_intent(
+        http_client,
+        project_id,
+        surface=surface,
+        coverage_ids=[coverage["id"]],
+    )
+    claim_intent(http_client, project_id, intent["id"])
+    task_log = http_client.post(
+        f"/projects/{project_id}/logs",
+        json={
+            "task_type": "explore",
+            "intent_id": intent["id"],
+            "worker_name": "executor",
+            "phase": "explore_execute",
+            "stdin": "probe",
+            "stdout": "malformed model output",
+            "stderr": "",
+            "return_code": 0,
+            "duration_ms": 10,
+        },
+    ).json()
+    executed = http_client.post(
+        f"/projects/{project_id}/intents/{intent['id']}/execution-success",
+        json={"worker": "executor", "task_log_id": task_log["id"]},
+    )
+    assert executed.status_code == 200
+    original_fact_count = len(
+        http_client.get(f"/projects/{project_id}").json()["facts"]
+    )
+    for _ in range(5):
+        failed = http_client.post(
+            f"/projects/{project_id}/intents/{intent['id']}/conclusion-failure",
+            json={"worker": "executor", "error": "invalid conclusion JSON"},
+        )
+        assert failed.status_code == 200
+        assert failed.json()["status"] == "open"
+        assert failed.json()["to"] is None
+        assert failed.json()["dead_lettered_at"] is None
+    detail = http_client.get(f"/projects/{project_id}").json()
+    assert len(detail["facts"]) == original_fact_count
 
 
 def _run_dispatch_cycle(loop) -> None:
@@ -363,7 +460,9 @@ def test_bootstrap_failure_is_terminal_and_project_can_complete(http_client: Tes
     assert bootstrap_intents[0]["to"] is not None
     assert project["project"]["status"] == "completed"
 
-def test_explore_failure_produces_result_after_repeated_attempts(http_client: TestClient, monkeypatch) -> None:
+def test_real_web_explore_failure_remains_retryable_after_repeated_attempts(
+    http_client: TestClient, monkeypatch
+) -> None:
     monkeypatch.setattr(scheduler_loop, "RETRY_BACKOFF_SECONDS", (0, 0, 0))
     client = InProcessClient(http_client)
     containers = LocalContainerManager()
@@ -393,13 +492,13 @@ def test_explore_failure_produces_result_after_repeated_attempts(http_client: Te
         loop.close()
 
     intent = project["intents"][0]
-    assert intent["status"] == "concluded"
-    assert intent["execution_status"] == "failed"
-    assert intent["to"] is not None
-    assert intent["attempt_count"] == 3
+    assert intent["status"] == "open"
+    assert intent["execution_status"] in {"failed", "running"}
+    assert intent["to"] is None
+    assert intent["attempt_count"] == 4
     assert intent["last_error"]
-    assert intent["dead_lettered_at"] is not None
-    assert project["project"]["status"] == "completed"
+    assert intent["dead_lettered_at"] is None
+    assert project["project"]["status"] == "active"
 
 
 def test_reason_failures_are_visible_on_project(http_client: TestClient, monkeypatch) -> None:

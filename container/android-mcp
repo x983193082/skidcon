@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    printf '%s\n' 'usage: android-mcp GET|POST|DELETE /bridge/path [JSON]' >&2
+    exit 64
+}
+
+[ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
+
+method=$1
+request_path=$2
+request_body=${3-}
+bridge_url=${ANDROID_MCP_URL:-}
+token_file=${ANDROID_MCP_TOKEN_FILE:-}
+
+case "$method" in
+    GET|POST|DELETE) ;;
+    *) usage ;;
+esac
+case "$request_path" in
+    /*) ;;
+    *) usage ;;
+esac
+case "$request_path" in
+    //*) usage ;;
+esac
+clean_path=$(printf '%s' "$request_path" | LC_ALL=C tr -d '[:cntrl:]')
+[ "$clean_path" = "$request_path" ] || usage
+case "$bridge_url" in
+    http://*|https://*) ;;
+    *) printf '%s\n' 'android-mcp: ANDROID_MCP_URL is not configured' >&2; exit 78 ;;
+esac
+[ -n "$token_file" ] && [ -r "$token_file" ] || {
+    printf '%s\n' 'android-mcp: token file is missing or unreadable' >&2
+    exit 78
+}
+
+IFS= read -r bearer_token < "$token_file" || true
+case "$bearer_token" in
+    ''|*[!A-Za-z0-9._~-]*)
+        printf '%s\n' 'android-mcp: token file contains an invalid token' >&2
+        exit 78
+        ;;
+esac
+
+body_file=
+cleanup() {
+    if [ -n "$body_file" ] && [ -f "$body_file" ]; then
+        rm -f -- "$body_file"
+    fi
+}
+trap cleanup 0 1 2 15
+
+if [ "$#" -eq 3 ]; then
+    [ "$method" = POST ] || usage
+    body_file=$(mktemp /tmp/android-mcp-body.XXXXXX)
+    chmod 600 "$body_file"
+    printf '%s' "$request_body" > "$body_file"
+fi
+
+if [ -n "$body_file" ]; then
+    printf 'header = "Authorization: Bearer %s"\n' "$bearer_token" \
+        | curl --disable --config - --fail-with-body --silent --show-error \
+            --connect-timeout 5 --max-time "${ANDROID_MCP_TIMEOUT:-30}" \
+            --max-filesize 1048576 --request "$method" \
+            --header 'Content-Type: application/json' \
+            --data-binary "@$body_file" "${bridge_url}${request_path}"
+else
+    printf 'header = "Authorization: Bearer %s"\n' "$bearer_token" \
+        | curl --disable --config - --fail-with-body --silent --show-error \
+            --connect-timeout 5 --max-time "${ANDROID_MCP_TIMEOUT:-30}" \
+            --max-filesize 1048576 --request "$method" \
+            "${bridge_url}${request_path}"
+fi

@@ -295,6 +295,12 @@ SCRIPT
 
 RUN chmod +x /usr/local/bin/chrome-start
 
+# Authenticated Android Bridge client. The bearer token is read from a
+# dispatcher-provisioned mode-0600 file and never appears in argv or env.
+COPY ./android-mcp /usr/local/bin/android-mcp
+RUN sed -i 's/\r$//' /usr/local/bin/android-mcp \
+    && chmod 0755 /usr/local/bin/android-mcp
+
 # ------------------------------------------------------------------
 # 6. Non-root user + ownership. Claude Code refuses --dangerously-skip-permissions
 #    as root. The home directory itself must be owned by kali so the CLI can create

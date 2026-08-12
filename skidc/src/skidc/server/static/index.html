@@ -119,6 +119,7 @@
   .badge.web-mapping { color: #4ea1ff; border-color: rgba(78, 161, 255, 0.45); }
   .badge.web-executed { color: #94a3b8; border-color: rgba(148, 163, 184, 0.45); }
   .badge.web-mapped, .badge.web-security_tested { color: #4ea1ff; border-color: rgba(78, 161, 255, 0.45); }
+  .badge.web-retrying { color: #f3b34a; border-color: rgba(243, 179, 74, 0.45); }
   .badge.web-discovered, .badge.web-not_tested { color: #94a3b8; border-color: rgba(148, 163, 184, 0.45); }
   .badge.web-legacy { color: #64748b; border-color: rgba(100, 116, 139, 0.45); }
 
@@ -976,8 +977,8 @@
                     {{ [item.surface.method, item.surface.path_template || item.surface.target || item.surface.surface_group].filter(Boolean).join(' ') }}
                   </div>
                   <div class="surface-meta">
-                    <span class="badge" :class="'web-' + item.discovery">{{ webSurfaceDiscoveryLabel(item.discovery) }}</span>
                     <span class="badge" :class="'web-' + item.testing">{{ webSurfaceTestingLabel(item.testing) }}</span>
+                    <span>Coverage: {{ item.completedCoverage }}/{{ item.requiredCoverage }}</span>
                     <span v-if="item.factIds.length">&#35777;&#25454; Fact: {{ item.factIds.join(', ') }}</span>
                   </div>
                 </div>
@@ -1948,7 +1949,7 @@ createApp({
     }
 
     function webSurfaceTestingLabel(value) {
-      return ({ security_tested: "\u5df2\u5b89\u5168\u6d4b\u8bd5", not_tested: "\u672a\u5b89\u5168\u6d4b\u8bd5", legacy: "\u4e0d\u53c2\u4e0e\u5224\u5b9a" })[value] || value;
+      return ({ security_tested: "\u5df2\u5b89\u5168\u6d4b\u8bd5", mapped: "\u5df2\u6620\u5c04", retrying: "\u7b49\u5f85\u91cd\u8bd5" })[value] || value;
     }
 
     const webSurfaceStates = computed(() => {
@@ -1957,11 +1958,21 @@ createApp({
           surface.source_fact_id,
           ...(surface.evidence_fact_ids || [])
         ].filter(Boolean))];
-        const legacy = String(surface.id || "").startsWith("legacy:");
+        const requiredCoverage = Number(surface.required_coverage_count || 0);
+        const completedCoverage = Number(surface.completed_coverage_count || 0);
+        const testStatus = String(surface.test_status || "unassessed");
+        const testing = (
+          requiredCoverage > 0
+          && completedCoverage === requiredCoverage
+          && ["completed", "not_applicable"].includes(testStatus)
+        ) ? "security_tested"
+          : ["testing", "partial", "blocked"].includes(testStatus) ? "retrying"
+          : "mapped";
         return {
           surface,
-          discovery: surface.graph_discovery_status || (legacy ? "legacy" : "discovered"),
-          testing: surface.graph_testing_status || (legacy ? "legacy" : "not_tested"),
+          testing,
+          requiredCoverage,
+          completedCoverage,
           factIds
         };
       });

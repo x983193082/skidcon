@@ -2,6 +2,79 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from tests.support.web_assessment import (
+    claim_intent,
+    conclude_intent,
+    coverage_by_id,
+    create_intent,
+    create_real_web_project,
+    create_required_coverage,
+    create_surface,
+)
+
+
+def test_legacy_verification_resolves_coverage_through_verification_of(http_client):
+    project_id = create_real_web_project(http_client)
+    surface = create_surface(http_client, project_id)
+    coverage = create_required_coverage(
+        http_client,
+        project_id,
+        surface,
+        family="identity_auth",
+        variant="authentication_flow",
+    )
+    explore = create_intent(
+        http_client,
+        project_id,
+        surface=surface,
+        coverage_ids=[coverage["id"]],
+    )
+    claim_intent(http_client, project_id, explore["id"])
+    candidate = conclude_intent(
+        http_client,
+        project_id,
+        explore["id"],
+        description="Candidate requires legacy Verify ancestry repair.",
+        data={
+            "tested_surface_refs": [surface["id"]],
+            "verify_request": "Reproduce legacy candidate.",
+            "verify_requests": [{
+                "claim": "Reproduce legacy candidate.",
+                "surface_refs": [surface["id"]],
+                "evidence_refs": [],
+            }],
+        },
+    )["fact"]
+    verify_response = http_client.post(
+        f"/projects/{project_id}/intents",
+        json={
+            "from": [candidate["id"]],
+            "description": "Legacy Verify row without Coverage binding.",
+            "creator": "reasoner",
+            "action_kind": "verify",
+            "test_variant": "authentication_flow",
+        },
+    )
+    assert verify_response.status_code == 201
+    verify = verify_response.json()
+    claim_intent(http_client, project_id, verify["id"], worker="verifier")
+    verification = conclude_intent(
+        http_client,
+        project_id,
+        verify["id"],
+        worker="verifier",
+        description="Legacy candidate reproduced.",
+        status="reproduced",
+        verification_of=candidate["id"],
+        parent_fact=candidate["id"],
+        kind="verification_result",
+        data={"result": "reproduced", "attempts": []},
+        evidence_refs=["task_log:legacy-verify"],
+    )["fact"]
+    item = coverage_by_id(http_client, project_id, coverage["id"])
+    assert item["outcome"] == "vulnerable"
+    assert verification["id"] in item["evidence_fact_ids"]
+
 
 def _real_project(http: TestClient, required: list[str]) -> str:
     response = http.post(
@@ -609,14 +682,15 @@ def test_web_report_separates_reproduction_mapping_and_graph_surface_coverage(
     assert report_response.status_code == 200
     assert "charset=utf-8" in report_response.headers["content-type"].casefold()
     report = report_response.content.decode("utf-8")
-    assert "## Independently Reproduced Security Findings" in report
+    assert "## Reproduced Findings" in report
     assert "Fresh session reproduced controlled script execution." in report
-    assert "## Executed Tests Without Reproduction" in report
+    assert "## Not Reproduced Candidates" in report
     assert "Three fresh sessions did not reproduce the SQL behavior." in report
     assert "## Mapping And Recon Evidence" in report
     assert "inventory the public application routes" in report
-    assert "## Surface Coverage" in report
-    assert f"- {tested_surface_id} (GET /): graph_state=mapped / security_tested" in report
+    assert "## Behavior Coverage" in report
+    assert "## Surface Mapping Audit" in report
+    assert f"- {tested_surface_id} (GET /): graph_state=mapped / not_tested" in report
     assert f"- {untested_surface_id} (GET /untested): graph_state=mapped / not_tested" in report
     assert "- Status: complete" in report
     assert "- Suggested status: complete" not in report

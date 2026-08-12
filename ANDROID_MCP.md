@@ -13,12 +13,18 @@
 
 ## 它提供什么能力
 
-这个 bridge 是一个小型 FastAPI 服务，用下面的命令启动：
+推荐使用统一 Android Lab 入口：
 
-```powershell
-cd skidc
-uv run skidc android-mcp --device-id emulator-5554 --host 127.0.0.1 --port 8765
+```bash
+./scripts/android-lab.sh init   # 首次执行一次
+./scripts/android-lab.sh up
+./scripts/android-lab.sh status
+./scripts/android-lab.sh smoke
 ```
+
+`up` 一次启动 Web Server、Dispatcher、Android Emulator 和 Android Bridge。
+如果单独调试 Bridge，必须显式提供 `--token-file`；生产使用不要绕过
+`android-lab.sh` 的 secret、资源限制和就绪检查。
 
 它底层通过 `adb` 控制 Android 模拟器/真机，并暴露这些接口：
 
@@ -29,6 +35,7 @@ uv run skidc android-mcp --device-id emulator-5554 --host 127.0.0.1 --port 8765
 | 输入操作 | `POST /input/tap`, `/input/text`, `/input/swipe`, `/input/back`, `/input/home` |
 | 页面观察 | `GET /observe/ui`, `/observe/activity`, `/observe/screenshot`, `POST /observe/logcat` |
 | 网络记录 | `GET /network/history`, `POST /network/events`, `DELETE /network/history` |
+| APK 静态分析 | `POST /reverse/analyze`, `GET /reverse/reports`, `DELETE /reverse/reports` |
 
 第一版主要使用：
 
@@ -37,6 +44,28 @@ ADB：连接设备、启动 App、输入点击、截图、读取日志
 UIAutomator dump：导出当前 App 页面控件树
 FastAPI：把这些能力包装成 HTTP 接口
 ```
+
+### 受限 APK 静态分析
+
+将授权 APK 放入 `datas/android-artifacts/` 后，可以请求：
+
+```text
+android-mcp POST /reverse/analyze '{"assessment_id":"proj_001","apk_path":"/artifacts/demo.apk"}'
+```
+
+Bridge 会先完成有界 ZIP/字符串扫描，再在一次性 `/tmp` 工作目录中调用：
+
+```text
+aapt：包名、版本、SDK 和权限
+apktool：Manifest、安全配置、导出组件和 Deep Link
+jadx：WebView、TLS、密码学、日志、存储、明文端点和疑似凭据线索
+```
+
+响应中的 `analysis_level` 表示是否获得工具增强结果，`tool_runs` 分别显示三个工具的
+`completed`、`unavailable`、`timeout` 或 `failed` 状态。单个工具失败不会丢弃其他
+结果。`code_findings` 只返回固定摘要和相对 `evidence_ref`，不会返回整份源码或完整
+凭据值。所有静态结果都只是调查线索，必须结合 UI、网络、Logcat 或独立运行时复现后
+才能形成漏洞结论。反编译目录在请求结束后立即删除。
 
 后续可以继续叠加：
 
@@ -53,31 +82,39 @@ Frida：更深层的 Hook、签名参数和运行时分析
 
 ```yaml
 runtime:
-  prompt_group: "android"
+  prompt_group: "default"
+  target_prompt_groups:
+    android: "android"
 
-common_env:
-  ANDROID_MCP_URL: "http://127.0.0.1:8765"
+android_bridge:
+  url: "http://127.0.0.1:8765"
+  token_file: "/run/secrets/android_mcp_token"
+  worker_token_file: "/run/skidc/android-mcp-token"
+  readiness_timeout: 15
 ```
 
 这里的意思是：
 
 ```text
-prompt_group: "android"
-让 dispatcher 使用 Android 专用提示词。
+target_prompt_groups.android: "android"
+只让 target_type 为 android 的项目使用 Android 专用提示词。
 
-ANDROID_MCP_URL
-告诉 worker Android bridge 在哪里。
+android_bridge
+告诉 Dispatcher Bridge 地址和凭据文件位置。Token 值不会进入 Prompt、worker
+环境或命令参数；Dispatcher 只给 Android worker 写入 mode 0600 的凭据文件。
 ```
 
 创建项目时，`origin` 可以描述 App 目标，例如：
 
 ```text
-APK: D:\targets\demo.apk
+APK: /artifacts/demo.apk
 Package: com.example.demo
-Device: emulator-5554
 Test accounts: user_a / user_b
 Proxy: mitmproxy or Burp if configured
 ```
+
+创建项目时还要把 `recon_profile.target_type` 设为 `android`。APK 由操作者预先放入
+`datas/android-artifacts/`，容器内统一引用 `/artifacts/<文件名>.apk`。
 
 然后 Skidc 的流程仍然不变：
 

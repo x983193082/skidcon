@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
+import yaml
 
 from skidc.dispatcher.coverage_profile import (
     build_web_coverage_profile,
@@ -17,6 +21,8 @@ from skidc.dispatcher.contracts import (
     validate_verify_payload,
 )
 from skidc.dispatcher.workers.registry import get_driver
+from skidc.dispatcher.tasks.explore import _validate_explore_result
+from skidc.dispatcher.tasks import verify as verify_task
 
 
 def _claudecode_worker(model="deepseek-chat", base="https://api.deepseek.com/anthropic"):
@@ -131,6 +137,139 @@ def test_max_project_workers_cannot_exceed_max_workers():
         DispatchConfig.model_validate(cfg)
 
 
+def test_target_prompt_group_is_selected_without_mutating_default_config():
+    data = _base_config([
+        {"name": "m", "type": "mock", "task_types": ["explore"], "max_running": 1, "priority": 0, "env": {}}
+    ])
+    data["runtime"]["target_prompt_groups"] = {"api": "android"}
+    config = DispatchConfig.model_validate(data)
+
+    android_config = config.for_target_type("api")
+
+    assert android_config.runtime.prompt_group == "android"
+    assert config.for_target_type("domain").runtime.prompt_group == "default"
+    assert config.runtime.prompt_group == "default"
+
+
+def test_android_prompt_route_requires_bridge_configuration() -> None:
+    data = _base_config([
+        {"name": "m", "type": "mock", "task_types": ["explore"], "max_running": 1, "priority": 0, "env": {}}
+    ])
+    data["runtime"]["target_prompt_groups"] = {"android": "android"}
+
+    with pytest.raises(ValueError, match="Android prompt route requires android_bridge"):
+        DispatchConfig.model_validate(data)
+
+
+def test_android_bridge_requires_android_prompt_route(tmp_path: Path) -> None:
+    data = _base_config([
+        {"name": "m", "type": "mock", "task_types": ["explore"], "max_running": 1, "priority": 0, "env": {}}
+    ])
+    data["android_bridge"] = {
+        "url": "http://127.0.0.1:8765",
+        "token_file": str(tmp_path / "android_mcp_token"),
+    }
+
+    with pytest.raises(ValueError, match="android_bridge requires an Android prompt route"):
+        DispatchConfig.model_validate(data)
+
+
+def test_android_bridge_settings_are_injected_only_into_android_workers(tmp_path: Path):
+    data = _base_config([
+        {"name": "m", "type": "mock", "task_types": ["explore"], "max_running": 1, "priority": 0, "env": {}}
+    ])
+    data["runtime"]["target_prompt_groups"] = {"android": "android"}
+    data["android_bridge"] = {
+        "url": "http://127.0.0.1:8765",
+        "token_file": str(tmp_path / "android_mcp_token"),
+        "worker_token_file": "/run/skidc/android-mcp-token",
+        "readiness_timeout": 7,
+    }
+
+    config = DispatchConfig.model_validate(data)
+    android_config = config.for_target_type("android")
+    web_config = config.for_target_type("domain")
+
+    assert android_config.workers[0].env["ANDROID_MCP_URL"] == "http://127.0.0.1:8765"
+    assert android_config.workers[0].env["ANDROID_MCP_TOKEN_FILE"] == "/run/skidc/android-mcp-token"
+    assert "ANDROID_MCP_URL" not in web_config.workers[0].env
+    assert "ANDROID_MCP_TOKEN_FILE" not in web_config.workers[0].env
+    assert str(tmp_path / "android_mcp_token") not in android_config.workers[0].env.values()
+
+
+def test_target_config_worker_can_be_resolved_by_selected_worker_name(tmp_path: Path):
+    data = _base_config([
+        {"name": "selected", "type": "mock", "task_types": ["explore"], "max_running": 1, "priority": 0, "env": {}}
+    ])
+    data["runtime"]["target_prompt_groups"] = {"android": "android"}
+    data["android_bridge"] = {
+        "url": "http://127.0.0.1:8765",
+        "token_file": str(tmp_path / "token"),
+    }
+    config = DispatchConfig.model_validate(data)
+
+    worker = config.worker_for_target("android", "selected")
+
+    assert worker.env["ANDROID_MCP_URL"] == "http://127.0.0.1:8765"
+    assert worker.env["ANDROID_MCP_TOKEN_FILE"] == "/run/skidc/android-mcp-token"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("url", "http://user:password@127.0.0.1:8765", "must not contain credentials"),
+        ("url", "http://127.0.0.1:8765/?token=secret", "must not contain query"),
+        ("worker_token_file", "relative/token", "must be an absolute POSIX path"),
+        ("readiness_timeout", 0, "greater than 0"),
+    ],
+)
+def test_android_bridge_settings_reject_unsafe_values(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+):
+    data = _base_config([
+        {"name": "m", "type": "mock", "task_types": ["explore"], "max_running": 1, "priority": 0, "env": {}}
+    ])
+    data["android_bridge"] = {
+        "url": "http://127.0.0.1:8765",
+        "token_file": str(tmp_path / "android_mcp_token"),
+        "worker_token_file": "/run/skidc/android-mcp-token",
+        "readiness_timeout": 7,
+        field: value,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        DispatchConfig.model_validate(data)
+
+
+def test_load_validates_target_prompt_groups(tmp_path: Path):
+    data = _base_config([
+        {"name": "m", "type": "mock", "task_types": ["explore"], "max_running": 1, "priority": 0, "env": {}}
+    ])
+    data["runtime"]["target_prompt_groups"] = {"android": "missing-android-prompts"}
+    data["android_bridge"] = {
+        "url": "http://127.0.0.1:8765",
+        "token_file": str(tmp_path / "android_mcp_token"),
+    }
+    config_path = tmp_path / "dispatch.yaml"
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing prompt group: missing-android-prompts"):
+        DispatchConfig.load(config_path)
+
+
+def test_android_example_routes_only_android_targets_to_android_prompts():
+    config_path = Path(__file__).resolve().parents[2] / "dispatch_android.example.yaml"
+
+    config = DispatchConfig.load(config_path)
+
+    assert config.for_target_type("android").runtime.prompt_group == "android"
+    assert config.for_target_type("domain").runtime.prompt_group == "default"
+    assert config.for_target_type("api").runtime.prompt_group == "default"
+
+
 # ---- contract parsing ------------------------------------------------------------
 
 def test_parse_json_from_fenced_block():
@@ -172,6 +311,48 @@ def test_web_explore_accepts_only_one_objective_description() -> None:
     assert validate_explore_payload(payload, fact_only=True) == (
         "fact",
         {"description": "POST /login returned the tested response."},
+    )
+
+
+def test_web_security_explore_does_not_infer_single_tested_surface() -> None:
+    project = SimpleNamespace(project=SimpleNamespace(mode="real_website"))
+    intent = SimpleNamespace(
+        action_kind="security_test",
+        test_variant="authentication_flow",
+        surface_ref="surf001",
+        surface_refs=["surf001"],
+    )
+    kind, data = _validate_explore_result(
+        {"accepted": True, "data": {"description": "CAPTCHA prerequisite confirmed."}},
+        project,
+        intent,
+    )
+    assert kind == "fact"
+    assert data == {"description": "CAPTCHA prerequisite confirmed."}
+
+
+def test_verify_terminal_result_ignores_runtime_and_parse_failures() -> None:
+    attempts = [
+        {"attempt": 1, "result": "runtime_failure", "description": "exit 2"},
+        {"attempt": 2, "result": "invalid_output", "description": "bad json"},
+        {"attempt": 3, "result": "not_reproduced", "description": "clean negative"},
+    ]
+    assert verify_task._terminal_verify_result(attempts, required_negative_attempts=3) is None
+    attempts.extend([
+        {"attempt": 4, "result": "not_reproduced", "description": "clean negative"},
+        {"attempt": 5, "result": "not_reproduced", "description": "clean negative"},
+    ])
+    assert (
+        verify_task._terminal_verify_result(attempts, required_negative_attempts=3)
+        == "not_reproduced"
+    )
+
+
+def test_verify_terminal_result_accepts_one_valid_reproduction() -> None:
+    attempts = [{"attempt": 1, "result": "reproduced", "description": "impact observed"}]
+    assert (
+        verify_task._terminal_verify_result(attempts, required_negative_attempts=3)
+        == "reproduced"
     )
 
 
@@ -303,6 +484,39 @@ def test_web_explore_no_result_is_a_non_semantic_retry_signal() -> None:
     assert validate_explore_payload(
         {"accepted": True, "data": {"no_result": True}}, fact_only=True
     ) == ("no_result", None)
+
+
+def test_web_state_check_requires_structured_evidence_and_exact_action() -> None:
+    payload = {
+        "accepted": True,
+        "data": {
+            "description": "The disposable record still exists.",
+            "state_check": {
+                "mutation_intent_id": "i042",
+                "observed_state": "not_applied",
+                "evidence_refs": ["task_log:check-1"],
+            },
+        },
+    }
+    assert validate_explore_payload(
+        payload, fact_only=True, action_kind="state_check",
+    ) == (
+        "fact",
+        {
+            "description": "The disposable record still exists.",
+            "state_check": payload["data"]["state_check"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="only state_check"):
+        validate_explore_payload(
+            payload, fact_only=True, action_kind="security_test",
+        )
+    payload["data"]["state_check"]["evidence_refs"] = []
+    with pytest.raises(ValueError, match="evidence_refs"):
+        validate_explore_payload(
+            payload, fact_only=True, action_kind="state_check",
+        )
 
 
 @pytest.mark.parametrize("result", ["reproduced", "not_reproduced"])
