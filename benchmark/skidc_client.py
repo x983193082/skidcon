@@ -47,6 +47,7 @@ class SkidcClient:
                        hints: list[dict] | None = None,
                        bootstrap_enabled: bool = True) -> dict:
         body = {
+            "mode": "ctf",
             "title": title,
             "origin": origin,
             "goal": goal,

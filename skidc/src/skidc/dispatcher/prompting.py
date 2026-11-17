@@ -28,6 +28,31 @@ def format_open_intents(intents: list[dict[str, Any]]) -> str:
     return format_json_block(intents)
 
 
+def format_ctf_graph(project: ProjectDetail) -> str:
+    """Project the shared storage model onto the CTF blackboard contract."""
+    if project.project.mode != "ctf":
+        raise ValueError("CTF blackboard requires a CTF project")
+    return format_json_block({
+        "project": {"id": project.project.id, "title": project.project.title, "mode": "ctf"},
+        "facts": [
+            {"id": fact.id, "description": fact.description, "evidence_refs": fact.evidence_refs}
+            for fact in project.facts
+        ],
+        "intents": [
+            {"id": intent.id, "from": intent.from_, "to": intent.to,
+             "description": intent.description, "status": intent.status, "worker": intent.worker}
+            for intent in project.intents
+        ],
+        "hints": [hint.model_dump(mode="json") for hint in project.hints],
+    })
+
+
+def format_task_graph(project: ProjectDetail, export_yaml: str) -> str:
+    if project.project.mode == "ctf":
+        return format_ctf_graph(project)
+    return format_dispatch_graph(project) if project.project.planning_version >= 3 else export_yaml.strip()
+
+
 def _fact_context_text(project: ProjectDetail, fact) -> str:
     if project.project.mode == "real_website":
         return fact.description
@@ -334,6 +359,8 @@ def format_hints(hints: list[dict[str, Any]]) -> str:
 
 def format_scope_constraints(project: ProjectDetail) -> str:
     policy = project.project.scope_policy
+    if project.project.mode == "ctf":
+        return format_json_block({"mode": "ctf", "scope_policy": policy.model_dump(mode="json")})
     profile = project.project.recon_profile
     hints = [
         {"id": hint.id, "content": hint.content, "creator": hint.creator, "created_at": hint.created_at}

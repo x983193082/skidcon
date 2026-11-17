@@ -114,14 +114,12 @@ class DispatcherLoop:
         self._startup_healthchecks_checked = False
 
     def _config_for_project(self, project: ProjectDetail) -> DispatchConfig:
-        return self.config.for_target_type(project.project.recon_profile.target_type)
+        return self.config.for_project(project.project.mode, project.project.recon_profile.target_type)
 
     def _worker_for_project(
         self, project: ProjectDetail, worker_name: str,
     ) -> WorkerConfig:
-        return self.config.worker_for_target(
-            project.project.recon_profile.target_type, worker_name,
-        )
+        return next(worker for worker in self._config_for_project(project).workers if worker.name == worker_name)
 
     def close(self) -> None:
         if self.futures:
@@ -253,6 +251,15 @@ class DispatcherLoop:
         project = self.client.get_project(summary.id)
         if project.project.status != "active":
             return False
+        try:
+            self._config_for_project(project)
+        except ValueError as exc:
+            self._log_changed(
+                f"{skip_scope}:mode_config", logging.ERROR,
+                "skip incompatible project=%s mode=%s: %s",
+                summary.id, project.project.mode, str(exc),
+            )
+            return False
         if project.project.mode == "real_website" and project.project.phase == "recon":
             created = self._ensure_web_recon_work(project)
             if created:
@@ -299,7 +306,7 @@ class DispatcherLoop:
             export_yaml = self.client.export_project(summary.id)
             return self._dispatch_explore(project, export_yaml, next_intent)
 
-        if project.project.phase == "recon" and self._recon_gate_check(project):
+        if project.project.mode == "real_website" and project.project.phase == "recon" and self._recon_gate_check(project):
             transition = self.client.advance_phase(project.project.id)
             if not transition.ok:
                 LOG.warning(

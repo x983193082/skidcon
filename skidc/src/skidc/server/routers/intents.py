@@ -8,6 +8,7 @@ from skidc.dispatcher.coverage_profile import normalize_surface_entry
 from skidc.planning import is_surface_mapping_intent
 
 from skidc.server.db import get_conn
+from skidc.server.mode_policy import project_is_web, validate_ctf_write
 from skidc.server.models import (
     ConcludeRequest,
     ConcludeResponse,
@@ -103,6 +104,7 @@ def _normalize_web_observed_surface(
 def create_intent(project_id: str, body: CreateIntentRequest):
     with get_conn() as conn:
         project_row = check_project_active(conn, project_id)
+        validate_ctf_write(project_row["mode"], body, {"from_", "description", "creator", "worker"})
         validate_facts_exist(conn, project_id, body.from_)
         validate_goal_not_in_sources(body.from_)
         validate_intent_creator_worker(body.creator, body.worker)
@@ -336,24 +338,26 @@ def heartbeat(project_id: str, intent_id: str, body: HeartbeatRequest):
             "UPDATE intents SET worker = ?, last_heartbeat_at = ?, execution_status = CASE WHEN execution_status = 'pending' THEN 'running' ELSE execution_status END WHERE id = ? AND project_id = ?",
             (body.worker, now, intent_id, project_id),
         )
-        conn.execute(
-            """
-            UPDATE coverage_items
-            SET execution_status = 'testing', status = 'testing', updated_at = ?
-            WHERE project_id = ?
-              AND id IN (
-                  SELECT coverage_id FROM coverage_intents
-                  WHERE project_id = ? AND intent_id = ?
-              )
-              AND execution_status IN ('untested', 'queued', 'testing')
-            """,
-            (now, project_id, project_id, intent_id),
-        )
-        conn.execute(
-            "UPDATE hypotheses SET status = 'testing', updated_at = ? "
-            "WHERE project_id = ? AND intent_id = ? AND status IN ('candidate', 'planned', 'testing')",
-            (now, project_id, intent_id),
-        )
+        if project_is_web(conn, project_id):
+            conn.execute(
+                """
+                UPDATE coverage_items
+                SET execution_status = 'testing', status = 'testing', updated_at = ?
+                WHERE project_id = ?
+                  AND id IN (
+                      SELECT coverage_id FROM coverage_intents
+                      WHERE project_id = ? AND intent_id = ?
+                  )
+                  AND execution_status IN ('untested', 'queued', 'testing')
+                """,
+                (now, project_id, project_id, intent_id),
+            )
+        if project_is_web(conn, project_id):
+            conn.execute(
+                "UPDATE hypotheses SET status = 'testing', updated_at = ? "
+                "WHERE project_id = ? AND intent_id = ? AND status IN ('candidate', 'planned', 'testing')",
+                (now, project_id, intent_id),
+            )
 
         updated = conn.execute(
             "SELECT * FROM intents WHERE id = ? AND project_id = ?",
@@ -376,19 +380,20 @@ def release(project_id: str, intent_id: str, body: HeartbeatRequest):
                 "UPDATE intents SET worker = NULL WHERE id = ? AND project_id = ?",
                 (intent_id, project_id),
             )
-            conn.execute(
-                """
-                UPDATE coverage_items
-                SET execution_status = 'queued', status = 'untested', updated_at = ?
-                WHERE project_id = ?
-                  AND id IN (
-                      SELECT coverage_id FROM coverage_intents
-                      WHERE project_id = ? AND intent_id = ?
-                  )
-                  AND execution_status = 'testing'
-                """,
-                (utcnow(), project_id, project_id, intent_id),
-            )
+            if project_is_web(conn, project_id):
+                conn.execute(
+                    """
+                    UPDATE coverage_items
+                    SET execution_status = 'queued', status = 'untested', updated_at = ?
+                    WHERE project_id = ?
+                      AND id IN (
+                          SELECT coverage_id FROM coverage_intents
+                          WHERE project_id = ? AND intent_id = ?
+                      )
+                      AND execution_status = 'testing'
+                    """,
+                    (utcnow(), project_id, project_id, intent_id),
+                )
             row = conn.execute(
                 "SELECT * FROM intents WHERE id = ? AND project_id = ?",
                 (intent_id, project_id),
@@ -461,20 +466,6 @@ def record_conclusion_failure(
                    failed_at = ?, dead_lettered_at = ?, status = 'dead_lettered'
                    WHERE project_id = ? AND id = ? AND execution_status = 'succeeded'""",
                 (attempts, body.error[:2000], body.worker, now, now, project_id, intent_id),
-            )
-            conn.execute(
-                """UPDATE hypotheses SET status = 'inconclusive', last_error = ?, updated_at = ?
-                   WHERE project_id = ? AND intent_id = ?
-                     AND status NOT IN ('supported', 'refuted', 'waived')""",
-                (body.error[:2000], now, project_id, intent_id),
-            )
-            conn.execute(
-                """UPDATE coverage_items SET execution_status = 'blocked', status = 'failed',
-                   outcome = NULL, updated_at = ? WHERE project_id = ? AND id IN (
-                       SELECT coverage_id FROM coverage_intents
-                       WHERE project_id = ? AND intent_id = ?
-                   ) AND execution_status <> 'completed'""",
-                (now, project_id, project_id, intent_id),
             )
             conclude_intent_with_failure_fact(
                 conn,
@@ -550,6 +541,7 @@ def record_failure(project_id: str, intent_id: str, body: TaskFailureRequest):
 def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
     with get_conn() as conn:
         project = project_meta_from_row(check_project_active(conn, project_id))
+        validate_ctf_write(project.mode, body, {"worker", "description", "evidence_refs"})
         if project.mode == "real_website" and body.coverage_refs:
             bound_rows = conn.execute(
                 """
@@ -568,8 +560,8 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                     409, "Fact coverage_refs must match the real_website Intent Coverage binding"
                 )
         intent_row = get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)
-        intent_variant = str(intent_row["test_variant"] or "").strip()
-        action_kind = str(intent_row["action_kind"] or "").strip().casefold()
+        intent_variant = str(intent_row["test_variant"] or "").strip() if project.mode == "real_website" else ""
+        action_kind = str(intent_row["action_kind"] or "").strip().casefold() if project.mode == "real_website" else ""
         raw_state_check = body.data.get("state_check")
         state_check_result: StateCheckResult | None = None
         if action_kind == "state_check":
@@ -667,7 +659,7 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                 )
         elif verification_of:
             validate_facts_exist(conn, project_id, [verification_of])
-        recon_category, recon_executed, recon_found_results = derive_recon_fact_fields(
+        recon_category, recon_executed, recon_found_results = (None, None, None) if project.mode == "ctf" else derive_recon_fact_fields(
             intent_row,
             supplied_category=None if fact_only else body.recon_category,
             supplied_executed=None if fact_only else body.recon_executed,
@@ -887,18 +879,17 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                 hypothesis_status = "refuted"
             else:
                 hypothesis_status = "inconclusive"
-            conn.execute(
-                """UPDATE hypotheses SET status = ?, last_error = NULL,
-                   coverage_id = COALESCE(coverage_id, ?), intent_id = ?, updated_at = ?
-                   WHERE project_id = ? AND id = ?""",
-                (
-                    hypothesis_status, body.coverage_refs[0] if body.coverage_refs else None,
-                    intent_id, now, project_id, hypothesis_id,
-                ),
-            )
+            if project_is_web(conn, project_id):
+                conn.execute(
+                    """UPDATE hypotheses SET status = ?, last_error = NULL,
+                       coverage_id = COALESCE(coverage_id, ?), intent_id = ?, updated_at = ?
+                       WHERE project_id = ? AND id = ?""",
+                    (
+                        hypothesis_status, body.coverage_refs[0] if body.coverage_refs else None,
+                        intent_id, now, project_id, hypothesis_id,
+                    ),
+                )
         clear_completion_blocked(conn, project_id)
-        if project.mode != "real_website":
-            reconcile_project_attack_paths(conn, project_id)
 
         updated = conn.execute(
             "SELECT * FROM intents WHERE id = ? AND project_id = ?",

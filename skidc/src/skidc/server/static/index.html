@@ -656,7 +656,7 @@
         <div class="proj-title">{{ p.title }}</div>
         <div class="proj-meta">
           <span class="badge" :class="'status-' + statusClass(p.run_state || p.status)">{{ statusLabel(p.run_state || p.status) }}</span>
-          <span class="badge" :class="p.bootstrap_enabled ? 'mode-ctf' : 'mode-real'">{{ p.bootstrap_enabled ? 'CTF' : '真实' }}</span>
+          <span class="badge" :class="p.mode === 'ctf' ? 'mode-ctf' : 'mode-real'">{{ p.mode === 'ctf' ? 'CTF' : '真实' }}</span>
           <span v-if="p.phase" class="badge" :class="'phase-' + p.phase">{{ p.phase === 'recon' ? '侦察' : '探索' }}</span>
           <span class="badge">{{ p.fact_count }} 事实</span>
           <span class="badge">{{ p.intent_count }} 意图</span>
@@ -782,8 +782,8 @@
             <span class="badge" :class="'status-' + statusClass(proj.project?.run_state || proj.project?.status)" style="font-size:11px;padding:2px 8px">
               {{ statusLabel(proj.project?.run_state || proj.project?.status) }}
             </span>
-            <span class="badge" :class="proj.project?.bootstrap_enabled ? 'mode-ctf' : 'mode-real'" style="font-size:11px;padding:2px 8px">
-              {{ proj.project?.bootstrap_enabled ? 'CTF模式' : '真实网站模式' }}
+            <span class="badge" :class="proj.project?.mode === 'ctf' ? 'mode-ctf' : 'mode-real'" style="font-size:11px;padding:2px 8px">
+              {{ proj.project?.mode === 'ctf' ? 'CTF模式' : '真实网站模式' }}
             </span>
             <span v-if="proj.project?.phase" class="badge" :class="'phase-' + proj.project.phase" style="font-size:11px;padding:2px 8px">
               {{ proj.project.phase === 'recon' ? '侦察阶段' : '探索阶段' }}
@@ -1177,9 +1177,7 @@
         <div v-if="proj.project" class="bottom-bar">
           <template v-if="proj.project?.status === 'active'">
             <button @click="addHint">+ 添加提示</button>
-            <button @click="switchMode" :title="proj.project?.bootstrap_enabled ? '切换到真实网站模式' : '切换到CTF模式'">
-              {{ proj.project?.bootstrap_enabled ? '切换为真实网站模式' : '切换为CTF模式' }}
-            </button>
+<span class="muted">模式创建后固定；使用其他模式请新建项目</span>
             <button @click="stopProject">停止项目</button>
           </template>
           <button @click="downloadReport">导出报告</button>
@@ -1851,21 +1849,6 @@ createApp({
       }
     }
 
-    async function switchMode() {
-      const currentMode = proj.value?.project?.bootstrap_enabled ? "ctf" : "real_website";
-      const targetMode = currentMode === "ctf" ? "real_website" : "ctf";
-      const confirmMsg = targetMode === "real_website"
-        ? "切换到真实网站模式将启用RECON门控，智能体将先进行信息收集。确认切换？"
-        : "切换到CTF模式将禁用RECON门控，智能体将自由探索。确认切换？";
-      if (!confirm(confirmMsg)) return;
-      await api(`/projects/${selectedProjId.value}/mode`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mode: targetMode })
-      });
-      await refresh();
-    }
-
     function downloadReport() {
       if (!selectedProjId.value) return;
       window.open(`/projects/${selectedProjId.value}/export?format=report`, "_blank");
@@ -2486,7 +2469,7 @@ createApp({
       blockerGroups,
       detailFact, detailIntent,
       taskLogs, selectedLog, logFilter,
-      loadProjects, selectProject, openBlockers, refresh, createProject, addHint, continueBlockedProject, excludeCoverage, stopProject, switchMode, downloadReport,
+      loadProjects, selectProject, openBlockers, refresh, createProject, addHint, continueBlockedProject, excludeCoverage, stopProject, downloadReport,
       switchTab, applyFilters,
       loadTaskLogs, loadLogDetail, closeLogDetail,
       openFact, openIntent, closeDetail, copyText,

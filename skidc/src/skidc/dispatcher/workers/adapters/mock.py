@@ -85,8 +85,13 @@ if phase=="reason":
         print(json.dumps({"accepted":True,"data":{"complete":{"from":from_ids,"description":f"mock complete from {source_text}"}}}, ensure_ascii=False))
     elif outcome=="intent":
         fi=[random.choice(fact_ids)] if fact_ids else []
-        intent={"from":fi,"description":f"mock intent from {fi[0] if fi else 'none'}","action_kind":"surface_mapping"}
-        print(json.dumps({"accepted":True,"data":{"intent":intent}}, ensure_ascii=False))
+        intent={"from":fi,"description":f"mock intent from {fi[0] if fi else 'none'}"}
+        if prompt.get("mode") == "ctf":
+            data={"intents":[intent]}
+        else:
+            intent["action_kind"]="surface_mapping"
+            data={"intent":intent}
+        print(json.dumps({"accepted":True,"data":data}, ensure_ascii=False))
     elif outcome=="noop":
         print(json.dumps({"accepted":True,"data":{}}, ensure_ascii=False))
     elif outcome=="rejected":

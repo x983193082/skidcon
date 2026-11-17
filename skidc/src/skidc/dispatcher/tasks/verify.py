@@ -64,6 +64,10 @@ def run_verify_task(
     cancellation: TaskCancellation,
 ) -> str:
     """Run a bounded, independent reproduction loop for one candidate Fact."""
+    if project.project.mode != "real_website":
+        raise ValueError("Verify requires Web mode")
+    config = config.for_project(project.project.mode, project.project.recon_profile.target_type)
+    worker = next(item for item in config.workers if item.name == worker.name)
     candidate = _candidate_fact(project, intent)
     if candidate is None:
         LOG.warning(

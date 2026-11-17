@@ -674,6 +674,7 @@ def create_project(
     required_recon_categories: list[str] | None = None,
 ) -> str:
     payload: dict[str, Any] = {
+        "mode": "ctf" if bootstrap_enabled else "real_website",
         "title": "integration",
         "origin": "start",
         "goal": "finish",

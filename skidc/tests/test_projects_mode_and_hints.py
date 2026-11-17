@@ -59,16 +59,16 @@ def test_create_project_persists_mode_scope_policy_and_recon_profile(http_client
 def test_mode_roundtrip_uses_canonical_mode_field(http_client: TestClient) -> None:
     project_id = http_client.post(
         "/projects",
-        json={"title": "t", "origin": "o", "goal": "g"},
+        json={"mode": "real_website", "title": "t", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
 
-    response = http_client.put(f"/projects/{project_id}/mode", json={"mode": "real_website"})
+    response = http_client.put(f"/projects/{project_id}/mode", json={"mode": "ctf"})
 
-    assert response.status_code == 200
-    assert response.json()["mode"] == "real_website"
-    assert response.json()["phase"] == "recon"
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "project_mode_immutable"
     detail = http_client.get(f"/projects/{project_id}").json()["project"]
     assert detail["mode"] == "real_website"
+    assert detail["phase"] == "recon"
 
 
 def test_export_includes_phase_mode_scope_and_fact_status(http_client: TestClient) -> None:
@@ -111,7 +111,7 @@ def test_export_includes_phase_mode_scope_and_fact_status(http_client: TestClien
 def test_intent_metadata_roundtrip_for_scope_enforcement(http_client: TestClient) -> None:
     project_id = http_client.post(
         "/projects",
-        json={"title": "t", "origin": "https://example.test", "goal": "g", "bootstrap_enabled": False},
+        json={"mode": "real_website", "title": "t", "origin": "https://example.test", "goal": "g", "bootstrap_enabled": False},
     ).json()["project"]["id"]
 
     response = http_client.post(

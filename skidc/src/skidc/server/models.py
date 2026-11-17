@@ -625,10 +625,12 @@ class CreateHintInline(BaseModel):
 
 
 class CreateProjectRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     title: str
     origin: str
     goal: str
-    mode: Literal["ctf", "real_website"] | None = None
+    mode: Literal["ctf", "real_website"]
     bootstrap_enabled: bool = True
     scope_policy: ScopePolicy = Field(default_factory=ScopePolicy)
     recon_profile: ReconProfile | None = None
@@ -717,7 +719,7 @@ class CreateIntentRequest(BaseModel):
     test_identity: str | None = None
     test_data_refs: list[str] = Field(default_factory=list)
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     @field_validator(
         "description", "creator", "worker", "path", "surface_ref",
@@ -819,6 +821,8 @@ class ReasonClaimRequest(BaseModel):
 
 
 class ConcludeRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     worker: str
     description: str
     scope: str | None = None
@@ -884,7 +888,7 @@ class CompleteRequest(BaseModel):
     description: str
     worker: str
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     @field_validator("description", "worker")
     @classmethod
@@ -964,6 +968,8 @@ class ReopenRequest(BaseModel):
 
 
 class CreateFactDirectRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     description: str
     schema_version: int = Field(default=1, ge=1)
     kind: str = "legacy_text"
@@ -1004,6 +1010,8 @@ class CreateFactDirectRequest(BaseModel):
 
 
 class UpdateFactStatusRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     status: str | None = None
     recon_evidence_ref: str | None = None
     verification_of: str | None = None

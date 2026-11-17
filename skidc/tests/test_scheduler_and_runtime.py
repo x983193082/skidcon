@@ -336,6 +336,7 @@ def test_dispatcher_selects_prompt_config_from_project_target_type() -> None:
     loop.config = config
     project = _project(facts=0, hints=0, open_intents=0)
 
+    project.project.mode = "real_website"
     project.project.recon_profile.target_type = "android"
     assert loop._config_for_project(project).runtime.prompt_group == "android"
 
@@ -378,6 +379,7 @@ def test_android_explore_submission_receives_target_local_worker(tmp_path) -> No
     loop.client = _Client()
     loop.executor = _Executor()
     project = _project(facts=1, hints=0, open_intents=1)
+    project.project.mode = "real_website"
     project.project.recon_profile.target_type = "android"
     intent = project.intents[0]
 
@@ -649,7 +651,7 @@ def test_potential_target_extraction_is_fact_idempotent_across_dispatcher_restar
     client = InProcessClient(http_client)
     project_id = http_client.post(
         "/projects",
-        json={"title": "t", "origin": "https://example.test", "goal": "g", "bootstrap_enabled": False},
+        json={"mode": "real_website", "title": "t", "origin": "https://example.test", "goal": "g", "bootstrap_enabled": False},
     ).json()["project"]["id"]
     assert http_client.post(
         f"/projects/{project_id}/facts",

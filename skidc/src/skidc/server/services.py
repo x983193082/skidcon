@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
+from skidc.server.mode_policy import project_is_web
 
 from skidc.dispatcher.coverage_profile import expected_required_coverage_specs
 from skidc.planning import (
@@ -257,6 +258,16 @@ def reason_state_fingerprint(conn: sqlite3.Connection, project_id: str) -> str:
             (project_id,),
         ).fetchall()],
     }
+    if project is not None and project["mode"] == "ctf":
+        payload["project"] = {"mode": "ctf", "scope_policy": project["scope_policy"]}
+        payload["facts"] = [dict(row) for row in conn.execute(
+            "SELECT id, description, evidence_refs FROM facts WHERE project_id = ? ORDER BY id",
+            (project_id,),
+        )]
+        payload["intents"] = [dict(row) for row in conn.execute(
+            "SELECT id, description, to_fact_id, status FROM intents WHERE project_id = ? ORDER BY id",
+            (project_id,),
+        )]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -1292,6 +1303,8 @@ def reconcile_attack_path(conn: sqlite3.Connection, project_id: str, path_id: st
 
 
 def reconcile_project_attack_paths(conn: sqlite3.Connection, project_id: str) -> int:
+    if not project_is_web(conn, project_id):
+        return 0
     rows = conn.execute(
         "SELECT id, status, status_reason FROM attack_paths WHERE project_id = ? ORDER BY created_at, id",
         (project_id,),
@@ -2096,6 +2109,8 @@ def reconcile_fact_coverage(
     intent_id: str | None = None,
     explicit_coverage_refs: list[str] | None = None,
 ) -> list[str]:
+    if not project_is_web(conn, project_id):
+        return []
     fact = conn.execute(
         "SELECT * FROM facts WHERE id = ? AND project_id = ?",
         (fact_id, project_id),
@@ -2358,6 +2373,8 @@ def reconcile_project_coverage(conn: sqlite3.Connection, project_id: str) -> int
         (project_id,),
     ).fetchone()
     real_web = project is not None and project["mode"] == "real_website"
+    if not real_web:
+        return 0
     changed = _backfill_coverage_surface_fingerprints(conn, project_id)
     changed += cleanup_legacy_coverage_evidence(conn, project_id)
     changed += merge_duplicate_profile_coverage(conn, project_id)
@@ -3660,51 +3677,6 @@ def mark_intent_failure(
             """,
             (next_attempt, error, worker, now, now, intent_id, project_id),
         )
-        conn.execute(
-            """
-            UPDATE coverage_items
-            SET execution_status = CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM coverage_intents AS ci
-                        JOIN intents AS i
-                          ON i.project_id = ci.project_id AND i.id = ci.intent_id
-                        WHERE ci.project_id = ?
-                          AND ci.coverage_id = coverage_items.id
-                          AND ci.intent_id <> ?
-                          AND i.status = 'open'
-                          AND i.to_fact_id IS NULL
-                    ) THEN 'queued'
-                    ELSE 'blocked'
-                END,
-                status = CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM coverage_intents AS ci
-                        JOIN intents AS i
-                          ON i.project_id = ci.project_id AND i.id = ci.intent_id
-                        WHERE ci.project_id = ?
-                          AND ci.coverage_id = coverage_items.id
-                          AND ci.intent_id <> ?
-                          AND i.status = 'open'
-                          AND i.to_fact_id IS NULL
-                    ) THEN 'untested'
-                    ELSE 'failed'
-                END,
-                outcome = NULL,
-                updated_at = ?
-            WHERE project_id = ?
-              AND id IN (
-                  SELECT coverage_id FROM coverage_intents
-                  WHERE project_id = ? AND intent_id = ?
-              )
-              AND execution_status <> 'completed'
-            """,
-            (
-                project_id, intent_id, project_id, intent_id, now,
-                project_id, project_id, intent_id,
-            ),
-        )
     else:
         conn.execute(
             """
@@ -3727,27 +3699,21 @@ def mark_intent_failure(
                 int(uncertain_mutation), int(uncertain_mutation), intent_id, project_id,
             ),
         )
-        conn.execute(
-            """
-            UPDATE coverage_items
-            SET execution_status = 'queued', status = 'untested', outcome = NULL, updated_at = ?
-            WHERE project_id = ?
-              AND id IN (
-                  SELECT coverage_id FROM coverage_intents
-                  WHERE project_id = ? AND intent_id = ?
-              )
-              AND execution_status <> 'completed'
-            """,
-            (now, project_id, project_id, intent_id),
-        )
-    if not retry_forever and next_attempt >= max_attempts:
-        conn.execute(
-            """UPDATE hypotheses SET status = 'inconclusive', last_error = ?, updated_at = ?
-               WHERE project_id = ? AND intent_id = ?
-                 AND status NOT IN ('supported', 'refuted', 'waived')""",
-            (error[:2000], now, project_id, intent_id),
-        )
-    else:
+        if project_is_web(conn, project_id):
+            conn.execute(
+                """
+                UPDATE coverage_items
+                SET execution_status = 'queued', status = 'untested', outcome = NULL, updated_at = ?
+                WHERE project_id = ?
+                  AND id IN (
+                      SELECT coverage_id FROM coverage_intents
+                      WHERE project_id = ? AND intent_id = ?
+                  )
+                  AND execution_status <> 'completed'
+                """,
+                (now, project_id, project_id, intent_id),
+            )
+    if real_web:
         conn.execute(
             """UPDATE hypotheses SET status = 'planned', last_error = ?, updated_at = ?
                WHERE project_id = ? AND intent_id = ?
@@ -3765,17 +3731,6 @@ def mark_intent_failure(
             failure_stage="execution_failed",
             now=now,
         )
-        if real_web:
-            conn.execute(
-                """UPDATE coverage_items
-                   SET execution_status = 'queued', status = 'untested',
-                       outcome = NULL, updated_at = ?
-                   WHERE project_id = ? AND id IN (
-                       SELECT coverage_id FROM coverage_intents
-                       WHERE project_id = ? AND intent_id = ?
-                   )""",
-                (now, project_id, project_id, intent_id),
-            )
 
     updated = conn.execute(
         "SELECT * FROM intents WHERE id = ? AND project_id = ?",
@@ -4139,16 +4094,17 @@ def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> N
     )
     now = utcnow()
     for stale in stale_rows:
-        conn.execute(
-            """UPDATE coverage_items
-               SET execution_status = 'queued', status = 'untested',
-                   outcome = NULL, updated_at = ?
-               WHERE project_id = ? AND id IN (
-                   SELECT coverage_id FROM coverage_intents
-                   WHERE project_id = ? AND intent_id = ?
-               ) AND execution_status = 'testing'""",
-            (now, stale["project_id"], stale["project_id"], stale["id"]),
-        )
+        if project_is_web(conn, stale["project_id"]):
+            conn.execute(
+                """UPDATE coverage_items
+                   SET execution_status = 'queued', status = 'untested',
+                       outcome = NULL, updated_at = ?
+                   WHERE project_id = ? AND id IN (
+                       SELECT coverage_id FROM coverage_intents
+                       WHERE project_id = ? AND intent_id = ?
+                   ) AND execution_status = 'testing'""",
+                (now, stale["project_id"], stale["project_id"], stale["id"]),
+            )
 
 
 def expire_reason_leases(conn: sqlite3.Connection, project_id: str | None = None) -> None:

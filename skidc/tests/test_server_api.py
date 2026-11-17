@@ -154,7 +154,7 @@ def test_frontend_automatically_refreshes_project_state(http_client: TestClient)
 
 
 def test_create_project_seeds_origin_and_goal(http_client: TestClient) -> None:
-    r = http_client.post("/projects", json={"title": "t", "origin": "10.0.0.5", "goal": "root"})
+    r = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "10.0.0.5", "goal": "root"})
     assert r.status_code == 201
     body = r.json()
     assert body["project"]["status"] == "active"
@@ -164,7 +164,7 @@ def test_create_project_seeds_origin_and_goal(http_client: TestClient) -> None:
 def test_project_reads_do_not_require_sqlite_write_lock(http_client: TestClient) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "t", "origin": "o", "goal": "g"},
+        json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
     writer = sqlite3.connect(db._db_path, timeout=0.1)
     writer.execute("BEGIN IMMEDIATE")
@@ -177,7 +177,7 @@ def test_project_reads_do_not_require_sqlite_write_lock(http_client: TestClient)
 
 
 def test_intent_claim_conclude_creates_fact(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     iid = http_client.post(
         f"/projects/{pid}/intents",
         json={"from": ["origin"], "description": "scan", "creator": "r", "worker": None},
@@ -191,7 +191,7 @@ def test_intent_claim_conclude_creates_fact(http_client: TestClient) -> None:
 
 
 def test_claimed_intent_blocks_other_worker(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     iid = http_client.post(
         f"/projects/{pid}/intents",
         json={"from": ["origin"], "description": "x", "creator": "r", "worker": None},
@@ -202,7 +202,7 @@ def test_claimed_intent_blocks_other_worker(http_client: TestClient) -> None:
 
 
 def test_complete_marks_project_completed(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     iid = http_client.post(
         f"/projects/{pid}/intents", json={"from": ["origin"], "description": "x", "creator": "r"},
     ).json()["id"]
@@ -213,7 +213,7 @@ def test_complete_marks_project_completed(http_client: TestClient) -> None:
 
 
 def test_complete_blocks_when_open_intents_remain(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     http_client.post(
         f"/projects/{pid}/intents",
         json={"from": ["origin"], "description": "still needs testing", "creator": "r"},
@@ -232,27 +232,15 @@ def test_complete_blocks_when_open_intents_remain(http_client: TestClient) -> No
 
 
 def test_complete_allows_terminal_failed_result_fact(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     iid = http_client.post(
         f"/projects/{pid}/intents",
         json={
             "from": ["origin"],
             "description": "verify possible RCE",
             "creator": "r",
-            "priority": 10,
-            "action_kind": "rce_probe",
         },
     ).json()["id"]
-    coverage = http_client.post(
-        f"/projects/{pid}/coverage",
-        json={
-            "item_type": "vuln_class",
-            "description": "RCE verification attempt.",
-            "test_family": "file_path",
-            "intent_id": iid,
-            "priority": 10,
-        },
-    ).json()
     failed = http_client.post(
         f"/projects/{pid}/intents/{iid}/failure",
         json={"worker": "w1", "error": "timeout", "max_attempts": 1, "backoff_seconds": 0},
@@ -271,14 +259,12 @@ def test_complete_allows_terminal_failed_result_fact(http_client: TestClient) ->
     failed_intent = next(item for item in detail["intents"] if item["id"] == iid)
     assert failed_intent["status"] == "concluded"
     assert next(fact for fact in detail["facts"] if fact["id"] == failed_intent["to"])["status"] is None
-    result = next(item for item in detail["coverage_items"] if item["id"] == coverage["id"])
-    assert result["status"] == "inconclusive"
-    assert result["execution_status"] == "completed"
-    assert result["outcome"] == "inconclusive"
+    assert detail["coverage_items"] == []
+
 
 
 def test_coverage_item_create_update_and_project_detail(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "real_website", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     iid = http_client.post(
         f"/projects/{pid}/intents",
         json={"from": ["origin"], "description": "test login form", "creator": "r"},
@@ -321,121 +307,46 @@ def test_coverage_item_create_update_and_project_detail(http_client: TestClient)
     assert detail["coverage_items"][0]["id"] == "cov001"
 
 
-def test_intent_conclude_reconciles_multiple_coverage_items(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
-    coverage_ids = []
-    for description, item_type in (
-        ("Admin login authentication bypass", "admin_route"),
-        ("Admin login SQL injection", "param"),
-    ):
-        response = http_client.post(
-            f"/projects/{pid}/coverage",
-            json={
-                "item_type": item_type,
-                "path": "/admin/login.php",
-                "description": description,
-                "priority": 9,
-            },
-        )
-        assert response.status_code == 201
-        coverage_ids.append(response.json()["id"])
 
-    intent_response = http_client.post(
-        f"/projects/{pid}/intents",
-        json={
-            "from": ["origin"],
-            "description": "verify admin login",
-            "creator": "reasoner",
-            "coverage_refs": coverage_ids,
-        },
-    )
-    assert intent_response.status_code == 201
-    intent_id = intent_response.json()["id"]
-    assert intent_response.json()["coverage_refs"] == coverage_ids
+def test_ctf_conclusion_does_not_reconcile_multiple_legacy_coverage_items(http_client: TestClient) -> None:
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "legacy", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    intent_id = http_client.post(f"/projects/{pid}/intents", json={"from": ["origin"], "description": "observe", "creator": "w1", "worker": "w1"}).json()["id"]
+    with db.get_conn() as conn:
+        for cid in ("c001", "c002"):
+            conn.execute("INSERT INTO coverage_items (id, project_id, item_type, description, created_at, updated_at) VALUES (?, ?, 'route', 'Historical coverage', 'old', 'old')", (cid, pid))
+            conn.execute("INSERT INTO coverage_intents (coverage_id, project_id, intent_id, created_at) VALUES (?, ?, ?, 'old')", (cid, pid, intent_id))
+        before = [dict(row) for row in conn.execute("SELECT * FROM coverage_items WHERE project_id = ? ORDER BY id", (pid,))]
+    rejected = http_client.post(f"/projects/{pid}/intents/{intent_id}/conclude", json={"worker": "w1", "description": "observed", "coverage_refs": ["c001", "c002"]})
+    assert rejected.status_code == 422
+    concluded = http_client.post(f"/projects/{pid}/intents/{intent_id}/conclude", json={"worker": "w1", "description": "objective result"})
+    assert concluded.status_code == 200
+    assert concluded.json()["fact"]["coverage_refs"] == []
+    with db.get_conn() as conn:
+        assert [dict(row) for row in conn.execute("SELECT * FROM coverage_items WHERE project_id = ? ORDER BY id", (pid,))] == before
+        assert conn.execute("SELECT COUNT(*) FROM coverage_evidence WHERE project_id = ?", (pid,)).fetchone()[0] == 0
 
-    assert http_client.post(
-        f"/projects/{pid}/intents/{intent_id}/heartbeat",
-        json={"worker": "w1"},
-    ).status_code == 200
-    concluded = http_client.post(
-        f"/projects/{pid}/intents/{intent_id}/conclude",
-        json={
-            "worker": "w1",
-            "description": "Admin login SQL injection and authentication bypass confirmed.",
-            "status": "confirmed",
-            "severity": "critical",
-            "vuln_type": "sqli_auth_bypass",
-        },
-    )
 
+
+def test_ctf_observation_does_not_acquire_a_web_verdict(http_client: TestClient) -> None:
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "observation", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    intent = http_client.post(f"/projects/{pid}/intents", json={"from": ["origin"], "description": "observe", "creator": "w1", "worker": "w1"}).json()
+    concluded = http_client.post(f"/projects/{pid}/intents/{intent['id']}/conclude", json={"worker": "w1", "description": "A repeatable response difference was observed."})
     assert concluded.status_code == 200
     fact = concluded.json()["fact"]
-    assert fact["coverage_refs"] == coverage_ids
-    listed = http_client.get(f"/projects/{pid}/coverage").json()
-    assert {item["status"] for item in listed} == {"confirmed"}
-    assert all(item["intent_ids"] == [intent_id] for item in listed)
-    assert all(item["evidence_fact_ids"] == [fact["id"]] for item in listed)
+    assert fact["status"] is None
+    assert fact["severity"] is None
+    assert fact["recon_category"] is None
+    for status in ("confirmed", "failed", "refuted"):
+        response = http_client.put(f"/projects/{pid}/facts/{fact['id']}", json={"status": status})
+        assert response.status_code == 409
+    stored = next(row for row in http_client.get(f"/projects/{pid}").json()["facts"] if row["id"] == fact["id"])
+    assert stored["description"] == fact["description"]
+    assert stored["status"] is None
 
-
-def test_intent_conclude_without_structured_status_is_inconclusive(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
-    coverage = http_client.post(
-        f"/projects/{pid}/coverage",
-        json={
-            "item_type": "admin_route",
-            "path": "/admin/login.php",
-            "description": "Admin login authentication bypass",
-            "priority": 9,
-        },
-    ).json()
-    intent_response = http_client.post(
-        f"/projects/{pid}/intents",
-        json={
-            "from": ["origin"],
-            "description": "verify admin login",
-            "creator": "w1",
-            "worker": "w1",
-            "coverage_refs": [coverage["id"]],
-        },
-    )
-    assert intent_response.status_code == 201
-    intent = intent_response.json()
-
-    concluded = http_client.post(
-        f"/projects/{pid}/intents/{intent['id']}/conclude",
-        json={"worker": "w1", "description": "Admin login request completed without a structured verdict."},
-    )
-
-    assert concluded.status_code == 200
-    item = http_client.get(f"/projects/{pid}/coverage").json()[0]
-    assert item["status"] == "inconclusive"
-    fact_id = concluded.json()["fact"]["id"]
-    assert item["evidence_fact_ids"] == [fact_id]
-
-    verified = http_client.put(
-        f"/projects/{pid}/facts/{fact_id}",
-        json={"status": "confirmed", "recon_evidence_ref": "login response evidence"},
-    )
-    assert verified.status_code == 200
-    assert http_client.get(f"/projects/{pid}/coverage").json()[0]["status"] == "confirmed"
-
-    failed = http_client.put(
-        f"/projects/{pid}/facts/{fact_id}",
-        json={"status": "failed", "recon_evidence_ref": "verification method stopped producing evidence"},
-    )
-    assert failed.status_code == 200
-    assert http_client.get(f"/projects/{pid}/coverage").json()[0]["status"] == "inconclusive"
-
-    refuted = http_client.put(
-        f"/projects/{pid}/facts/{fact_id}",
-        json={"status": "refuted", "recon_evidence_ref": "retest disproved bypass"},
-    )
-    assert refuted.status_code == 200
-    assert http_client.get(f"/projects/{pid}/coverage").json()[0]["status"] == "not_vulnerable"
 
 
 def test_coverage_creation_does_not_text_match_existing_terminal_fact(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "real_website", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     open_fact = http_client.post(
         f"/projects/{pid}/facts",
         json={
@@ -479,6 +390,7 @@ def test_coverage_creation_does_not_text_match_existing_terminal_fact(http_clien
     assert second_reconcile.status_code == 200
     assert first_reconcile.json()[0] == second_reconcile.json()[0]
     assert second_reconcile.json()[0]["evidence_fact_ids"] == []
+
 
 
 def test_surface_inventory_upsert_and_profile_coverage_fields(http_client: TestClient) -> None:
@@ -694,177 +606,83 @@ def test_non_required_support_service_does_not_block_completion(http_client: Tes
     assert completed.status_code == 200
 
 
+def _assert_legacy_ctf_completion(http_client, *, coverage_status=None, priority=10, fact_status=None):
+    """Import historical mixed metadata; the new API deliberately rejects these fields."""
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "legacy", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO facts (id, project_id, description, status, severity) VALUES ('f001', ?, 'Recorded goal evidence', ?, 'critical')", (pid, fact_status))
+        if coverage_status is not None:
+            conn.execute("INSERT INTO coverage_items (id, project_id, item_type, description, status, priority, created_at, updated_at) VALUES ('c001', ?, 'route', 'Historical Web metadata', ?, ?, 'old', 'old')", (pid, coverage_status, priority))
+    response = http_client.post(f"/projects/{pid}/complete", json={"from": ["f001"], "description": "recorded goal evidence", "worker": "w1"})
+    assert response.status_code == 200, response.text
+    assert http_client.get(f"/projects/{pid}").json()["project"]["status"] == "completed"
+
+
 def test_complete_allows_unresolved_coverage_as_report_limitation(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
-    http_client.post(
-        f"/projects/{pid}/coverage",
-        json={
-            "item_type": "upload_point",
-            "path": "/xhcms/upload.php",
-            "description": "Upload endpoint needs verification.",
-            "status": "inconclusive",
-            "priority": 10,
-        },
-    )
+    _assert_legacy_ctf_completion(http_client, coverage_status="inconclusive", priority=10)
 
-    completed = http_client.post(
-        f"/projects/{pid}/complete",
-        json={"from": ["origin"], "description": "done with an explicit limitation", "worker": "w1"},
-    )
 
-    assert completed.status_code == 200
-    detail = http_client.get(f"/projects/{pid}").json()
-    assert detail["project"]["status"] == "completed"
-    assert detail["project"]["completion_blockers"] == []
-    assert detail["coverage_items"][0]["status"] == "inconclusive"
 
 
 def test_complete_allows_low_priority_unresolved_coverage(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
-    http_client.post(
-        f"/projects/{pid}/coverage",
-        json={
-            "item_type": "route",
-            "path": "/xhcms/static/logo.png",
-            "description": "Low-value static asset note.",
-            "status": "untested",
-            "priority": 4,
-        },
-    )
+    _assert_legacy_ctf_completion(http_client, coverage_status="untested", priority=4)
 
-    r = http_client.post(f"/projects/{pid}/complete", json={"from": ["origin"], "description": "done", "worker": "w1"})
 
-    assert r.status_code == 200
-    assert http_client.get(f"/projects/{pid}").json()["project"]["status"] == "completed"
 
 
 def test_complete_allows_resolved_completion_priority_coverage(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
-    item = http_client.post(
-        f"/projects/{pid}/coverage",
-        json={
-            "item_type": "param",
-            "path": "/xhcms/index.php",
-            "param": "id",
-            "description": "SQLi check for id parameter.",
-            "status": "untested",
-            "priority": 10,
-        },
-    ).json()
-    http_client.put(
-        f"/projects/{pid}/coverage/{item['id']}",
-        json={"status": "not_vulnerable", "evidence_ref": "boolean and time probes were negative"},
-    )
+    _assert_legacy_ctf_completion(http_client, coverage_status="not_vulnerable", priority=10)
 
-    r = http_client.post(f"/projects/{pid}/complete", json={"from": ["origin"], "description": "done", "worker": "w1"})
 
-    assert r.status_code == 200
-    assert http_client.get(f"/projects/{pid}").json()["project"]["status"] == "completed"
 
 
 def test_complete_allows_pending_critical_fact_as_unconfirmed_result(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
-    fact = http_client.post(
-        f"/projects/{pid}/facts",
-        json={
-            "description": "RCE appears possible through the upload endpoint.",
-            "vuln_type": "rce",
-            "severity": "critical",
-            "status": "pending",
-        },
-    ).json()
+    _assert_legacy_ctf_completion(http_client, fact_status="pending")
 
-    completed = http_client.post(
-        f"/projects/{pid}/complete",
-        json={"from": [fact["id"]], "description": "RCE remains unconfirmed", "worker": "w1"},
-    )
 
-    assert completed.status_code == 200
-    assert http_client.get(f"/projects/{pid}").json()["project"]["status"] == "completed"
 
 
 def test_confirmed_critical_fact_does_not_prevent_finite_completion(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
-    fact = http_client.post(
-        f"/projects/{pid}/facts",
-        json={
-            "description": "Upload endpoint allows PHP execution.",
-            "vuln_type": "rce",
-            "severity": "critical",
-            "status": "confirmed",
-            "recon_evidence_ref": "harmless marker response",
-        },
-    ).json()
+    _assert_legacy_ctf_completion(http_client, fact_status="confirmed")
 
-    completed = http_client.post(
-        f"/projects/{pid}/complete",
-        json={"from": [fact["id"]], "description": "confirmed result reported", "worker": "w1"},
-    )
 
-    assert completed.status_code == 200
-    assert http_client.get(f"/projects/{pid}").json()["project"]["status"] == "completed"
 
 
 def test_complete_allows_verified_high_risk_findings(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
-    fact = http_client.post(
-        f"/projects/{pid}/facts",
-        json={
-            "description": "SQL injection confirmed with boolean and time-based checks.",
-            "vuln_type": "sqli",
-            "severity": "high",
-            "status": "confirmed",
-        },
-    ).json()
-    verification = http_client.post(
-        f"/projects/{pid}/facts",
-        json={
-            "description": "A second technique independently reproduced the SQL injection.",
-            "vuln_type": "sqli",
-            "severity": "high",
-            "status": "verified",
-            "verification_of": fact["id"],
-        },
-    ).json()
+    _assert_legacy_ctf_completion(http_client, fact_status="verified")
 
-    r = http_client.post(
-        f"/projects/{pid}/complete",
-        json={"from": [fact["id"], verification["id"]], "description": "done", "worker": "w1"},
-    )
 
-    assert r.status_code == 200
-    assert http_client.get(f"/projects/{pid}").json()["project"]["status"] == "completed"
 
 
 def test_goal_cannot_be_used_as_intent_source(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     r = http_client.post(f"/projects/{pid}/intents", json={"from": ["goal"], "description": "x", "creator": "r"})
     assert r.status_code == 400
 
 
 def test_reason_lease_claim_and_conflict(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     assert http_client.post(f"/projects/{pid}/reason/claim", json={"worker": "w1", "trigger": "initial"}).status_code == 200
     assert http_client.post(f"/projects/{pid}/reason/claim", json={"worker": "w2", "trigger": "initial"}).status_code == 409
     assert http_client.post(f"/projects/{pid}/reason/release", json={"worker": "w1"}).status_code == 200
 
 
 def test_stop_clears_workers_and_blocks_writes(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     http_client.put(f"/projects/{pid}/status", json={"status": "stopped"})
     r = http_client.post(f"/projects/{pid}/intents", json={"from": ["origin"], "description": "x", "creator": "r"})
     assert r.status_code == 403
 
 
 def test_hint_can_be_added(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     r = http_client.post(f"/projects/{pid}/hints", json={"content": "try default creds", "creator": "human"})
     assert r.status_code == 201
     assert http_client.get(f"/projects/{pid}").json()["hints"][0]["content"] == "try default creds"
 
 
 def test_export_yaml_and_timeline(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     assert "project:" in http_client.get(f"/projects/{pid}/export?format=yaml").text
     assert "PROJECT CREATED" in http_client.get(f"/projects/{pid}/export?format=timeline").text
 
@@ -1268,8 +1086,8 @@ def test_recon_completion_is_informational_and_http_tls_coverage_is_not_applicab
     assert completed.status_code == 200
 
 
-def test_conclude_persists_structured_fields(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+def test_ctf_conclude_rejects_web_labels_and_preserves_evidence(http_client: TestClient) -> None:
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     iid = http_client.post(
         f"/projects/{pid}/intents",
         json={"from": ["origin"], "description": "probe admin", "creator": "r", "worker": None},
@@ -1283,17 +1101,16 @@ def test_conclude_persists_structured_fields(http_client: TestClient) -> None:
             "severity": "high", "parent_fact": "origin",
         },
     )
+    assert r.status_code == 422
+    assert len(http_client.get(f"/projects/{pid}").json()["facts"]) == 2
+    r = http_client.post(f"/projects/{pid}/intents/{iid}/conclude", json={"worker": "w1", "description": "IDOR is text in the challenge", "evidence_refs": ["artifact:observation"]})
     assert r.status_code == 200
     fact = r.json()["fact"]
-    assert fact["scope"] == "api.example.com/admin"
-    assert fact["vuln_type"] == "IDOR"
-    assert fact["severity"] == "high"
-    assert fact["parent_fact"] == "origin"
-    # round-trips through get_project and export
-    detail_fact = next(f for f in http_client.get(f"/projects/{pid}").json()["facts"] if f["id"] == fact["id"])
-    assert detail_fact["severity"] == "high"
-    yaml_text = http_client.get(f"/projects/{pid}/export?format=yaml").text
-    assert "IDOR" in yaml_text
+    assert fact["severity"] is None
+    assert fact["vuln_type"] is None
+    assert "artifact:observation" in fact["evidence_refs"]
+    assert "IDOR is text in the challenge" in http_client.get(f"/projects/{pid}/export?format=yaml").text
+
 
 
 def _seed_fact(http_client: TestClient, pid: str, description: str, status: str | None = None) -> str:
@@ -1304,23 +1121,23 @@ def _seed_fact(http_client: TestClient, pid: str, description: str, status: str 
     http_client.post(f"/projects/{pid}/intents/{iid}/heartbeat", json={"worker": "w1"})
     return http_client.post(
         f"/projects/{pid}/intents/{iid}/conclude",
-        json={"worker": "w1", "description": description, "status": status},
+        json={"worker": "w1", "description": description, **({"status": status} if status is not None else {})},
     ).json()["fact"]["id"]
+
 
 
 def _complete_confirmed_attack_chain(http_client: TestClient) -> tuple[str, str]:
     pid = http_client.post(
         "/projects",
-        json={"title": "derived path", "origin": "o", "goal": "g"},
+        json={"mode": "ctf", "title": "derived path", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
-    first_fact = _seed_fact(http_client, pid, "authentication boundary reached", "confirmed")
+    first_fact = _seed_fact(http_client, pid, "authentication boundary reached")
     second_intent = http_client.post(
         f"/projects/{pid}/intents",
         json={
             "from": [first_fact],
             "description": "verify object authorization impact",
             "creator": "reasoner",
-            "action_kind": "authorization_probe",
         },
     ).json()
     http_client.post(
@@ -1332,9 +1149,6 @@ def _complete_confirmed_attack_chain(http_client: TestClient) -> tuple[str, str]
         json={
             "worker": "w1",
             "description": "Confirmed unauthorized access to another user's object.",
-            "status": "confirmed",
-            "vuln_type": "IDOR",
-            "severity": "high",
         },
     ).json()["fact"]["id"]
     assert http_client.get(f"/projects/{pid}/attack-paths").json() == []
@@ -1350,12 +1164,13 @@ def _complete_confirmed_attack_chain(http_client: TestClient) -> tuple[str, str]
     return pid, terminal_fact
 
 
+
 def test_attack_paths_are_read_only_goal_derived_and_disappear_on_reopen(
     http_client: TestClient,
 ) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "no manual paths", "origin": "o", "goal": "g"},
+        json={"mode": "ctf", "title": "no manual paths", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
     blocked_write = http_client.post(
         f"/projects/{pid}/attack-paths",
@@ -1389,7 +1204,7 @@ def test_attack_paths_are_read_only_goal_derived_and_disappear_on_reopen(
     assert http_client.get(f"/projects/{pid}/attack-paths").json() == []
 
 def test_attack_path_rejects_unknown_fact(http_client: TestClient) -> None:
-    pid = http_client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
+    pid = http_client.post("/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"}).json()["project"]["id"]
     r = http_client.post(
         f"/projects/{pid}/attack-paths",
         json={"name": "bad", "fact_chain": ["f999"], "description": "no such fact"},
@@ -1664,7 +1479,7 @@ def test_real_website_conclude_cannot_rebind_coverage(http_client: TestClient) -
 def test_fact_verification_reference_is_persisted(http_client: TestClient) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "verify", "origin": "https://example.test/", "goal": "g"},
+        json={"mode": "real_website", "title": "verify", "origin": "https://example.test/", "goal": "g"},
     ).json()["project"]["id"]
     original = http_client.post(
         f"/projects/{pid}/facts",
@@ -1690,6 +1505,7 @@ def test_fact_verification_reference_is_persisted(http_client: TestClient) -> No
 
     yaml_text = http_client.get(f"/projects/{pid}/export?format=yaml").text
     assert f"verification_of: {original['id']}" in yaml_text
+
 
 def test_variant_results_wait_for_independent_verification(http_client: TestClient) -> None:
     pid = http_client.post(
@@ -1790,7 +1606,7 @@ def test_variant_results_wait_for_independent_verification(http_client: TestClie
 def test_verification_rejects_a_different_variant(http_client: TestClient) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "verify", "origin": "https://example.test/", "goal": "g"},
+        json={"mode": "real_website", "title": "verify", "origin": "https://example.test/", "goal": "g"},
     ).json()["project"]["id"]
     original = http_client.post(
         f"/projects/{pid}/facts",
@@ -1806,6 +1622,7 @@ def test_verification_rejects_a_different_variant(http_client: TestClient) -> No
         },
     )
     assert rejected.status_code == 409
+
 
 
 def test_coverage_exclusion_is_optional_for_completion(http_client: TestClient) -> None:
@@ -1859,7 +1676,7 @@ def test_structured_coverage_creation_merges_same_responsibility(
 ) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "merge", "origin": "https://example.test/", "goal": "assess"},
+        json={"mode": "real_website", "title": "merge", "origin": "https://example.test/", "goal": "assess"},
     ).json()["project"]["id"]
     first = http_client.post(
         f"/projects/{pid}/coverage",
@@ -1908,12 +1725,13 @@ def test_structured_coverage_creation_merges_same_responsibility(
     assert items[0]["intent_ids"] == [intent["id"]]
 
 
+
 def test_legacy_duplicate_profile_coverage_merges_idempotently(
     http_client: TestClient,
 ) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "legacy merge", "origin": "https://example.test/", "goal": "assess"},
+        json={"mode": "real_website", "title": "legacy merge", "origin": "https://example.test/", "goal": "assess"},
     ).json()["project"]["id"]
     original = http_client.post(
         f"/projects/{pid}/coverage",
@@ -1955,6 +1773,7 @@ def test_legacy_duplicate_profile_coverage_merges_idempotently(
     assert items[0]["id"] == original["id"]
     assert items[0]["priority"] == 9
     assert items[0]["test_variants"] == ["command", "sql"]
+
 
 
 def test_reconcile_does_not_infer_legacy_variant_evidence_from_binding(
@@ -2021,7 +1840,7 @@ def test_project_list_and_detail_ignore_legacy_attack_path_rows(
 ) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "legacy path", "origin": "o", "goal": "g"},
+        json={"mode": "ctf", "title": "legacy path", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
     with get_conn() as conn:
         conn.execute(
@@ -2054,7 +1873,7 @@ def test_task_log_list_reads_bounded_previews_and_detail_keeps_full_output(
 ) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "bounded logs", "origin": "o", "goal": "g"},
+        json={"mode": "ctf", "title": "bounded logs", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
     created = http_client.post(
         f"/projects/{pid}/logs",
@@ -2091,7 +1910,7 @@ def test_report_keeps_confirmed_negative_failed_inconclusive_and_untested_separa
 ) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "result classes", "origin": "https://example.test", "goal": "assess"},
+        json={"mode": "ctf", "title": "result classes", "origin": "https://example.test", "goal": "assess"},
     ).json()["project"]["id"]
     for status, description in (
         ("confirmed", "Confirmed SQL injection."),
@@ -2099,27 +1918,10 @@ def test_report_keeps_confirmed_negative_failed_inconclusive_and_untested_separa
         ("failed", "SQLMap process failed."),
         ("inconclusive", "Upload test timed out."),
     ):
-        response = http_client.post(
-            f"/projects/{pid}/facts",
-            json={
-                "description": description,
-                "status": status,
-                "vuln_type": "sql" if status == "confirmed" else None,
-                "severity": "high" if status == "confirmed" else None,
-            },
-        )
-        assert response.status_code == 201
-    http_client.post(
-        f"/projects/{pid}/coverage",
-        json={
-            "item_type": "vuln_class",
-            "description": "Untested CSRF responsibility",
-            "surface_group": "web:/submit",
-            "test_family": "session_csrf",
-            "test_variants": ["csrf"],
-            "priority": 6,
-        },
-    )
+        with db.get_conn() as conn:
+            conn.execute("INSERT INTO facts (id, project_id, description, status, vuln_type, severity) VALUES (?, ?, ?, ?, ?, ?)", (status, pid, description, status, "sql" if status == "confirmed" else None, "high" if status == "confirmed" else None))
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO coverage_items (id, project_id, item_type, description, surface_group, test_family, test_variants, priority, created_at, updated_at) VALUES ('c001', ?, 'vuln_class', 'Untested CSRF responsibility', 'web:/submit', 'session_csrf', '[\"csrf\"]', 6, 'old', 'old')", (pid,))
 
     report = http_client.get(f"/projects/{pid}/export?format=report").text
     assert "### Failed Tests" in report
@@ -2127,6 +1929,7 @@ def test_report_keeps_confirmed_negative_failed_inconclusive_and_untested_separa
     assert "### Negative Tests" in report
     assert "Variant csrf: untested" in report
     assert "Confirmed SQL injection." in report
+
 
 def test_index_serves_attack_path_ui_as_utf8(http_client: TestClient) -> None:
     response = http_client.get("/")
@@ -2142,7 +1945,7 @@ def test_concluded_fact_persists_its_execution_log_as_evidence(
 ) -> None:
     pid = http_client.post(
         "/projects",
-        json={"title": "evidence", "origin": "https://example.test", "goal": "assess"},
+        json={"mode": "ctf", "title": "evidence", "origin": "https://example.test", "goal": "assess"},
     ).json()["project"]["id"]
     intent = http_client.post(
         f"/projects/{pid}/intents",
@@ -2151,8 +1954,6 @@ def test_concluded_fact_persists_its_execution_log_as_evidence(
             "description": "Verify one concrete SQL injection hypothesis",
             "creator": "worker",
             "worker": "worker",
-            "action_kind": "injection_hypothesis",
-            "test_variant": "sql_injection",
         },
     ).json()
     task_log = http_client.post(
@@ -2174,15 +1975,13 @@ def test_concluded_fact_persists_its_execution_log_as_evidence(
         json={
             "worker": "worker",
             "description": "The bounded boolean probe produced a repeatable response split.",
-            "status": "confirmed",
-            "vuln_type": "sql_injection",
-            "severity": "high",
         },
     )
     assert concluded.status_code == 200
     fact = concluded.json()["fact"]
     assert f"task_log:{task_log['id']}" in fact["evidence_refs"]
     assert task_log["id"] in fact["task_log_refs"]
+
 
 
 def _mixed_web_assessment_project(http_client: TestClient) -> str:

@@ -20,9 +20,10 @@ from skidc.dispatcher.contracts import (
     parse_json_output,
     validate_reason_payload,
 )
+from skidc.dispatcher.ctf_contracts import validate_ctf_reason_payload
 from skidc.dispatcher.recon_extractor import check_recon_executed, format_recon_status
 from skidc.dispatcher.prompting import (
-    format_dispatch_graph,
+    format_task_graph,
     format_fact_ids,
     format_open_intents,
     format_scope_constraints,
@@ -100,6 +101,8 @@ def run_reason_task(
     cancellation: TaskCancellation,
     trigger: str | None = None,
 ) -> str:
+    config = config.for_project(project.project.mode, project.project.recon_profile.target_type)
+    worker = next(item for item in config.workers if item.name == worker.name)
     driver = get_driver(worker.type)
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
@@ -179,6 +182,7 @@ def run_reason_task(
         prompt = render_prompt(
             load_prompt(config.runtime.prompt_group, "reason.md"),
             {
+                "mode": project.project.mode,
                 "current_phase": current_phase,
                 "scope_constraints": format_scope_constraints(project),
                 "recon_status": recon_status_text,
@@ -186,9 +190,7 @@ def run_reason_task(
                 "graph_yaml": write_graph_snapshot_reference(
                     container_manager,
                     container_name,
-                    format_dispatch_graph(project)
-                    if project.project.planning_version >= 3
-                    else export_yaml.strip(),
+                    format_task_graph(project, export_yaml),
                     phase="reason_execute",
                 ),
                 "fact_ids": format_fact_ids(allowed_fact_ids),
@@ -254,19 +256,22 @@ def run_reason_task(
         try:
             model_output = driver.extract_response_text(result.stdout, result.stderr)
             payload = parse_json_output(model_output)
-            kind, data, recon_complete = validate_reason_payload(
-                payload,
-                open_intents_empty=not open_intents,
-                max_intents=reason_max_intents,
-                web_mode=project.project.mode == "real_website",
-            )
+            if project.project.mode == "ctf":
+                kind, data, recon_complete = validate_ctf_reason_payload(
+                    payload, open_intents_empty=not open_intents, max_intents=reason_max_intents,
+                )
+            else:
+                kind, data, recon_complete = validate_reason_payload(
+                    payload, open_intents_empty=not open_intents,
+                    max_intents=reason_max_intents, web_mode=True,
+                )
         except Exception as exc:
             LOG.warning("reason parse failed project=%s worker=%s error=%s execute_ms=%s stdout=%s stderr=%s", project.project.id, worker.name, exc, execute_ms, preview(result.stdout), preview(result.stderr))
             return "failed"
         if kind == "rejected":
             LOG.warning("reason rejected project=%s worker=%s execute_ms=%s stdout=%s", project.project.id, worker.name, execute_ms, preview(result.stdout))
             return "rejected"
-        if project.project.phase == "recon":
+        if project.project.mode == "real_website" and project.project.phase == "recon":
             gate_status = check_recon_executed(
                 project.facts, profile=project.project.recon_profile
             )
@@ -275,7 +280,7 @@ def run_reason_task(
                 kind = "noop"
                 data = None
         coverage_index = {_coverage_key(item.model_dump()): item.id for item in project.coverage_items}
-        handoff_fact_ids = _persist_reason_handoff(
+        handoff_fact_ids = {} if project.project.mode == "ctf" else _persist_reason_handoff(
             client,
             project.project.id,
             worker.name,
@@ -366,9 +371,11 @@ def run_reason_task(
             )
             signatures = _existing_intent_signatures(project)
             for raw_intent_data in intent_batch:
-                intent_data = _bind_matching_surface(project, raw_intent_data)
-                if _clean_signature_text(intent_data.get("action_kind")) != "state_check":
-                    intent_data = _bind_matching_coverage(project, intent_data)
+                intent_data = raw_intent_data
+                if project.project.mode == "real_website":
+                    intent_data = _bind_matching_surface(project, intent_data)
+                    if _clean_signature_text(intent_data.get("action_kind")) != "state_check":
+                        intent_data = _bind_matching_coverage(project, intent_data)
                 signature = _intent_signature_from_data(project, intent_data)
                 if signature in signatures:
                     LOG.info(
@@ -417,29 +424,22 @@ def run_reason_task(
                 # become an observed Surface or Required Coverage until an
                 # executor commits a Fact with structured observed_surfaces.
                 materialize_seed_profile = (
-                    project.project.mode != "real_website"
-                    or project.project.planning_version < 3
+                    project.project.mode == "real_website"
+                    and project.project.planning_version < 3
                 )
                 if (
                     intent_id
                     and materialize_seed_profile
                     and (project.project.phase == "recon" or not coverage_refs)
                 ):
-                    if project.project.mode == "real_website":
-                        coverage_items = _profile_coverage_from_seed(
-                            client,
-                            project.project.id,
-                            intent_data,
-                            support_ports=project.project.scope_policy.support_ports,
-                            source_fact_id=handoff_fact_ids.get("explore_seed_deck"),
-                            intent_id=intent_id,
-                        )
-                    else:
-                        coverage_items = _coverage_from_seed_deck(
-                            [intent_data],
-                            source_fact_id=handoff_fact_ids.get("explore_seed_deck"),
-                            intent_id=intent_id,
-                        )
+                    coverage_items = _profile_coverage_from_seed(
+                        client,
+                        project.project.id,
+                        intent_data,
+                        support_ports=project.project.scope_policy.support_ports,
+                        source_fact_id=handoff_fact_ids.get("explore_seed_deck"),
+                        intent_id=intent_id,
+                    )
                     _create_coverage_items(
                         client,
                         project.project.id,
@@ -488,7 +488,7 @@ def run_reason_task(
             return "success"
 
         LOG.info("reason finished without graph change project=%s worker=%s execute_ms=%s total_ms=%s", project.project.id, worker.name, execute_ms, total_ms)
-        if project.project.planning_version >= 2 and project.project.phase == "explore":
+        if project.project.mode == "real_website" and project.project.planning_version >= 2 and project.project.phase == "explore":
             created = ensure_coverage_work(client, client.get_project(project.project.id), worker.name)
             if created:
                 return "success"

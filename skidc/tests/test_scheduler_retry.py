@@ -129,7 +129,7 @@ def _run_dispatch_cycle(loop) -> None:
 def test_intents_expose_retry_and_dead_letter_state(http_client: TestClient) -> None:
     project_id = http_client.post(
         "/projects",
-        json={"title": "t", "origin": "o", "goal": "g"},
+        json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
 
     response = http_client.post(
@@ -188,7 +188,7 @@ def test_web_project_read_expires_stale_intent_and_reason_leases(
 def test_intent_failure_records_retry_then_result_fact(http_client: TestClient) -> None:
     project_id = http_client.post(
         "/projects",
-        json={"title": "t", "origin": "o", "goal": "g"},
+        json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
     intent_id = http_client.post(
         f"/projects/{project_id}/intents",
@@ -228,7 +228,7 @@ def test_intent_failure_records_retry_then_result_fact(http_client: TestClient) 
 
 def test_conclusion_failure_also_produces_result_fact(http_client: TestClient) -> None:
     project_id = http_client.post(
-        "/projects", json={"title": "t", "origin": "o", "goal": "g"},
+        "/projects", json={"mode": "ctf", "title": "t", "origin": "o", "goal": "g"},
     ).json()["project"]["id"]
     intent = http_client.post(
         f"/projects/{project_id}/intents",

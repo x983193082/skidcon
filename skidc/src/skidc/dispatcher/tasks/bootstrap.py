@@ -4,10 +4,10 @@ import logging
 import time
 
 from skidc.dispatcher.config import DispatchConfig, WorkerConfig
-from skidc.dispatcher.contracts import (
-    parse_json_output,
-    validate_bootstrap_conclude_payload,
-    validate_bootstrap_execute_payload,
+from skidc.dispatcher.contracts import parse_json_output
+from skidc.dispatcher.ctf_contracts import (
+    validate_ctf_bootstrap_conclude_payload as validate_bootstrap_conclude_payload,
+    validate_ctf_bootstrap_execute_payload as validate_bootstrap_execute_payload,
 )
 from skidc.dispatcher.prompting import format_hints, format_scope_constraints, load_prompt, render_prompt
 from skidc.dispatcher.protocol.client import SkidcClient
@@ -44,6 +44,10 @@ def run_bootstrap_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
+    if project.project.mode != "ctf":
+        raise ValueError("Bootstrap requires CTF mode")
+    config = config.for_project(project.project.mode, project.project.recon_profile.target_type)
+    worker = next(item for item in config.workers if item.name == worker.name)
     driver = get_driver(worker.type)
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
@@ -133,6 +137,8 @@ def run_bootstrap_task(
                 kind, data = validate_bootstrap_execute_payload(payload)
             except Exception as exc:
                 LOG.warning("bootstrap parse failed project=%s intent=%s worker=%s error=%s execute_ms=%s stdout=%s stderr=%s", project.project.id, intent.id, worker.name, exc, execute_ms, preview(first.stdout), preview(first.stderr))
+                return _try_conclude_fallback(config, client, container_manager, container_name, worker, driver, project, intent, session, lease, cancellation)
+            if kind == "incomplete":
                 return _try_conclude_fallback(config, client, container_manager, container_name, worker, driver, project, intent, session, lease, cancellation)
             if kind == "rejected":
                 LOG.warning("bootstrap rejected project=%s intent=%s worker=%s execute_ms=%s stdout=%s", project.project.id, intent.id, worker.name, execute_ms, preview(first.stdout))

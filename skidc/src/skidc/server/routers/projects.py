@@ -9,6 +9,7 @@ import json
 import sqlite3
 
 from skidc.server.db import get_conn
+from skidc.server.mode_policy import require_web_mode, validate_ctf_write
 from skidc.server.models import (
     CompleteRequest,
     ContinueBlockedProjectRequest,
@@ -173,8 +174,8 @@ def create_project(body: CreateProjectRequest):
         pid = next_project_id(conn)
         now = utcnow()
 
-        mode = body.mode or ("ctf" if body.bootstrap_enabled else "real_website")
-        bootstrap_enabled = mode == "ctf"
+        mode = body.mode
+        bootstrap_enabled = mode == "ctf" and body.bootstrap_enabled
         phase = "explore" if mode == "ctf" else "recon"
         recon_profile = body.recon_profile or _target_aware_recon_profile(body.origin, body.scope_policy)
         conn.execute(
@@ -379,16 +380,11 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
 
 def _advance_project_phase(conn, project_id: str) -> PhaseAdvanceResponse:
     row = check_project_active(conn, project_id)
+    require_web_mode(row["mode"])
     if row["phase"] == "explore":
         return PhaseAdvanceResponse(
             advanced=False, from_phase="explore", to_phase="explore",
             code="already_explore", message="Project is already in explore.",
-        )
-    if row["mode"] != "real_website":
-        conn.execute("UPDATE projects SET phase = 'explore' WHERE id = ?", (project_id,))
-        return PhaseAdvanceResponse(
-            advanced=True, from_phase="recon", to_phase="explore",
-            code="advanced", message="Non-real-website project advanced to explore.",
         )
     backfill_legacy_recon_facts(conn, project_id)
     gate = recon_gate_result(conn, project_id, project_meta_from_row(row).recon_profile)
@@ -434,6 +430,7 @@ def advance_project_phase(project_id: str):
 def update_project_phase(project_id: str, body: UpdateProjectPhaseRequest):
     with get_conn() as conn:
         row = check_project_active(conn, project_id)
+        require_web_mode(row["mode"])
         if row["phase"] == "explore" and body.phase == "recon":
             raise HTTPException(
                 409, "Project phase is monotonic; explore cannot return to recon"
@@ -455,31 +452,14 @@ def update_project_phase(project_id: str, body: UpdateProjectPhaseRequest):
 @router.put("/projects/{project_id}/mode", response_model=ProjectMeta)
 def update_project_mode(project_id: str, body: UpdateProjectModeRequest):
     with get_conn() as conn:
-        row = get_project_or_404(conn, project_id)
-        current_status = row["status"]
-        if current_status == "completed":
-            raise HTTPException(409, "Completed projects cannot change mode")
-
-        bootstrap_enabled = body.mode == "ctf"
-        phase = "explore" if body.mode == "ctf" else "recon"
-        recon_profile_json = row["recon_profile"]
-        if body.mode == "real_website":
-            origin = conn.execute(
-                "SELECT description FROM facts WHERE project_id = ? AND id = 'origin'",
-                (project_id,),
-            ).fetchone()
-            policy = project_meta_from_row(row).scope_policy
-            profile = _target_aware_recon_profile(
-                origin["description"] if origin else "", policy
-            )
-            recon_profile_json = json.dumps(profile.model_dump())
-
-        conn.execute(
-            "UPDATE projects SET bootstrap_enabled = ?, phase = ?, mode = ?, recon_profile = ? WHERE id = ?",
-            (int(bootstrap_enabled), phase, body.mode, recon_profile_json, project_id),
+        get_project_or_404(conn, project_id)
+        raise HTTPException(
+            409,
+            detail={
+                "code": "project_mode_immutable",
+                "message": "Project mode is fixed at creation. Create a separate project for another mode.",
+            },
         )
-        updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        return project_meta_from_row(updated)
 
 
 @router.post("/projects/{project_id}/reason/claim", response_model=ProjectMeta)
@@ -813,8 +793,8 @@ def reopen_project(project_id: str, body: ReopenRequest):
 @router.post("/projects/{project_id}/facts", response_model=Fact, status_code=201)
 def create_fact_direct(project_id: str, body: CreateFactDirectRequest):
     with get_conn() as conn:
-        check_project_active(conn, project_id)
-        get_project_or_404(conn, project_id)
+        row = check_project_active(conn, project_id)
+        validate_ctf_write(row["mode"], body, {"description", "evidence_refs"})
         if body.verification_of:
             validate_facts_exist(conn, project_id, [body.verification_of])
         parent_fact_ids = list(body.parent_fact_ids)
@@ -898,7 +878,8 @@ def create_fact_direct(project_id: str, body: CreateFactDirectRequest):
 @router.put("/projects/{project_id}/facts/{fact_id}", response_model=Fact)
 def update_fact_status(project_id: str, fact_id: str, body: UpdateFactStatusRequest):
     with get_conn() as conn:
-        check_project_active(conn, project_id)
+        project = check_project_active(conn, project_id)
+        require_web_mode(project["mode"])
         row = conn.execute(
             "SELECT * FROM facts WHERE id = ? AND project_id = ?",
             (fact_id, project_id),

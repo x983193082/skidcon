@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from skidc.server.mode_policy import require_web_project
 
 from skidc.server.db import get_conn
 from skidc.server.models import (
@@ -35,7 +36,7 @@ from skidc.server.services import (
     validate_intent_scope,
 )
 
-router = APIRouter(tags=["coverage"])
+router = APIRouter(tags=["coverage"], dependencies=[Depends(require_web_project)])
 
 
 def _row_to_model(conn, row, project_id: str) -> CoverageItem:

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from skidc.server.mode_policy import require_web_project
 
 from skidc.planning import behavior_identity
 
@@ -36,7 +37,7 @@ from skidc.server.services import (
     validate_intent_scope,
 )
 
-router = APIRouter(tags=["hypotheses"])
+router = APIRouter(tags=["hypotheses"], dependencies=[Depends(require_web_project)])
 
 
 @router.get("/projects/{project_id}/hypotheses", response_model=list[Hypothesis])

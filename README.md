@@ -238,8 +238,138 @@ The script validates Compose ownership and refuses to reuse `skidc-server` or
 
 4. Enter the assessment goal and create the project. The Dispatcher selects the Android
    prompt group, provisions the Bridge credential only inside that Android worker, and runs
-   the Fact-Intent loop. Web, API and CTF projects continue to use the default prompt group
-   and receive no Android Bridge credential.
+   the Fact-Intent loop. Web and API projects use the configured default prompt group;
+   CTF projects use the dedicated `ctf` prompt group and receive no Android Bridge metadata.
+
+### CTF / Web mode boundary (P0-A / P0-B)
+
+`POST /projects` requires an explicit `mode`: `ctf` or `real_website`. Missing,
+null or invalid modes return 422. A CTF project can set `bootstrap_enabled: false`
+and start with Reason; this does not turn it into a Web assessment. Web projects
+always disable Bootstrap. The XBOW benchmark client explicitly creates CTF projects.
+
+Mode is fixed at creation. `PUT /projects/{id}/mode` returns 409 with
+`detail.code: project_mode_immutable`, including requests for the current mode.
+Create a separate project to use the other workflow. The UI displays the stored
+mode and no longer offers an in-place mode switch.
+
+CTF dispatch uses its own five prompt templates, a Facts/Intents/Hints blackboard
+projection, and strict output contracts. It does not generate Web Coverage from
+Reason output. CTF cannot use the Android target route or Verify task. Android
+remains under `real_website`. All-mock configurations retain mock prompts but
+their outputs are checked against the project's actual mode.
+
+The Server enforces the stored mode on every Web Coverage, Surface and Hypothesis
+route, as well as phase and Fact-status updates. Calling these routes for CTF
+returns 409 (`engine_mismatch`). CTF Fact and conclusion writes accept only the
+blackboard description and evidence references (plus the conclusion worker);
+Intent creation accepts only sources, description, creator and worker. Explicit
+Web-only fields are rejected with 422 (`ctf_contract_violation`), including null
+values. Shared project, Fact, Intent, conclusion and completion request models
+also reject unknown fields. CTF cannot create Verify logs; Web cannot create
+Bootstrap logs.
+
+CTF retries, heartbeats, expiry and conclusions do not update legacy Web Coverage
+or Hypothesis state. Web labels do not affect the CTF Reason fingerprint. Existing
+mixed data is preserved for compatibility; it is not automatically cleaned,
+migrated or reclassified by this change.
+
+These stages enforce business-level contracts. Processes, storage and several
+transport endpoints are still shared. Separate databases, engine credentials,
+run/lease fencing and network controls remain future work; this is not yet a
+complete security or data-isolation boundary.
+
+For an upgrade, stop and drain the old Dispatcher before replacing the Server,
+Dispatcher and UI together. Update API callers to send `mode` explicitly; old
+workers may emit output rejected by the new CTF contract. Use fresh test projects
+to validate both modes before resuming existing work. This change does not run
+a database migration or start target-side tasks by itself.
+
+### Independent CTF blackboard and runtime protocol preview (P1-A through P1-F)
+
+`skidc.ctf` is a separate application with its own models, SQLite database and
+control token. It does not import the legacy Server or Dispatcher. This preview
+defaults to **draft projects, blackboard reads and human Hints**. An optional
+runtime protocol adds leased tasks and transactional results, but does not launch
+Bootstrap/Reason/Explore processes or containers. Existing projects and the UI
+continue to use the current server; no migration or automatic routing is performed.
+
+To try it locally, provision a separate random token of at least 32 ASCII
+characters in a private file, then run from an environment with `skidc` installed:
+
+```sh
+skidc-ctf serve --db-path ./data/ctf/ctf.db --token-file ./secrets/ctf-control-token
+```
+
+The equivalent source-tree command is `python -m skidc.ctf.cli serve` with the
+same arguments (and `skidc/src` on `PYTHONPATH`). Both paths are required; there is
+no fallback to the legacy database or its credentials. The default address is
+`127.0.0.1:8001`. Token files may end with a newline; do not reuse another
+service's token or commit credentials. This preview is for local integration;
+network/deployment isolation is not yet implemented. The optional runtime API uses
+separate control, dispatcher and execution-manager tokens.
+
+| Endpoint | Behavior |
+|----------|----------|
+| `GET /health` | Reports `engine=ctf`, `schema_version=4`, `execution_enabled=false` and whether the runtime protocol is enabled |
+| `POST /api/ctf/v1/projects` | Creates a draft and its `origin` / `goal` Facts atomically |
+| `GET /api/ctf/v1/projects?limit=100&offset=0` | Lists this database's projects |
+| `GET /api/ctf/v1/projects/{id}/board` | Reads one consistent Facts/Intents/Hints snapshot and revision |
+| `POST /api/ctf/v1/projects/{id}/hints` | Adds a human clue and increments the revision atomically |
+
+The basic endpoints require `Authorization: Bearer <CTF control token>`;
+the optional dispatcher identity can also read projects and boards.
+Create requests contain `title`, `origin`, `goal`, and optional
+`bootstrap_enabled` (default `true`). Optional `mode` must equal `ctf`; Web fields
+and unknown fields are rejected. Hint requests contain `content` and optional
+`creator` (an attribution label, not an authentication identity). Project IDs are
+UUIDs; `origin` and `goal` are project-local IDs. Hint text is not a verified Fact.
+
+The database has a CTF application marker and schema version. This service
+rejects legacy/foreign databases and unsupported versions before writing; the
+updated legacy server also rejects the CTF database before running migrations.
+Never point an older server binary at this file: older releases lack that guard.
+Each application instance owns its database connection factory, and cross-project
+references use composite foreign keys. Schema-1/2/3 preview databases require the
+explicit `skidc-ctf upgrade-copy --source old.db --destination new.db` command;
+the source is kept unchanged and an existing destination is never overwritten.
+Schema-2/3 sources must have all runs stopped and cleanup confirmed before copying.
+This is not a migration from the legacy mixed-mode database.
+
+To enable the protocol for integration tests, additionally supply
+`--dispatcher-token-file` and `--runtime-token-file`. All three role tokens must
+be distinct. Run generations, 30-second task leases, idempotent result receipts
+and persistent stop operations are implemented. An execution-manager confirmation
+is required before a stopped run can resume. There is no background reaper or
+actual execution manager in this preview: expired leases reject writes; an API
+restart or explicit runtime reaper request persists their cleanup work.
+
+Runs may opt into bounded scheduling with `scheduler: {}`. The `tasks/claim-next`
+endpoint then selects Bootstrap, Reason or a fixed batch of Explore tasks and
+returns a transactionally consistent board snapshot. Per-run task/deadline limits,
+no-progress wakeups and Reason conflict budgets survive restarts. Manual claims
+cannot bypass an enabled scheduler. This is a server-side protocol; a polling
+dispatcher and actual worker execution are still pending.
+
+Cairn-style task semantics now include Bootstrap Fact + Complete, Reason
+Complete / Intents / no-op, and Explore producing one Fact. Completion records
+are explicitly `model_reasoned`; fact provenance and dependency checks do not
+constitute independent target verification. Completion and cleanup registration
+commit atomically, while process exit still requires an execution manager.
+See [CTF Cairn rules](docs/ctf-cairn-rules.md) for worker contracts and current limits.
+
+Shared Codex/Claude drivers and a CTF task runner are now available as library
+components. A Docker backend adds per-task ownership, a durable sidecar resource
+journal, start/stop fencing and confirmed container removal before successful
+results are published. It does not reuse legacy project containers. The backend
+currently fixes networking to `none` and is not wired into a production command;
+the API still reports `execution_enabled=false`. Real Docker/model acceptance,
+controlled network access and automatic polling/reaping remain pending.
+
+See [CTF runtime protocol](docs/ctf-runtime-protocol.md) for routes, request shapes,
+copy-upgrade and operational limits. Keep this preview separate from live target
+execution until the backend is accepted against real Docker and watchdogs,
+controlled networking, dispatcher polling and artifact validation are integrated.
 
 The Android workflow combines bounded static analysis (`aapt`, `apktool`, `jadx`) with runtime
 observation and controlled actions: install/start the app, inspect Activity and UI state,

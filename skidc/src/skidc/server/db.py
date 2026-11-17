@@ -329,6 +329,15 @@ def configure(path: Path) -> None:
     global _db_path
     if _db_path is not None:
         return
+    # Check before setting global state, enabling WAL or running legacy migrations.
+    # An independent engine's database must never be adopted by this server.
+    if path.exists():
+        probe = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            if probe.execute("PRAGMA application_id").fetchone()[0] != 0:
+                raise RuntimeError("Selected database belongs to another engine; use a legacy database")
+        finally:
+            probe.close()
     _db_path = path
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:

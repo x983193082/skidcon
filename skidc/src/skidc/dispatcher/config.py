@@ -44,8 +44,12 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
+    "ctf": {
+        name: tokens for name, tokens in DEFAULT_PROMPT_REQUIRED_TOKENS.items()
+        if not name.startswith("verify")
+    },
     "mock": {
-        "reason.md": ("{fact_ids}", "{completion_fact_ids}", "{open_intents}", "{max_intents}"),
+        "reason.md": ("{mode}", "{fact_ids}", "{completion_fact_ids}", "{open_intents}", "{max_intents}"),
         "explore.md": ("{intent_id}",),
         "explore_conclude.md": ("{intent_id}",),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
@@ -304,11 +308,35 @@ class DispatchConfig(BaseModel):
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
         prompt_groups = {
+            "ctf",
             config.runtime.prompt_group,
             *config.runtime.target_prompt_groups.values(),
         }
         for prompt_group in sorted(prompt_groups):
             validate_prompt_resources(prompt_group)
+        return config
+
+    def for_project(self, mode: str, target_type: str) -> "DispatchConfig":
+        """Bind prompts and capabilities to the server-owned, immutable mode."""
+        if mode == "ctf":
+            if target_type == "android":
+                raise ValueError("CTF cannot use the Android workflow")
+            mock = self.runtime.prompt_group == "mock" and all(
+                worker.type == "mock" for worker in self.workers
+            )
+            return self.model_copy(update={
+                "runtime": self.runtime.model_copy(update={"prompt_group": "mock" if mock else "ctf"}),
+                "android_bridge": None,
+                "common_env": {key: value for key, value in self.common_env.items() if not key.startswith("ANDROID_MCP_")},
+                "workers": [worker.model_copy(update={
+                    "env": {key: value for key, value in worker.env.items() if not key.startswith("ANDROID_MCP_")},
+                }) for worker in self.workers],
+            })
+        if mode != "real_website":
+            raise ValueError(f"Unknown project mode: {mode}")
+        config = self.for_target_type(target_type)
+        if config.runtime.prompt_group == "ctf":
+            raise ValueError("Web projects cannot use CTF prompts")
         return config
 
     def for_target_type(self, target_type: str) -> "DispatchConfig":

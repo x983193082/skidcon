@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 skidc = "skidc.cli:main"
+skidc-ctf = "skidc.ctf.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]

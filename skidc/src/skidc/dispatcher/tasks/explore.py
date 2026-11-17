@@ -7,7 +7,8 @@ import time
 from skidc.dispatcher.config import DispatchConfig, WorkerConfig
 from skidc.dispatcher.coverage_profile import normalize_surface_entry
 from skidc.dispatcher.contracts import parse_json_output, validate_explore_payload
-from skidc.dispatcher.prompting import format_dispatch_graph, format_intent_coverage, format_scope_constraints, load_prompt, render_prompt
+from skidc.dispatcher.ctf_contracts import validate_ctf_explore_payload
+from skidc.dispatcher.prompting import format_task_graph, format_intent_coverage, format_scope_constraints, load_prompt, render_prompt
 from skidc.planning import is_surface_mapping_intent
 from skidc.dispatcher.protocol.client import SkidcClient
 from skidc.dispatcher.runtime.cancellation import TaskCancellation
@@ -63,6 +64,8 @@ def _validate_explore_result(
     project: ProjectDetail,
     intent: Intent,
 ) -> tuple[str, dict | None]:
+    if project.project.mode == "ctf":
+        return validate_ctf_explore_payload(payload)
     real_web = project.project.mode == "real_website"
     result = validate_explore_payload(
         payload,
@@ -120,6 +123,8 @@ def run_explore_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
+    config = config.for_project(project.project.mode, project.project.recon_profile.target_type)
+    worker = next(item for item in config.workers if item.name == worker.name)
     driver = get_driver(worker.type)
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
@@ -178,7 +183,7 @@ def run_explore_task(
             {
                 "graph_yaml": write_graph_snapshot_reference(
                     container_manager, container_name,
-                    format_dispatch_graph(project) if project.project.planning_version >= 3 else export_yaml.strip(),
+                    format_task_graph(project, export_yaml),
                     phase="explore_execute",
                 ),
                 "intent_id": intent.id,
@@ -342,7 +347,7 @@ def _resume_conclusion_from_artifact(
         {
             "graph_yaml": write_graph_snapshot_reference(
                 container_manager, container_name,
-                format_dispatch_graph(project) if project.project.planning_version >= 3 else export_yaml.strip(),
+                format_task_graph(project, export_yaml),
                 phase="explore_conclude_resume",
             ),
             "intent_id": intent.id,
@@ -472,7 +477,7 @@ def _try_conclude_fallback(
         {
             "graph_yaml": write_graph_snapshot_reference(
                 container_manager, container_name,
-                format_dispatch_graph(project) if project.project.planning_version >= 3 else export_yaml.strip(),
+                format_task_graph(project, export_yaml),
                 phase="explore_conclude",
             ),
             "intent_id": intent.id,

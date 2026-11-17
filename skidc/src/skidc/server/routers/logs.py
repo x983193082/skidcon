@@ -29,7 +29,15 @@ def _bounded(value: str | None) -> tuple[str | None, bool]:
 @router.post("/projects/{project_id}/logs", response_model=TaskLog, status_code=201)
 def create_task_log(project_id: str, body: CreateTaskLogRequest):
     with get_conn() as conn:
-        get_project_or_404(conn, project_id)
+        project = get_project_or_404(conn, project_id)
+        if (
+            (project["mode"] == "ctf" and body.task_type == "verify")
+            or (project["mode"] == "real_website" and body.task_type == "bootstrap")
+        ):
+            raise HTTPException(409, detail={
+                "code": "engine_mismatch",
+                "message": "Task type does not belong to this project workflow.",
+            })
         log_id = next_log_id(conn, project_id)
         now = utcnow()
         stdout, stdout_truncated = _bounded(body.stdout)
